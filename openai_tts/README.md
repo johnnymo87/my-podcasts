@@ -24,3 +24,22 @@ poetry run python -m openai_tts --model tts-1-hd --voice coral --output speech.m
 - `--model`: Choose between `tts-1` and `tts-1-hd`.
 - `--voice`: Select a voice like `alloy`, `ash`, `coral`, etc.
 - `--output`: Specify the output file name.
+- `--input-file`: Specify the input file name (optional).
+
+If you have the text saved to a file, you can send the entire file to the CLI like so:
+
+```bash
+cat ~/Documents/hope-for-cynics/hope-for-cynics-chapter-01-signs-and-symptoms.txt | poetry run python -m openai_tts --model tts-1-hd --voice coral --output speech.mp3
+```
+
+Or like so:
+
+```bash
+poetry run python -m openai_tts --model tts-1-hd --voice coral --output speech.mp3 < ~/Documents/hope-for-cynics/hope-for-cynics-chapter-01-signs-and-symptoms.txt
+```
+
+Or like so:
+
+```bash
+poetry run python -m openai_tts --model tts-1-hd --voice coral --output speech.mp3 --input-file ~/Documents/hope-for-cynics/hope-for-cynics-chapter-01-signs-and-symptoms.txt
+```
