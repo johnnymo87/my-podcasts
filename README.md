@@ -1,6 +1,13 @@
-# gen-ai-python-playground
+# My Podcasts
 
-This codebase is a collection of scripts, CLIs, etc. that use python to accomplish various ends by interacting with generative AI service providers' APIs.
+This codebase is a collection of scripts, CLIs, etc. that I use to:
+1. Turn text into audio.
+1. Produce a podcast RSS feed.
+1. Host via [S3](https://www.thepolyglotdeveloper.com/2016/04/host-a-podcast-for-cheap-on-amazons-s3-service/).
+
+## Alternatives
+
+For $1/month, I could use [Mono](https://mono.fm/) to host podcasts. This covers 50GB of bandwidth used (~ 1500 downloads). All I need to do is bring the audio files.
 
 ## Install
 

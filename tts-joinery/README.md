@@ -31,10 +31,12 @@ Your `OPENAI_API_KEY` should be set in your `.envrc` file and loaded using `dire
 Generate speech from a text file:
 
 ```bash
-ttsjoin --input-file ~/Documents/hope-for-cynics/hope-for-cynics-chapter-01-signs-and-symptoms.txt \
-        --output-file speech.mp3 \
-        --model tts-1-hd \
-        --voice ash
+poetry run \
+  ttsjoin \
+  --input-file ~/Documents/hope-for-cynics/hope-for-cynics-chapter-01-signs-and-symptoms.txt \
+  --output-file audio/hope-for-cynics-chapter-01-signs-and-symptoms.mp3 \
+  --model tts-1-hd \
+  --voice ash
 ```
 
 ### Options and Flags
