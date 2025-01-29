@@ -13,6 +13,7 @@ repos:
       args: ["--strict", "--pretty", "--show-error-codes"]
       additional_dependencies:
         - click
+        - pytest
         - types-beautifulsoup4
 - repo: https://github.com/psf/black
   rev: 24.10.0

@@ -79,3 +79,8 @@ For $1/month, I could use [Mono](https://mono.fm/) to host podcasts. This covers
   ```
   pre-commit run --all-files
   ```
+
+* Run the tests.
+  ```
+  poetry run pytest --cov --cov-report=term-missing
+  ```
