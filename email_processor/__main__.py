@@ -5,7 +5,6 @@ from typing import Optional, TextIO
 import click
 
 from email_processor.email_processor import (
-    EmailParsingError,
     NoHtmlContentFoundError,
     process_raw_email,
 )
@@ -43,7 +42,7 @@ def main(
     # Process the email
     try:
         cleaned_text = process_raw_email(content)
-    except (NoHtmlContentFoundError, EmailParsingError) as e:
+    except NoHtmlContentFoundError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 

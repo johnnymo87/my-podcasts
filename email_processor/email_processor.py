@@ -14,10 +14,6 @@ class NoHtmlContentFoundError(Exception):
     """Raised when no HTML part is found in the email."""
 
 
-class EmailParsingError(Exception):
-    """Raised for any issues parsing the raw email."""
-
-
 def _extract_payload_as_str(part: Message) -> str:
     """
     Helper to get the payload from a Message and ensure it's returned as a string,
@@ -29,7 +25,7 @@ def _extract_payload_as_str(part: Message) -> str:
     elif isinstance(payload, str):
         return payload
     else:
-        raise EmailParsingError(f"Expected bytes or str but got: {type(payload)}")
+        raise TypeError(f"Expected bytes or str but got: {type(payload)}")
 
 
 def extract_html_part(raw_email_str: str) -> str:
@@ -39,10 +35,7 @@ def extract_html_part(raw_email_str: str) -> str:
         NoHtmlContentFoundError: if no HTML part is found
         EmailParsingError: if email parsing fails
     """
-    try:
-        msg: Message = email.message_from_string(raw_email_str)
-    except Exception as exc:
-        raise EmailParsingError(f"Failed to parse email: {exc}") from exc
+    msg: Message = email.message_from_string(raw_email_str)
 
     if msg.is_multipart():
         # Walk through the email parts to find an HTML part
