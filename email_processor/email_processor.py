@@ -34,7 +34,6 @@ def extract_html_part(raw_email_str: str) -> str:
     Extracts and returns the HTML content from a raw email string.
     Raises:
         NoHtmlContentFoundError: if no HTML part is found
-        EmailParsingError: if email parsing fails
     """
     msg: Message = email.message_from_string(raw_email_str)
 
@@ -80,7 +79,7 @@ def clean_html(html_content: str) -> str:
     # 4. Extract text
     text_content = soup.get_text()
 
-    # 5. Remove artificial line breaks (quoted-printable = \n)
+    # 5. Remove artificial line breaks (e.g. "= \n")
     text_content = re.sub(r"=\s*\n", "", text_content)
 
     # 6. Collapse runs of blank lines into one double-newline
@@ -98,46 +97,33 @@ def clean_html(html_content: str) -> str:
     return cleaned
 
 
-def extract_metadata(raw_email_str: str, html_content: str) -> tuple[str, str, str]:
+def extract_date_and_subject(raw_email_str: str) -> tuple[str, str]:
     """
-    Return metadata for naming the output file:
-      (date_part, title_text, first_header_text)
-    - date_part is 'YYYY-MM-DD' derived from the Date header.
-    - title_text is the <title> from the HTML (or "Untitled" if missing).
-    - first_header_text is the text from the first <h1>.. <h6> found (or
-      "NoHeader" if none found).
+    Return (date_part, subject_slug), where:
+      - date_part = 'YYYY-MM-DD' from the 'Date' header
+      - subject_slug = the 'Subject' header, minus punctuation, spaces replaced
+        by dashes
     """
-
-    # 1. Parse the email for the date
     msg: Message = email.message_from_string(raw_email_str)
-    raw_date = msg["Date"]
 
+    # 1. Parse the Date header
+    raw_date = msg.get("Date", "")
     try:
         dt = parsedate_to_datetime(raw_date)
         date_part = dt.strftime("%Y-%m-%d")
     except Exception:
-        # fallback if Date header is missing or can't parse
+        # Fallback if Date header is missing or can't parse
         date_part = "9999-12-31"
 
-    # 2. Parse the HTML to get the <title> and the first <h#> tag
-    soup = BeautifulSoup(html_content, "html.parser")
+    # 2. Parse the Subject header
+    raw_subject = msg.get("Subject", "No Subject")
+    # Remove punctuation (e.g. ":"), then replace runs of whitespace with a dash
+    # Example: "My apocalypse: the end?" -> "My-apocalypse-the-end"
+    # (You could refine as needed.)
+    without_punc = re.sub(r"[^\w\s-]", "", raw_subject)
+    subject_slug = re.sub(r"\s+", "-", without_punc.strip())
 
-    title_text = "Untitled"
-    title_tag = soup.find("title")
-    if title_tag:
-        # .get_text(strip=True) to remove extra whitespace
-        possible_title = title_tag.get_text(strip=True)
-        if possible_title:
-            title_text = possible_title
-
-    # Try to find the first heading, e.g. <h1>, <h2>, ...
-    first_header_text = "NoHeader"
-    # This regex matches h1, h2, h3, h4, h5, or h6
-    heading_tag = soup.find(re.compile(r"^h[1-6]$"))
-    if heading_tag and heading_tag.get_text(strip=True):
-        first_header_text = heading_tag.get_text(strip=True)
-
-    return date_part, title_text, first_header_text
+    return date_part, subject_slug
 
 
 def process_raw_email(raw_email_str: str) -> tuple[str, str]:
@@ -145,19 +131,13 @@ def process_raw_email(raw_email_str: str) -> tuple[str, str]:
     High-level function:
       1) Extracts the HTML part from the raw email,
       2) Cleans it for TTS,
-      3) Extracts 3 metadata strings (date_part, title, first_header),
-      4) Returns (cleaned_text, recommended_filename_no_path).
+      3) Extracts (date_part, subject_slug),
+      4) Returns (cleaned_text, recommended_filename).
     """
     html_content = extract_html_part(raw_email_str)
     cleaned_text = clean_html(html_content)
 
-    date_part, title_text, first_header_text = extract_metadata(
-        raw_email_str, html_content
-    )
-    # Replace spaces in title with dashes
-    title_text_slug = re.sub(r"\s+", "-", title_text.strip())
-    first_header_text_slug = re.sub(r"\s+", "-", first_header_text.strip())
-    # e.g. "2025-01-27-Title-Of-Email-The-First-Header.txt"
-    recommended_filename = f"{date_part}-{title_text_slug}-{first_header_text_slug}.txt"
+    date_part, subject_slug = extract_date_and_subject(raw_email_str)
+    recommended_filename = f"{date_part}-{subject_slug}.txt"
 
     return cleaned_text, recommended_filename

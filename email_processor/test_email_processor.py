@@ -210,9 +210,10 @@ def test_clean_html_blockquote_markers() -> None:
 
 def test_process_raw_email_generates_filename(tmp_path: Path) -> None:
     """Check that process_raw_email returns a recommended filename
-    based on the email's Date, <title>, and first heading.
+    based on the email's Date and Subject, removing punctuation.
     """
     raw_email = """\
+Subject: My apocalypse: the end is near!
 Date: Tue, 01 Feb 2022 10:11:12 +0000
 Content-Type: text/html
 MIME-Version: 1.0
@@ -230,18 +231,19 @@ MIME-Version: 1.0
 
     cleaned_text, recommended_filename = process_raw_email(raw_email)
     assert cleaned_text is not None
-    # The date was 2022-02-01
-    # title is "This is the Title"
-    # first header is "My Main Header"
-    # So we expect: "2022-02-01-This-is-the-Title-My-Main-Header.txt"
-    assert recommended_filename == "2022-02-01-This-is-the-Title-My-Main-Header.txt"
 
-    # Optionally, write it out in a temp dir and confirm the file is written:
+    # Date is 2022-02-01
+    # Subject is "My apocalypse: the end is near!"
+    # After removing punctuation, it becomes "My apocalypse the end is near"
+    # Then spaces => dashes => "My-apocalypse-the-end-is-near"
+    # Final => "2022-02-01-My-apocalypse-the-end-is-near.txt"
+    assert recommended_filename == "2022-02-01-My-apocalypse-the-end-is-near.txt"
+
+    # Optionally verify writing the output to disk
     emails_dir = tmp_path / "emails"
     emails_dir.mkdir(exist_ok=True)
     out_path = emails_dir / recommended_filename
     out_path.write_text(cleaned_text, encoding="utf-8")
 
-    # Confirm the file got created
     assert out_path.exists()
     assert out_path.read_text(encoding="utf-8") == cleaned_text

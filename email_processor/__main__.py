@@ -22,9 +22,10 @@ def main(
     input_file: Optional[TextIO],
     raw_email: Optional[str],
 ) -> None:
-    """Process raw email content into clean text suitable for TTS,
+    """
+    Process raw email content into clean text suitable for TTS,
     then save the result in emails/ with a filename derived from the
-    email metadata (Date header, <title>, and first <h#>).
+    Date and Subject.
     """
 
     # 1. Determine input source
