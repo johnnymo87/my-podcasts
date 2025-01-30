@@ -166,3 +166,36 @@ Just some text, no HTML here.
 """
     with pytest.raises(NoHtmlContentFoundError):
         process_raw_email(raw_email)
+
+
+def test_clean_html_blockquote_markers() -> None:
+    """
+    Test that blockquote tags in the HTML are annotated with
+    'Block quote begins.' and 'Block quote ends.' in the cleaned text.
+    """
+    html_content = """
+    <html>
+      <body>
+        <p>Regular paragraph</p>
+        <blockquote>
+          <p>Blockquoted text, line one.</p>
+          <p>Blockquoted text, line two.</p>
+        </blockquote>
+        <p>Another paragraph</p>
+      </body>
+    </html>
+    """
+
+    cleaned = clean_html(html_content)
+
+    # Check that the blockquote markers are present
+    assert "Block quote begins." in cleaned
+    assert "Block quote ends." in cleaned
+
+    # Check that original content is still present
+    assert "Blockquoted text, line one." in cleaned
+    assert "Blockquoted text, line two." in cleaned
+
+    # Ensure paragraphs remain
+    assert "Regular paragraph" in cleaned
+    assert "Another paragraph" in cleaned

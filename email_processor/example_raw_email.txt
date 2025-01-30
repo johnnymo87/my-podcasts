@@ -1,0 +1,53 @@
+Delivered-To: test@example.com
+Received: by example.com
+X-Google-Smtp-Source: test
+X-Received: by example.com
+ARC-Seal: a=rsa-sha256; t=12345;
+ARC-Message-Signature: a=rsa-sha256;
+ARC-Authentication-Results: mx.google.com; dkim=pass; spf=pass; dmarc=pass
+Return-Path: <test@example.com>
+Received: from example.com
+Received-SPF: pass
+Authentication-Results: mx.google.com; dkim=pass; spf=pass; dmarc=pass
+X-MSFBL: test
+DKIM-Signature: v=1; a=rsa-sha256;
+To: test@example.com
+Message-ID: <test@example.com>
+Date: Mon, 27 Jan 2025 19:32:33 +0000
+Content-Type: multipart/alternative; boundary="_----f2twXdskIRMmmjlOgtABsQ===_17/C5-49896-15FD7976"
+MIME-Version: 1.0
+X-Campaign-ID: 123
+List-Unsubscribe: <https://example.com>,<mailto:test@example.com>
+X-Message-ID: test
+X-Feedback-ID: test
+Reply-To: noreply@example.com
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+Subject: Test Email
+From: Test Sender <noreply@example.com>
+Feedback-ID: test
+
+--_----f2twXdskIRMmmjlOgtABsQ===_17/C5-49896-15FD7976
+Content-Transfer-Encoding: quoted-printable
+Content-Type: text/plain; charset="UTF-8"
+
+This is a test email.=
+=20
+This is the first paragraph.=
+=20
+This is the second paragraph.=
+=20
+> This is a block quote.=
+> It has multiple lines.=
+=20
+The body contains some=
+ text.
+
+--_----f2twXdskIRMmmjlOgtABsQ===_17/C5-49896-15FD7976
+Content-Transfer-Encoding: quoted-printable
+Content-Type: text/html; charset="UTF-8"
+
+<!DOCTYPE html><html><head></head><body style=3D"width: 100%; -webkit-font-smoothing: antialiased; font-family: Helvetica, Arial, sans-serif; font-size: 16px; line-height: 150%; margin: 0; padding: 0;">
+<div style=3D"display: none; max-height: 0px; overflow: hidden;">This is the preview text.</div>
+<p>This is a test email.</p><p>This is the first paragraph.</p><p>This is the second paragraph.</p><blockquote><p>This is a block quote.</p><p>It has multiple lines.</p></blockquote><p>The body contains some HTML,=
+including <a href="https://example.com">a link</a>.</p></body></html>
+--_----f2twXdskIRMmmjlOgtABsQ===_17/C5-49896-15FD7976--
