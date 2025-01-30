@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import email
 import re
+from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -68,45 +69,95 @@ def clean_html(html_content: str) -> str:
         tag.decompose()
 
     # 2. Insert blockquote markers
-    #    We'll add a short text snippet before and after each blockquote
     for bq_tag in soup.find_all("blockquote"):
         bq_tag.insert_before("\n\nBlock quote begins.\n")
         bq_tag.insert_after("\n\nBlock quote ends.\n")
 
     # 3. Insert paragraph separators by adding extra newlines before <p>
     for p_tag in soup.find_all("p"):
-        p_tag.insert_before("\n\n")  # double newlines
+        p_tag.insert_before("\n\n")
 
-    # 4. Get text. Using no separator or a single space is fine,
-    #    but we generally want to preserve the newlines we inserted.
+    # 4. Extract text
     text_content = soup.get_text()
 
-    # 5. Remove artificial line breaks from quoted-printable
-    #    (i.e., the '=  \n' style breaks).
+    # 5. Remove artificial line breaks (quoted-printable = \n)
     text_content = re.sub(r"=\s*\n", "", text_content)
 
-    # 6. Collapse runs of blank lines into a single double-newline
+    # 6. Collapse runs of blank lines into one double-newline
     text_content = re.sub(r"\n\s*\n\s*\n+", "\n\n", text_content)
 
-    # 7. Convert runs of spaces/tabs (but not newlines) into a single space.
-    #    This pattern means “one or more whitespace, excluding newlines.”
+    # 7. Convert runs of spaces/tabs (not newlines) into a single space
     text_content = re.sub(r"[^\S\r\n]+", " ", text_content)
 
-    # 8. Trim trailing spaces before newlines, so we don’t end up with " \n"
+    # 8. Trim trailing spaces before newlines
     text_content = re.sub(r" +(\n)", r"\1", text_content)
 
-    # 9. Finally, strip leading/trailing spaces and newlines
+    # 9. Finally, strip leading/trailing whitespace
     cleaned = text_content.strip()
 
     return cleaned
 
 
-def process_raw_email(raw_email_str: str) -> str:
+def extract_metadata(raw_email_str: str, html_content: str) -> tuple[str, str, str]:
+    """
+    Return metadata for naming the output file:
+      (date_part, title_text, first_header_text)
+    - date_part is 'YYYY-MM-DD' derived from the Date header.
+    - title_text is the <title> from the HTML (or "Untitled" if missing).
+    - first_header_text is the text from the first <h1>.. <h6> found (or
+      "NoHeader" if none found).
+    """
+
+    # 1. Parse the email for the date
+    msg: Message = email.message_from_string(raw_email_str)
+    raw_date = msg["Date"]
+
+    try:
+        dt = parsedate_to_datetime(raw_date)
+        date_part = dt.strftime("%Y-%m-%d")
+    except Exception:
+        # fallback if Date header is missing or can't parse
+        date_part = "9999-12-31"
+
+    # 2. Parse the HTML to get the <title> and the first <h#> tag
+    soup = BeautifulSoup(html_content, "html.parser")
+
+    title_text = "Untitled"
+    title_tag = soup.find("title")
+    if title_tag:
+        # .get_text(strip=True) to remove extra whitespace
+        possible_title = title_tag.get_text(strip=True)
+        if possible_title:
+            title_text = possible_title
+
+    # Try to find the first heading, e.g. <h1>, <h2>, ...
+    first_header_text = "NoHeader"
+    # This regex matches h1, h2, h3, h4, h5, or h6
+    heading_tag = soup.find(re.compile(r"^h[1-6]$"))
+    if heading_tag and heading_tag.get_text(strip=True):
+        first_header_text = heading_tag.get_text(strip=True)
+
+    return date_part, title_text, first_header_text
+
+
+def process_raw_email(raw_email_str: str) -> tuple[str, str]:
     """
     High-level function:
       1) Extracts the HTML part from the raw email,
       2) Cleans it for TTS,
-      3) Returns the cleaned string.
+      3) Extracts 3 metadata strings (date_part, title, first_header),
+      4) Returns (cleaned_text, recommended_filename_no_path).
     """
     html_content = extract_html_part(raw_email_str)
-    return clean_html(html_content)
+    cleaned_text = clean_html(html_content)
+
+    date_part, title_text, first_header_text = extract_metadata(
+        raw_email_str, html_content
+    )
+    # Replace spaces in title with dashes
+    title_text_slug = re.sub(r"\s+", "-", title_text.strip())
+    first_header_text_slug = re.sub(r"\s+", "-", first_header_text.strip())
+    # e.g. "2025-01-27-Title-Of-Email-The-First-Header.txt"
+    recommended_filename = f"{date_part}-{title_text_slug}-{first_header_text_slug}.txt"
+
+    return cleaned_text, recommended_filename

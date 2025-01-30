@@ -1,3 +1,10 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
 import pytest
 
 from email_processor.email_processor import (
@@ -148,7 +155,7 @@ Content-Type: text/html
 
 --ABC--
 """
-    cleaned_text = process_raw_email(raw_email)
+    cleaned_text, _ = process_raw_email(raw_email)
     assert "Preview text" not in cleaned_text
     assert "Some visible paragraph." in cleaned_text
 
@@ -199,3 +206,42 @@ def test_clean_html_blockquote_markers() -> None:
     # Ensure paragraphs remain
     assert "Regular paragraph" in cleaned
     assert "Another paragraph" in cleaned
+
+
+def test_process_raw_email_generates_filename(tmp_path: Path) -> None:
+    """Check that process_raw_email returns a recommended filename
+    based on the email's Date, <title>, and first heading.
+    """
+    raw_email = """\
+Date: Tue, 01 Feb 2022 10:11:12 +0000
+Content-Type: text/html
+MIME-Version: 1.0
+
+<html>
+<head>
+    <title>This is the Title</title>
+</head>
+<body>
+<h1>My Main Header</h1>
+<p>Some text here.</p>
+</body>
+</html>
+"""
+
+    cleaned_text, recommended_filename = process_raw_email(raw_email)
+    assert cleaned_text is not None
+    # The date was 2022-02-01
+    # title is "This is the Title"
+    # first header is "My Main Header"
+    # So we expect: "2022-02-01-This-is-the-Title-My-Main-Header.txt"
+    assert recommended_filename == "2022-02-01-This-is-the-Title-My-Main-Header.txt"
+
+    # Optionally, write it out in a temp dir and confirm the file is written:
+    emails_dir = tmp_path / "emails"
+    emails_dir.mkdir(exist_ok=True)
+    out_path = emails_dir / recommended_filename
+    out_path.write_text(cleaned_text, encoding="utf-8")
+
+    # Confirm the file got created
+    assert out_path.exists()
+    assert out_path.read_text(encoding="utf-8") == cleaned_text
