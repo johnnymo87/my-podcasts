@@ -52,6 +52,8 @@ class EmailProcessor:
         # (Any future enhancements, such as harvesting links, can be built in here.)
 
         cleaned_body = self._clean_html(str(soup))
+        # Inline any footnotes in the cleaned text.
+        cleaned_body = self._inline_footnotes(cleaned_body)
 
         return {
             "date": date_str,
@@ -151,3 +153,35 @@ class EmailProcessor:
         text_content = re.sub(r" +(\n)", r"\1", text_content)
 
         return text_content.strip()
+
+    def _inline_footnotes(self, text: str) -> str:
+        """
+        Finds and inlines footnotes. A footnote is detected as a line starting
+        with a pointer (e.g. "[1]") at the bottom of the text. The corresponding
+        pointer in the main body is replaced with an inline version containing
+        the footnote text (wrapped with "Footnote begins." and "Footnote ends.")
+        and the footnote definition is removed from the bottom.
+        """
+        # Look for footnotes defined in lines at the bottom.
+        # For example: a line like "[1] This is the footnote text."
+        footnote_pattern = re.compile(r"^\[(\d+)\]\s*(.+)$", flags=re.MULTILINE)
+        # Collect all footnotes into a dictionary: { "1": "This is the footnote text." }
+        footnotes = dict(footnote_pattern.findall(text))
+
+        # Remove all lines that represent footnotes from the text.
+        text_without_footnotes = footnote_pattern.sub("", text)
+
+        # For each occurrence of a footnote pointer in the main text (e.g. "[1]"),
+        # replace it with an inline version containing the footnote text.
+        def replace_pointer(match: re.Match[str]) -> str:
+            num = match.group(1)
+            if num in footnotes:
+                return f"Footnote begins. {footnotes[num].strip()} Footnote ends."
+            else:
+                raise ValueError(f"Footnote {num} not found.")
+
+        inline_pattern = re.compile(r"\[(\d+)\]")
+        text_inlined = inline_pattern.sub(replace_pointer, text_without_footnotes)
+
+        # Clean up any extra newlines and return the final result.
+        return text_inlined.strip()

@@ -245,3 +245,66 @@ def test_integration_full_processing() -> None:
     assert "Block quote ends." in body
     # There should be a double newline before each paragraph (heuristic)
     assert "\n\n" in body
+
+
+def test_footnotes_inlining() -> None:
+    """
+    Test that a footnote pointer in the main text is replaced with an inline
+    version (without the original pointer) that includes the footnote text, and
+    that the standalone footnote definition is removed.
+    """
+    raw_email = """\
+Date: Thu, 30 Jan 2025 15:00:00 +0000
+Subject: Footnote Test
+Content-Type: text/html; charset="UTF-8"
+MIME-Version: 1.0
+
+<html>
+  <body>
+    <p>This is main text with a footnote pointer [1] in it.</p>
+    <p>Some additional text [2] in the body.</p>
+    <hr>
+    <p>[1] This is the first footnote content that should be inlined.</p>
+    <p>[2] Second footnote, inlining as well.</p>
+  </body>
+</html>
+"""
+    processor = EmailProcessor(raw_email)
+    result = processor.parse()
+    body = result["body"]
+
+    # The pointers should be replaced with the inlined footnotes, without the
+    # pointer strings.
+    assert (
+        "Footnote begins. This is the first footnote content that should be inlined."
+        " Footnote ends." in body
+    )
+    assert "Footnote begins. Second footnote, inlining as well. Footnote ends." in body
+    # Confirm that the original pointers [1] and [2] do not remain.
+    assert "[1]" not in body
+    assert "[2]" not in body
+
+
+def test_raise_value_error_on_missing_footnote() -> None:
+    """
+    Test that if a footnote pointer is encountered in the main text but no matching
+    footnote definition exists, a ValueError is raised.
+    """
+    raw_email = """\
+Date: Fri, 31 Jan 2025 12:00:00 +0000
+Subject: Missing Footnote Test
+Content-Type: text/html; charset="UTF-8"
+MIME-Version: 1.0
+
+<html>
+  <body>
+    <p>Main text with an undefined footnote pointer [3].</p>
+    <hr>
+    <p>[1] This footnote is defined, but pointer [3] is not.</p>
+  </body>
+</html>
+"""
+    processor = EmailProcessor(raw_email)
+    with pytest.raises(ValueError) as excinfo:
+        processor.parse()
+    assert "Footnote 3 not found." in str(excinfo.value)
