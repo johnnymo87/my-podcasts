@@ -1,86 +1,64 @@
 # My Podcasts
 
-This codebase is a collection of scripts, CLIs, etc. that I use to:
-1. Turn text into audio.
-1. Produce a podcast RSS feed.
-1. Host via [S3](https://www.thepolyglotdeveloper.com/2016/04/host-a-podcast-for-cheap-on-amazons-s3-service/).
+This repository is a collection of scripts and utilities that I use to produce audio files and generate podcast feeds. For example, you’ll find tools to process emails into text for text-to-speech conversion and to subsequently create podcast-ready artifacts.
 
-## Alternatives
+## Overview
 
-For $1/month, I could use [Mono](https://mono.fm/) to host podcasts. This covers 50GB of bandwidth used (~ 1500 downloads). All I need to do is bring the audio files.
+- **Email Processor:** Converts raw email content into cleaned text for TTS usage. Its new, data‑driven API is now encapsulated in a public class (`EmailProcessor`) so that you (and future downstream components, like an RSS feed builder) can consume a well‐structured dictionary.
+- **TTS Joinery:** A text-to-speech helper that overcomes API limitations by chunking the content.
 
-## Install
+## Setup
 
-### Environment variables
+For instructions on setting up your environment, installing Python (via pyenv), Poetry, and loading environment variables with direnv, please refer to the [Installation section](#installation) below.
 
-1. Copy `.envrc.example` to `.envrc`.
-   ```
-   cp .envrc.example .envrc
-   ```
+### Installation
 
-1. Fill out `.envrc`.
-
-1. Source the environment variables defined in `.envrc`.
-   ```
-   direnv allow
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/yourusername/my-podcasts.git
+   cd my-podcasts
    ```
 
-### Python
+2. **Environment variables:**
+   - Rename `.envrc.example` to `.envrc` and fill in your keys.
+   - Allow direnv:
+     ```bash
+     direnv allow
+     ```
 
-1. Install or update `pyenv` (and `python-build` to get access to recent releases of python).
-   ```
-   brew update && brew install python-build pyenv
-   brew update && brew upgrade python-build pyenv
-   ```
+3. **Python Setup:**
+   - Use pyenv to install Python (see [pyenv installation](https://github.com/pyenv/pyenv#installation)).
+   - The required Python version is specified in `.python-version`.
 
-1. Configure your shell to enable shims.
-   ```
-   # in e.g. ~/.bash_profile
+4. **Install Dependencies:**
+   - Install Poetry if you haven't already:
+     ```bash
+     curl -sSL https://install.python-poetry.org | python3 -
+     ```
+   - Then install project dependencies:
+     ```bash
+     poetry install --with dev
+     ```
 
-   if which pyenv > /dev/null; then
-     eval "$(pyenv init -)"
-   fi
-   ```
+5. **Pre-commit Hooks:**
+   - Install pre-commit hooks:
+     ```bash
+     pre-commit install
+     ```
 
-1. Install python.
-   ```
-   pyenv install $(cat .python-version)
-   ```
+6. **Running Tests:**
+   - Execute the test suite using pytest:
+     ```bash
+     poetry run pytest
+     ```
 
-### Poetry
+## Development and CI
 
-1. Install Poetry [via its official installer](https://python-poetry.org/docs/#installing-with-the-official-installer).
+- **Local Testing:** Run tests with `poetry run pytest`.
+- **CI Pipeline:** On each push and pull request, the GitHub Actions workflow runs tests, style checks, and code coverage reports. See `.github/workflows/ci.yaml` for details.
 
-### Python dependencies
+For more module-specific details (e.g. using the email processor or TTS tools), please see the README files in the respective subdirectories.
 
-1. Install dependencies.
-   ```
-   poetry install
-   ```
+---
 
-1. Initialize the poetry virtual environment.
-   ```
-   poetry env activate
-   ```
-
-1. Install the pre-commit hooks.
-   ```
-   pre-commit install
-   ```
-
-## Development
-
-* Initialize the poetry virtual environment.
-  ```
-  poetry env activate
-  ```
-
-* Run the auto formatter manually (although it will run automatically as a pre-commit hook).
-  ```
-  pre-commit run --all-files
-  ```
-
-* Run the tests.
-  ```
-  poetry run pytest --cov --cov-report=term-missing
-  ```
+Happy coding!

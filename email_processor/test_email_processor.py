@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -7,243 +8,240 @@ if TYPE_CHECKING:
 
 import pytest
 
-from email_processor.email_processor import (
-    NoHtmlContentFoundError,
-    clean_html,
-    extract_html_part,
-    process_raw_email,
-)
+from email_processor.api import EmailProcessor, NoHtmlContentFoundError
 
+# ------------------------------------------------------------------------------
+# Sample Emails for Testing
+# ------------------------------------------------------------------------------
 
-def test_extract_html_part_multi_multipart() -> None:
-    """
-    Test that we can extract HTML content from a multipart email.
-    """
-    raw_email = """\
-Content-Type: multipart/alternative; boundary="ABC"
+# A well-formed multipart email with both plain text and HTML parts.
+MULTIPART_EMAIL = """\
+Delivered-To: test@example.com
+Date: Mon, 27 Jan 2025 19:32:33 +0000
+Subject: Test Email
+Content-Type: multipart/alternative; boundary="BOUNDARY"
 MIME-Version: 1.0
 
---ABC
-Content-Type: text/plain
+--BOUNDARY
+Content-Type: text/plain; charset="UTF-8"
 
-This is plain text content.
+This is plain text.
 
---ABC
-Content-Type: text/html
+--BOUNDARY
+Content-Type: text/html; charset="UTF-8"
 
-<html><body><p>This is an HTML part.</p></body></html>
-
---ABC--
+<html>
+  <head><title>Test Email</title></head>
+  <body>
+    <p>This is the <strong>HTML</strong> content.</p>
+  </body>
+</html>
+--BOUNDARY--
 """
-    html_content = extract_html_part(raw_email)
-    assert "<html>" in html_content
-    assert "<body>" in html_content
-    assert "This is an HTML part." in html_content
 
-
-def test_extract_html_part_single_part() -> None:
-    """
-    Test that we can extract HTML content from a single-part (non-multipart) email
-    that is of type text/html.
-    """
-    raw_email = """\
-Content-Type: text/html
+# A single-part email that only contains an HTML part.
+SINGLEPART_EMAIL = """\
+Date: Tue, 28 Jan 2025 10:00:00 +0000
+Subject: SinglePart Test
+Content-Type: text/html; charset="UTF-8"
 MIME-Version: 1.0
 
 <html>
-<head></head>
-<body>
-    <p>Single part HTML content.</p>
-</body>
+  <head></head>
+  <body>
+    <p>Single part email content.</p>
+  </body>
 </html>
 """
-    html_content = extract_html_part(raw_email)
-    assert "Single part HTML content." in html_content
 
-
-def test_extract_html_no_html_part() -> None:
-    """
-    Test that NoHtmlContentFoundError is raised if there's no text/html part.
-    """
-    raw_email = """\
-Content-Type: text/plain
+# An email which does not contain any HTML part.
+NO_HTML_EMAIL = """\
+Content-Type: text/plain; charset="UTF-8"
 MIME-Version: 1.0
 
-Plain text only.
+Just plain text, no HTML here.
 """
-    with pytest.raises(NoHtmlContentFoundError):
-        extract_html_part(raw_email)
 
+# An email that exercises the HTML cleaning logic.
+# It includes hidden content, artificial line breaks, a blockquote, and paragraphs.
+CLEANING_EMAIL = """\
+Date: Wed, 29 Jan 2025 12:00:00 +0000
+Subject: Cleaning Test!
+Content-Type: text/html; charset="UTF-8"
+MIME-Version: 1.0
 
-def test_clean_html_removes_display_none() -> None:
-    """
-    Test that elements with style="display: none" are removed from final text.
-    """
-    html_content = """\
 <html>
-<head></head>
-<body>
+  <body>
     <div style="display: none;">Hidden preview text</div>
-    <p>Visible content</p>
-</body>
+    <p>First paragraph with an artificial line break=
+    \ncontinued on the same paragraph.</p>
+    <blockquote>
+      <p>Quote Line 1.</p>
+      <p>Quote Line 2.</p>
+    </blockquote>
+    <p>Second paragraph.</p>
+  </body>
 </html>
 """
-    cleaned = clean_html(html_content)
-    assert "Hidden preview text" not in cleaned
-    assert "Visible content" in cleaned
 
-
-def test_clean_html_removes_artificial_breaks() -> None:
-    """
-    Test that artificial line breaks (e.g. "= \n") are removed,
-    but standard line breaks between paragraphs are preserved.
-    """
-    html_content = """\
-<html>
-<body>
-    <p>First paragraph</p>
-    Second line=
-    more text
-
-    <p>Second paragraph</p>
-    Another=
-    line=
-    break
-</body>
-</html>
-"""
-    cleaned = clean_html(html_content)
-
-    # Check that the artificial breaks "= \n" or "=  \n" are removed
-    assert "= " not in cleaned
-
-    # Check paragraphs remain separated by at least one blank line
-    # because we inserted `\n\n` before each <p>
-    paragraphs = cleaned.split("\n\n")
-    # We expect at least 2 paragraphs
-    assert len(paragraphs) >= 2
-    assert "First paragraph" in paragraphs[0]
-    assert "Second paragraph" in paragraphs[1]
-
-
-def test_process_raw_email_integration() -> None:
-    """
-    Test the high-level process_raw_email function:
-      1) extracts HTML part,
-      2) cleans it,
-      3) returns the cleaned text.
-    """
-    raw_email = """\
-Content-Type: multipart/alternative; boundary="ABC"
+# An email with an invalid Date header and a subject with punctuation.
+INVALID_DATE_EMAIL = """\
+Date: Not a real date
+Subject: My apocalypse: the end is near!
+Content-Type: text/html; charset="UTF-8"
 MIME-Version: 1.0
 
---ABC
-Content-Type: text/plain
-
-This is plain text part.
-
---ABC
-Content-Type: text/html
-
 <html>
-<head></head>
-<body>
-    <div style="display: none;">Preview text</div>
-    <p>Some visible paragraph.</p>
-</body>
+  <head></head>
+  <body>
+    <p>Some content here.</p>
+  </body>
 </html>
-
---ABC--
 """
-    cleaned_text, _ = process_raw_email(raw_email)
-    assert "Preview text" not in cleaned_text
-    assert "Some visible paragraph." in cleaned_text
+
+# ------------------------------------------------------------------------------
+# Tests for the EmailProcessor public API
+# ------------------------------------------------------------------------------
 
 
-def test_process_raw_email_raises_nohtml() -> None:
-    """
-    Test that process_raw_email raises NoHtmlContentFoundError
-    if the email doesn't contain HTML.
-    """
-    raw_email = """\
-Content-Type: text/plain
-MIME-Version: 1.0
+def test_parse_email_returns_correct_keys() -> None:
+    """Test that parsing a well-formed email returns the expected keys."""
+    processor = EmailProcessor(MULTIPART_EMAIL)
+    result = processor.parse()
 
-Just some text, no HTML here.
-"""
+    # Check that all required keys are present.
+    assert "date" in result
+    assert "subject" in result
+    assert "body" in result
+
+    # Verify that the cleaned body includes HTML text
+    assert "HTML content" in result["body"]
+    # Check the date formatting (YYYY-MM-DD)
+    assert re.match(r"\d{4}-\d{2}-\d{2}", result["date"])
+    # Check that the subject slug does not contain punctuation
+    assert ":" not in result["subject"]
+    assert " " not in result["subject"]
+
+
+def test_parse_email_single_part() -> None:
+    """Test that single-part HTML emails are processed correctly."""
+    processor = EmailProcessor(SINGLEPART_EMAIL)
+    result = processor.parse()
+    assert "Single part email content." in result["body"]
+
+
+def test_no_html_email_raises_error() -> None:
+    """Test that an email without any HTML part raises NoHtmlContentFoundError."""
+    processor = EmailProcessor(NO_HTML_EMAIL)
     with pytest.raises(NoHtmlContentFoundError):
-        process_raw_email(raw_email)
+        processor.parse()
 
 
-def test_clean_html_blockquote_markers() -> None:
+def test_hidden_content_removed() -> None:
     """
-    Test that blockquote tags in the HTML are annotated with
-    'Block quote begins.' and 'Block quote ends.' in the cleaned text.
+    Test that HTML elements with style 'display: none' are removed from the
+    output.
     """
-    html_content = """
-    <html>
-      <body>
-        <p>Regular paragraph</p>
-        <blockquote>
-          <p>Blockquoted text, line one.</p>
-          <p>Blockquoted text, line two.</p>
-        </blockquote>
-        <p>Another paragraph</p>
-      </body>
-    </html>
+    processor = EmailProcessor(CLEANING_EMAIL)
+    result = processor.parse()
+    # The hidden text should not appear in the cleaned body.
+    assert "Hidden preview text" not in result["body"]
+
+
+def test_artificial_line_break_removal() -> None:
     """
+    Test that artificial line breaks (e.g. '= \n') are removed.
+    In our sample, note that the artificial break appears as "= "
+    followed by a newline in the raw HTML.
+    """
+    processor = EmailProcessor(CLEANING_EMAIL)
+    result = processor.parse()
+    # There should be no "=\n" patterns in the cleaned output.
+    assert "= " not in result["body"]
+    assert "continued on the same paragraph." in result["body"]
 
-    cleaned = clean_html(html_content)
 
-    # Check that the blockquote markers are present
+def test_blockquote_markers() -> None:
+    """
+    Test that <blockquote> sections in the HTML are annotated with markers
+    indicating the beginning and end of a blockquote.
+    """
+    processor = EmailProcessor(CLEANING_EMAIL)
+    result = processor.parse()
+    cleaned = result["body"]
     assert "Block quote begins." in cleaned
     assert "Block quote ends." in cleaned
-
-    # Check that original content is still present
-    assert "Blockquoted text, line one." in cleaned
-    assert "Blockquoted text, line two." in cleaned
-
-    # Ensure paragraphs remain
-    assert "Regular paragraph" in cleaned
-    assert "Another paragraph" in cleaned
+    # Make sure that the original quoted text is preserved.
+    assert "Quote Line 1." in cleaned
+    assert "Quote Line 2." in cleaned
 
 
-def test_process_raw_email_generates_filename(tmp_path: Path) -> None:
-    """Check that process_raw_email returns a recommended filename
-    based on the email's Date and Subject, removing punctuation.
+def test_paragraph_separation() -> None:
     """
-    raw_email = """\
-Subject: My apocalypse: the end is near!
-Date: Tue, 01 Feb 2022 10:11:12 +0000
-Content-Type: text/html
-MIME-Version: 1.0
+    Test that <p> tags yield extra newlines so that paragraphs remain clearly separated.
+    """
+    processor = EmailProcessor(CLEANING_EMAIL)
+    result = processor.parse()
+    cleaned = result["body"]
+    # Check that there are at least two consecutive newlines before "Second paragraph."
+    assert "\n\nSecond paragraph." in cleaned
 
-<html>
-<head>
-    <title>This is the Title</title>
-</head>
-<body>
-<h1>My Main Header</h1>
-<p>Some text here.</p>
-</body>
-</html>
-"""
 
-    cleaned_text, recommended_filename = process_raw_email(raw_email)
-    assert cleaned_text is not None
+def test_invalid_date_and_subject_slugification() -> None:
+    """
+    Test that if the Date header is missing or invalid, a default date is used,
+    and that the subject is slugified (i.e. punctuation removed and spaces
+    replaced with dashes).
+    """
+    processor = EmailProcessor(INVALID_DATE_EMAIL)
+    result = processor.parse()
+    # As the date is invalid, we expect fallback value "9999-12-31".
+    assert result["date"] == "9999-12-31"
+    # The subject "My apocalypse: the end is near!" should be slugified.
+    # Expected slug: "My-apocalypse-the-end-is-near"
+    assert result["subject"] == "My-apocalypse-the-end-is-near"
 
-    # Date is 2022-02-01
-    # Subject is "My apocalypse: the end is near!"
-    # After removing punctuation, it becomes "My apocalypse the end is near"
-    # Then spaces => dashes => "My-apocalypse-the-end-is-near"
-    # Final => "2022-02-01-My-apocalypse-the-end-is-near.txt"
-    assert recommended_filename == "2022-02-01-My-apocalypse-the-end-is-near.txt"
 
-    # Optionally verify writing the output to disk
-    emails_dir = tmp_path / "emails"
-    emails_dir.mkdir(exist_ok=True)
-    out_path = emails_dir / recommended_filename
-    out_path.write_text(cleaned_text, encoding="utf-8")
+def test_write_text_file(tmp_path: Path) -> None:
+    """
+    Test that write_text_file writes out the cleaned body text
+    into the emails directory with the correct filename.
+    """
+    processor = EmailProcessor(MULTIPART_EMAIL)
+    output_path = processor.write_text_file(output_dir=tmp_path)
 
-    assert out_path.exists()
-    assert out_path.read_text(encoding="utf-8") == cleaned_text
+    # The file should exist.
+    assert output_path.exists()
+
+    # The content of the file should match the cleaned text.
+    file_content = output_path.read_text(encoding="utf-8")
+    result = processor.parse()
+    assert file_content == result["body"]
+
+    # Test that the filename is constructed as "{date}-{subject}.txt"
+    expected_filename = f"{result['date']}-{result['subject']}.txt"
+    assert output_path.name == expected_filename
+
+
+def test_integration_full_processing() -> None:
+    """
+    Integration test: Process an email from raw input through the entire pipeline
+    and verify that the output dictionary meets all requirements.
+    """
+    raw_email = CLEANING_EMAIL
+    processor = EmailProcessor(raw_email)
+    result = processor.parse()
+
+    # Check metadata extraction
+    assert re.match(r"\d{4}-\d{2}-\d{2}", result["date"])
+    # Check subject has been slugified
+    assert result["subject"] == "Cleaning-Test"
+    # Check that the body does not contain hidden content or artificial breaks,
+    # but does contain markers for blockquotes and extra newlines for <p>.
+    body = result["body"]
+
+    assert "Hidden preview text" not in body
+    assert "Block quote begins." in body
+    assert "Block quote ends." in body
+    # There should be a double newline before each paragraph (heuristic)
+    assert "\n\n" in body
