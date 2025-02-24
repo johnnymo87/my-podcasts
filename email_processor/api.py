@@ -49,8 +49,6 @@ class EmailProcessor:
 
         # Parse the HTML to prepare for cleaning.
         soup = BeautifulSoup(html_content, "html.parser")
-        # (Any future enhancements, such as harvesting links, can be built in here.)
-
         cleaned_body = self._clean_html(str(soup))
         # Inline any footnotes in the cleaned text.
         cleaned_body = self._inline_footnotes(cleaned_body)
@@ -130,37 +128,63 @@ class EmailProcessor:
         Cleans HTML content so that the resulting text is friendly for TTS.
         Steps include:
           - Removing elements with style "display: none"
+          - Removing everything after the last <div id="footnote-n"> (if present)
           - Inserting blockquote markers
           - Inserting extra Newlines for paragraphs
           - Removing artificial line breaks and extra spaces
         """
         soup = BeautifulSoup(html_content, "html.parser")
 
+        # First remove elements with style="display: none".
         for tag in soup.select('[style*="display: none"]'):
             tag.decompose()
 
+        # Identify footnote divs by id=footnote-<digits>.
+        footnote_divs = soup.find_all("div", id=re.compile(r"^footnote-\d+$"))
+        if footnote_divs:
+            # The last footnote div in the HTML:
+            last_footnote_div = footnote_divs[-1]
+
+            # Remove everything that is in the DOM after this last footnote.
+            _, *after = last_footnote_div.find_all_next()
+            for tag in after:
+                tag.decompose()
+
+        # Insert blockquote markers.
         for bq_tag in soup.find_all("blockquote"):
             bq_tag.insert_before("\n\nBlock quote begins.\n")
             bq_tag.insert_after("\n\nBlock quote ends.\n")
 
+        # Insert extra newlines before paragraphs.
         for p_tag in soup.find_all("p"):
             p_tag.insert_before("\n\n")
 
+        # Convert to text, then do final text cleanup.
         text_content = soup.get_text()
+
+        # Remove artificial line breaks like '=\n'.
         text_content = re.sub(r"=\s*\n", "", text_content)
+        # Collapse multiple blank lines to a double newline.
         text_content = re.sub(r"\n\s*\n\s*\n+", "\n\n", text_content)
+        # Normalize all internal whitespace runs to single spaces (except newlines).
         text_content = re.sub(r"[^\S\r\n]+", " ", text_content)
+        # Remove trailing spaces before newlines.
         text_content = re.sub(r" +(\n)", r"\1", text_content)
 
         return text_content.strip()
 
     def _inline_footnotes(self, text: str) -> str:
         """
-        Finds and inlines footnotes. A footnote is detected as a line starting
-        with a pointer (e.g. "[1]") at the bottom of the text. The corresponding
-        pointer in the main body is replaced with an inline version containing
-        the footnote text (wrapped with "Footnote begins." and "Footnote ends.")
-        and the footnote definition is removed from the bottom.
+        Finds and inlines footnotes of the form:
+
+            [1] This is footnote #1 text
+            [2] This is footnote #2 text
+
+        at the bottom of the text. A pointer like [1] in the main body text is replaced
+        with "Footnote begins. ... Footnote ends."
+
+        If a pointer is encountered but no corresponding footnote is found, a ValueError
+        is raised.
         """
         # Look for footnotes defined in lines at the bottom.
         # For example: a line like "[1] This is the footnote text."
@@ -168,7 +192,7 @@ class EmailProcessor:
         # Collect all footnotes into a dictionary: { "1": "This is the footnote text." }
         footnotes = dict(footnote_pattern.findall(text))
 
-        # Remove all lines that represent footnotes from the text.
+        # Remove lines that define footnotes from the text.
         text_without_footnotes = footnote_pattern.sub("", text)
 
         # For each occurrence of a footnote pointer in the main text (e.g. "[1]"),

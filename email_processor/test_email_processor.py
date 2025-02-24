@@ -99,10 +99,6 @@ MIME-Version: 1.0
 </html>
 """
 
-# ------------------------------------------------------------------------------
-# Tests for the EmailProcessor public API
-# ------------------------------------------------------------------------------
-
 
 def test_parse_email_returns_correct_keys() -> None:
     """Test that parsing a well-formed email returns the expected keys."""
@@ -178,7 +174,8 @@ def test_blockquote_markers() -> None:
 
 def test_paragraph_separation() -> None:
     """
-    Test that <p> tags yield extra newlines so that paragraphs remain clearly separated.
+    Test that <p> tags yield extra newlines so that paragraphs remain
+    clearly separated.
     """
     processor = EmailProcessor(CLEANING_EMAIL)
     result = processor.parse()
@@ -274,7 +271,7 @@ MIME-Version: 1.0
     body = result["body"]
 
     # The pointers should be replaced with the inlined footnotes, without the
-    # pointer strings.
+    # original pointer strings.
     assert (
         "Footnote begins. This is the first footnote content that should be inlined."
         " Footnote ends." in body
@@ -308,3 +305,64 @@ MIME-Version: 1.0
     with pytest.raises(ValueError) as excinfo:
         processor.parse()
     assert "Footnote 3 not found." in str(excinfo.value)
+
+
+def test_remove_text_after_last_footnote_div() -> None:
+    """
+    Verify that text appearing after the final footnote-(digit) DIV
+    is removed. In this example, there are two footnote DIVs, then
+    additional text. That extra text should not appear in the final
+    output at all.
+    """
+    raw_email = """\
+Date: Sat, 01 Feb 2025 10:00:00 +0000
+Subject: Footnotes Div Test
+Content-Type: text/html; charset="UTF-8"
+MIME-Version: 1.0
+
+<html>
+<body>
+  <div class="article">
+    <p>This is the main article content.</p>
+    <p>This is main text with a footnote pointer [1] in it.</p>
+    <p>Some additional text [2] in the body.</p>
+    <div id="footnote-1" style="font-style: italic;">
+      <p>[1] This is the first footnote content that should be inlined.</p>
+    </div>
+    <div id="footnote-2" style="font-style: italic;">
+      <p>[2] Second footnote, inlining as well.</p>
+    </div>
+  </div>
+  <div class="post-article-content">
+    <h2>Related Articles</h2>
+    <ul>
+      <li><a href="#">Article 1</a></li>
+      <li><a href="#">Article 2</a></li>
+    </ul>
+    <p>This is some extra text after the footnotes that should be removed.</p>
+  </div>
+</body>
+</html>
+"""
+    processor = EmailProcessor(raw_email)
+    result = processor.parse()
+    body = result["body"]
+
+    # Main article content should remain.
+    assert "This is the main article content." in body
+
+    # The pointers should be replaced with the inlined footnotes, without the
+    # original pointer strings.
+    assert (
+        "Footnote begins. This is the first footnote content that should be inlined."
+        " Footnote ends." in body
+    )
+    assert "Footnote begins. Second footnote, inlining as well. Footnote ends." in body
+
+    # All following content should be removed.
+    assert "Related Articles" not in body
+    assert "Article 1" not in body
+    assert "Article 2" not in body
+    assert (
+        "This is some extra text after the footnotes that should be removed" not in body
+    )
