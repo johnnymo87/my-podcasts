@@ -55,6 +55,12 @@ poetry run python -m email_processor --json-output --input-file path/to/raw_emai
 poetry run python -m email_processor --write-text-file --input-file path/to/raw_email.txt
 ```
 
+Also, the program can take input from STDIN.
+
+```bash
+pbpaste | poetry run python -m email_processor --write-text-file
+```
+
 If neither flag is provided, the CLI will notify you that no output option was selected.
 
 ## Testing

@@ -366,3 +366,50 @@ MIME-Version: 1.0
     assert (
         "This is some extra text after the footnotes that should be removed" not in body
     )
+
+
+def test_footnote_div_children_preserved() -> None:
+    """
+    Test that children of the last footnote div are preserved when removing
+    content after it. This test specifically addresses the bug where using
+    find_all_next() would incorrectly include and remove children of the
+    last footnote div.
+    """
+    raw_email = """\
+Date: Sun, 02 Feb 2025 14:00:00 +0000
+Subject: Footnote Children Test
+Content-Type: text/html; charset="UTF-8"
+MIME-Version: 1.0
+
+<html>
+<body>
+  <div class="article">
+    <p>This is the main article content with a footnote [4].</p>
+    <div id="footnote-4" style="font-style: italic;">
+      <p style="margin: 16px 0;">[4] It's net investment income, so they can <a href="https://example.com/link" style="color: #000000;">deduct investment expenses</a>, but not operating expenses.</p>  # noqa: E501
+    </div>
+  </div>
+  <div class="footer">
+    <p>This footer content should be removed.</p>
+  </div>
+</body>
+</html>
+"""
+    processor = EmailProcessor(raw_email)
+    result = processor.parse()
+    body = result["body"]
+
+    # Main article content should remain.
+    assert "This is the main article content" in body
+
+    # The footnote should be inlined with its link text preserved.
+    # The link text "deduct investment expenses" should appear in the inlined footnote.
+    assert "deduct investment expenses" in body
+    assert "but not operating expenses" in body
+
+    # The footnote should be properly inlined.
+    assert "Footnote begins." in body
+    assert "Footnote ends." in body
+
+    # Footer content after the footnote div should be removed.
+    assert "This footer content should be removed" not in body

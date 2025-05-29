@@ -12,3 +12,4 @@ emails/
 
 # The images that I attach to my podcast episodes.
 images/
+.aider*

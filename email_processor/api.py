@@ -145,10 +145,15 @@ class EmailProcessor:
             # The last footnote div in the HTML:
             last_footnote_div = footnote_divs[-1]
 
-            # Remove everything that is in the DOM after this last footnote.
-            _, *after = last_footnote_div.find_all_next()
-            for tag in after:
-                tag.decompose()
+            # Find all elements that come after the last footnote div in
+            # document order. We need to traverse up to find the common
+            # ancestor and remove everything after.
+            current = last_footnote_div
+            while current.parent:
+                # For each sibling that comes after the current element, remove it
+                for sibling in list(current.find_next_siblings()):
+                    sibling.decompose()
+                current = current.parent
 
         # Insert blockquote markers.
         for bq_tag in soup.find_all("blockquote"):
