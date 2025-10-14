@@ -4,7 +4,6 @@ import email
 import re
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Dict
 
 from bs4 import BeautifulSoup
 
@@ -34,7 +33,7 @@ class EmailProcessor:
     def __init__(self, raw_email: str) -> None:
         self._raw_email = raw_email
 
-    def parse(self) -> Dict[str, str]:
+    def parse(self) -> dict[str, str]:
         """
         Process the raw email string and return a dictionary containing:
           - "date": a date string in the format "YYYY-MM-DD"

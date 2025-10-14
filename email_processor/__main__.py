@@ -1,6 +1,6 @@
 import json
 import sys
-from typing import Optional, TextIO
+from typing import TextIO
 
 import click
 
@@ -26,10 +26,10 @@ from email_processor.api import EmailProcessor, NoHtmlContentFoundError
 )
 @click.argument("raw_email", required=False)
 def main(
-    input_file: Optional[TextIO],
+    input_file: TextIO | None,
     json_output: bool,
     write_text_file: bool,
-    raw_email: Optional[str],
+    raw_email: str | None,
 ) -> None:
     """
     Process raw email content into a dictionary containing email data.

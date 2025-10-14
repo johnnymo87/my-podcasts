@@ -3,12 +3,14 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+
 if TYPE_CHECKING:
     from pathlib import Path
 
 import pytest
 
 from email_processor.api import EmailProcessor, NoHtmlContentFoundError
+
 
 # ------------------------------------------------------------------------------
 # Sample Emails for Testing
