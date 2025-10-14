@@ -40,13 +40,31 @@ For instructions on setting up your environment, installing Python (via pyenv), 
      uv sync
      ```
 
-5. **Pre-commit Hooks:**
-   - Install pre-commit hooks:
+5. **Git Hooks (Optional):**
+   - Set up a git pre-commit hook that runs ruff automatically:
      ```bash
-     pre-commit install
+     ./setup-git-hooks.sh
+     ```
+   - This will run `ruff check` and `ruff format --check` before each commit
+   - To skip the hook for a specific commit: `git commit --no-verify`
+
+6. **Code Quality:**
+   - Run ruff for linting and formatting:
+     ```bash
+     # Check for linting issues
+     uv run ruff check .
+
+     # Auto-fix linting issues
+     uv run ruff check --fix .
+
+     # Format code
+     uv run ruff format .
+
+     # Run type checking
+     uv run mypy .
      ```
 
-6. **Running Tests:**
+7. **Running Tests:**
    - Execute the test suite using pytest:
      ```bash
      uv run pytest
