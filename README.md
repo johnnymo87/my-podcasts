@@ -9,7 +9,7 @@ This repository is a collection of scripts and utilities that I use to produce a
 
 ## Setup
 
-For instructions on setting up your environment, installing Python (via pyenv), Poetry, and loading environment variables with direnv, please refer to the [Installation section](#installation) below.
+For instructions on setting up your environment, installing Python (via pyenv), uv, and loading environment variables with direnv, please refer to the [Installation section](#installation) below.
 
 ### Installation
 
@@ -31,13 +31,13 @@ For instructions on setting up your environment, installing Python (via pyenv), 
    - The required Python version is specified in `.python-version`.
 
 4. **Install Dependencies:**
-   - Install Poetry if you haven't already:
+   - Install uv if you haven't already:
      ```bash
-     curl -sSL https://install.python-poetry.org | python3 -
+     curl -LsSf https://astral.sh/uv/install.sh | sh
      ```
    - Then install project dependencies:
      ```bash
-     poetry install --with dev
+     uv sync
      ```
 
 5. **Pre-commit Hooks:**
@@ -49,12 +49,12 @@ For instructions on setting up your environment, installing Python (via pyenv), 
 6. **Running Tests:**
    - Execute the test suite using pytest:
      ```bash
-     poetry run pytest
+     uv run pytest
      ```
 
 ## Development and CI
 
-- **Local Testing:** Run tests with `poetry run pytest`.
+- **Local Testing:** Run tests with `uv run pytest`.
 - **CI Pipeline:** On each push and pull request, the GitHub Actions workflow runs tests, style checks, and code coverage reports. See `.github/workflows/ci.yaml` for details.
 
 For more module-specific details (e.g. using the email processor or TTS tools), please see the README files in the respective subdirectories.

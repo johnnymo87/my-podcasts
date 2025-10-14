@@ -49,16 +49,16 @@ A CLI is provided that leverages the public API. You can output the processed da
 
 ```bash
 # Print the structured result as JSON:
-poetry run python -m email_processor --json-output --input-file path/to/raw_email.txt
+uv run python -m email_processor --json-output --input-file path/to/raw_email.txt
 
 # Write the cleaned text to a file (saved in the emails/ directory):
-poetry run python -m email_processor --write-text-file --input-file path/to/raw_email.txt
+uv run python -m email_processor --write-text-file --input-file path/to/raw_email.txt
 ```
 
 Also, the program can take input from STDIN.
 
 ```bash
-pbpaste | poetry run python -m email_processor --write-text-file
+pbpaste | uv run python -m email_processor --write-text-file
 ```
 
 If neither flag is provided, the CLI will notify you that no output option was selected.
@@ -68,7 +68,7 @@ If neither flag is provided, the CLI will notify you that no output option was s
 A comprehensive test suite verifies the functionality of the Email Processor. To run the tests:
 
 ```bash
-poetry run pytest tests/
+uv run pytest tests/
 ```
 
 The tests cover the following aspects:
