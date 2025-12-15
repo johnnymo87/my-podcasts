@@ -27,7 +27,8 @@ dev = [
     "tts-joinery>=1.0.4",
     "types-beautifulsoup4>=4.12.0.20241020",
     "pytest>=8.3.4",
-    "pytest-cov>=6.0.0"
+    "pytest-cov>=6.0.0",
+    "audioop-lts>=0.2.2",
 ]
 
 [tool.ruff]
