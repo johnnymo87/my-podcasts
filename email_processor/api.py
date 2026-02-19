@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import email
 import re
+from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from bs4 import BeautifulSoup
+
+
+if TYPE_CHECKING:
+    from email.message import Message
 
 
 class NoHtmlContentFoundError(Exception):
@@ -30,8 +36,11 @@ class EmailProcessor:
       Writes to emails/<date-subject>.txt
     """
 
-    def __init__(self, raw_email: str) -> None:
-        self._raw_email = raw_email
+    def __init__(self, raw_email: str | bytes) -> None:
+        if isinstance(raw_email, bytes):
+            self._msg = email.message_from_bytes(raw_email)
+        else:
+            self._msg = email.message_from_string(raw_email)
 
     def parse(self) -> dict[str, str]:
         """
@@ -43,8 +52,8 @@ class EmailProcessor:
         Raises:
             NoHtmlContentFoundError: if no HTML part is found.
         """
-        html_content = self._extract_html_part(self._raw_email)
-        date_str, subject_str = self._extract_date_and_subject(self._raw_email)
+        html_content = self._extract_html_part()
+        date_str, subject_str, subject_raw = self._extract_date_and_subject()
 
         # Parse the HTML to prepare for cleaning.
         soup = BeautifulSoup(html_content, "html.parser")
@@ -55,6 +64,7 @@ class EmailProcessor:
         return {
             "date": date_str,
             "subject": subject_str,
+            "subject_raw": subject_raw,
             "body": cleaned_body,
         }
 
@@ -76,24 +86,23 @@ class EmailProcessor:
 
     # --------- Private helper methods below: ---------
 
-    def _extract_html_part(self, raw_email_str: str) -> str:
+    def _extract_html_part(self) -> str:
         """
         Extracts and returns the first 'text/html' part from a raw email string.
         Raises:
             NoHtmlContentFoundError: If none is found.
         """
-        msg = email.message_from_string(raw_email_str)
-        if msg.is_multipart():
-            for part in msg.walk():
+        if self._msg.is_multipart():
+            for part in self._msg.walk():
                 if part.get_content_type() == "text/html":
                     return self._decode_payload(part)
         else:
-            if msg.get_content_type() == "text/html":
-                return self._decode_payload(msg)
+            if self._msg.get_content_type() == "text/html":
+                return self._decode_payload(self._msg)
 
         raise NoHtmlContentFoundError("No HTML part found in the email")
 
-    def _decode_payload(self, part: email.message.Message) -> str:
+    def _decode_payload(self, part: Message) -> str:
         """
         Decodes and returns the payload of an email message part as a string.
         """
@@ -103,24 +112,27 @@ class EmailProcessor:
         else:
             raise TypeError(f"Expected bytes but got: {type(payload)}")
 
-    def _extract_date_and_subject(self, raw_email_str: str) -> tuple[str, str]:
+    def _extract_date_and_subject(self) -> tuple[str, str, str]:
         """
         Extracts a date (YYYY-MM-DD) and a slugified subject from the email headers.
         """
-        msg = email.message_from_string(raw_email_str)
-
-        raw_date = msg.get("Date", "")
+        raw_date = self._msg.get("Date", "")
         try:
             dt = parsedate_to_datetime(raw_date)
             date_str = dt.strftime("%Y-%m-%d")
         except Exception:
             date_str = "9999-12-31"
 
-        raw_subject = msg.get("Subject", "No Subject")
+        raw_subject_header = self._msg.get("Subject", "No Subject")
+        try:
+            raw_subject = str(make_header(decode_header(raw_subject_header))).strip()
+        except Exception:
+            raw_subject = str(raw_subject_header).strip()
+
         without_punc = re.sub(r"[^\w\s-]", "", raw_subject)
         subject_slug = re.sub(r"\s+", "-", without_punc.strip())
 
-        return date_str, subject_slug
+        return date_str, subject_slug, raw_subject
 
     def _clean_html(self, html_content: str) -> str:
         """

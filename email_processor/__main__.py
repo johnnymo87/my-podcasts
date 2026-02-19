@@ -1,6 +1,6 @@
 import json
 import sys
-from typing import TextIO
+from pathlib import Path
 
 import click
 
@@ -10,9 +10,15 @@ from email_processor.api import EmailProcessor, NoHtmlContentFoundError
 @click.command()
 @click.option(
     "--input-file",
-    type=click.File("r"),
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
     help="Path to a file containing raw email content (if not provided, "
     " raw_email argument or stdin will be used).",
+)
+@click.option(
+    "--binary",
+    is_flag=True,
+    default=False,
+    help="Read --input-file as bytes. If omitted, .eml files are auto-read as bytes.",
 )
 @click.option(
     "--json-output/--no-json-output",
@@ -26,7 +32,8 @@ from email_processor.api import EmailProcessor, NoHtmlContentFoundError
 )
 @click.argument("raw_email", required=False)
 def main(
-    input_file: TextIO | None,
+    input_file: Path | None,
+    binary: bool,
     json_output: bool,
     write_text_file: bool,
     raw_email: str | None,
@@ -36,7 +43,10 @@ def main(
     Depending on the flags, it will print JSON and/or write the cleaned text to a file.
     """
     if input_file:
-        content = input_file.read()
+        if binary or input_file.suffix.lower() == ".eml":
+            content = input_file.read_bytes()
+        else:
+            content = input_file.read_text(encoding="utf-8")
     elif raw_email:
         content = raw_email
     else:
@@ -64,4 +74,4 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    main()  # type: ignore[call-arg]

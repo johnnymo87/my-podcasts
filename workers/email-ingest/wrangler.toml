@@ -1,0 +1,11 @@
+name = "my-podcasts-email-ingest"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "my-podcasts"
+
+[[queues.producers]]
+queue = "my-podcasts-inbox"
+binding = "INBOX_QUEUE"

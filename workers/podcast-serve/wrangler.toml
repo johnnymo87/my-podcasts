@@ -1,0 +1,10 @@
+name = "my-podcasts-serve"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+routes = [
+  { pattern = "podcast.mohrbacher.dev/*", zone_name = "mohrbacher.dev" }
+]
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "my-podcasts"

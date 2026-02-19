@@ -128,6 +128,20 @@ def test_parse_email_single_part() -> None:
     assert "Single part email content." in result["body"]
 
 
+def test_parse_email_from_bytes_multipart() -> None:
+    """Test that multipart emails can be parsed directly from bytes."""
+    processor = EmailProcessor(MULTIPART_EMAIL.encode("utf-8"))
+    result = processor.parse()
+    assert "HTML content" in result["body"]
+
+
+def test_parse_email_from_bytes_single_part() -> None:
+    """Test that single-part HTML emails can be parsed directly from bytes."""
+    processor = EmailProcessor(SINGLEPART_EMAIL.encode("utf-8"))
+    result = processor.parse()
+    assert "Single part email content." in result["body"]
+
+
 def test_no_html_email_raises_error() -> None:
     """Test that an email without any HTML part raises NoHtmlContentFoundError."""
     processor = EmailProcessor(NO_HTML_EMAIL)
