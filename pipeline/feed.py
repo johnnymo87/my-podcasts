@@ -65,6 +65,9 @@ def generate_feed_xml(store: StateStore, feed_slug: str | None = None) -> bytes:
         item = ET.SubElement(channel, "item")
         ET.SubElement(item, "title").text = episode.title
         episode_url = f"{base_url}/{episode.r2_key}"
+        if episode.source_url:
+            ET.SubElement(item, "link").text = episode.source_url
+            ET.SubElement(item, "description").text = episode.source_url
         ET.SubElement(
             item,
             "enclosure",

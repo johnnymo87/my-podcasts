@@ -20,6 +20,7 @@ class Episode:
     category: str
     source_tag: str | None
     preset_name: str
+    source_url: str | None
     size_bytes: int
     duration_seconds: int | None
 
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     category TEXT NOT NULL DEFAULT 'News',
     source_tag TEXT,
     preset_name TEXT NOT NULL DEFAULT 'General Newsletter',
+    source_url TEXT,
     size_bytes INTEGER NOT NULL,
     duration_seconds INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -80,6 +82,7 @@ class StateStore:
             "category": category_ddl,
             "source_tag": "ALTER TABLE episodes ADD COLUMN source_tag TEXT",
             "preset_name": preset_name_ddl,
+            "source_url": "ALTER TABLE episodes ADD COLUMN source_url TEXT",
         }
         for column, ddl in migrations.items():
             if column not in existing_cols:
@@ -116,10 +119,11 @@ class StateStore:
                     category,
                     source_tag,
                     preset_name,
+                    source_url,
                     size_bytes,
                     duration_seconds
                 )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 episode.id,
@@ -131,6 +135,7 @@ class StateStore:
                 episode.category,
                 episode.source_tag,
                 episode.preset_name,
+                episode.source_url,
                 episode.size_bytes,
                 episode.duration_seconds,
             ),
@@ -151,6 +156,7 @@ class StateStore:
                     category,
                     source_tag,
                     preset_name,
+                    source_url,
                     size_bytes,
                     duration_seconds
                 FROM episodes
@@ -172,6 +178,7 @@ class StateStore:
                     category,
                     source_tag,
                     preset_name,
+                    source_url,
                     size_bytes,
                     duration_seconds
                 FROM episodes
@@ -189,6 +196,7 @@ class StateStore:
                 category=row["category"],
                 source_tag=row["source_tag"],
                 preset_name=row["preset_name"],
+                source_url=row["source_url"],
                 size_bytes=row["size_bytes"],
                 duration_seconds=row["duration_seconds"],
             )
