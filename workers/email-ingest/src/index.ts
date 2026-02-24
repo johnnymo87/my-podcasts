@@ -8,6 +8,7 @@ interface Env {
 interface InboxMessage {
   key: string;
   from: string;
+  from_header: string;
   route_tag: string | null;
   route_source: "recipient" | "sender" | "list_id" | null;
   subject: string;
@@ -41,9 +42,15 @@ function getAllowedSenders(env: Env): string[] {
   return DEFAULT_ALLOWED_SENDERS;
 }
 
-function isAllowedSender(from: string, allowedSenders: string[]): boolean {
-  const normalizedFrom = from.toLowerCase();
-  return allowedSenders.some((sender) => normalizedFrom.includes(sender));
+function isAllowedMessageSender(
+  message: ForwardableEmailMessage,
+  allowedSenders: string[],
+): boolean {
+  const envelopeFrom = message.from.toLowerCase();
+  const headerFrom = (message.headers.get("from") ?? "").toLowerCase();
+  return allowedSenders.some(
+    (sender) => envelopeFrom.includes(sender) || headerFrom.includes(sender),
+  );
 }
 
 function routeTagFromRecipient(recipient: string): string | null {
@@ -90,9 +97,15 @@ function deriveRouteTag(
     return { routeTag: recipientTag, routeSource: "recipient" };
   }
 
-  const senderTag = routeTagFromSender(message.from);
+  const fromHeader = message.headers.get("from");
+  const senderTag = routeTagFromSender(fromHeader ?? message.from);
   if (senderTag) {
     return { routeTag: senderTag, routeSource: "sender" };
+  }
+
+  const envelopeSenderTag = routeTagFromSender(message.from);
+  if (envelopeSenderTag) {
+    return { routeTag: envelopeSenderTag, routeSource: "sender" };
   }
 
   const listIdTag = routeTagFromListId(message.headers.get("list-id"));
@@ -113,10 +126,14 @@ export default {
 
     await message.forward(forwardTo);
 
-    if (!isAllowedSender(message.from, allowedSenders)) {
+    if (!isAllowedMessageSender(message, allowedSenders)) {
+      console.log(
+        `Skipped message: envelope from=${message.from}; header from=${message.headers.get("from") ?? ""}`,
+      );
       return;
     }
 
+    const fromHeader = message.headers.get("from") ?? message.from;
     const { routeTag, routeSource } = deriveRouteTag(message);
     const key = `inbox/raw/${crypto.randomUUID()}.eml`;
     const rawBytes = new Uint8Array(await new Response(message.raw).arrayBuffer());
@@ -126,6 +143,7 @@ export default {
       },
       customMetadata: {
         from: message.from,
+        from_header: fromHeader,
         route_tag: routeTag ?? "",
         route_source: routeSource ?? "",
         subject: message.headers.get("subject") ?? "No Subject",
@@ -136,6 +154,7 @@ export default {
     const payload: InboxMessage = {
       key,
       from: message.from,
+      from_header: fromHeader,
       route_tag: routeTag,
       route_source: routeSource,
       subject: message.headers.get("subject") ?? "No Subject",

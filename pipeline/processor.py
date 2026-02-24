@@ -117,6 +117,44 @@ def _extract_candidate_links(raw_email: bytes) -> list[str]:
     return list(dict.fromkeys(urls))
 
 
+def _extract_plain_text_part(raw_email: bytes) -> str | None:
+    msg = email.message_from_bytes(raw_email)
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain":
+                payload = part.get_payload(decode=True)
+                if isinstance(payload, bytes):
+                    return payload.decode(
+                        part.get_content_charset() or "utf-8",
+                        errors="replace",
+                    )
+    elif msg.get_content_type() == "text/plain":
+        payload = msg.get_payload(decode=True)
+        if isinstance(payload, bytes):
+            return payload.decode(
+                msg.get_content_charset() or "utf-8",
+                errors="replace",
+            )
+    return None
+
+
+def _clean_yglesias_body(raw_email: bytes, fallback_body: str) -> str:
+    source_text = _extract_plain_text_part(raw_email) or fallback_body
+    text = source_text.replace("\r", "")
+    text = text.replace("\u00ad", "").replace("\u034f", "")
+
+    text = re.sub(r"^View this post on the web at .*\n+", "", text)
+    text = re.sub(r"\s*\[\s*https?://[^\]]+\s*\]", "", text)
+    text = re.sub(r"\nUnsubscribe\s+https?://.*", "", text, flags=re.DOTALL)
+    text = text.replace("READ IN APP", "")
+    text = text.replace("Subscribed", "")
+
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" +\n", "\n", text)
+    return text.strip()
+
+
 def _resolve_once(url: str) -> str | None:
     try:
         response = requests.get(url, timeout=10, allow_redirects=False)
@@ -233,6 +271,7 @@ def process_email_bytes(
         source_url = _extract_levine_source_url(raw_email, date_str, subject_raw)
     elif preset.feed_slug == "yglesias":
         source_url = _extract_yglesias_source_url(raw_email)
+        body = _clean_yglesias_body(raw_email, body)
 
     with tempfile.TemporaryDirectory(prefix="my-podcasts-") as tmp_dir:
         tmp = Path(tmp_dir)
