@@ -171,9 +171,11 @@ class EmailProcessor:
             bq_tag.insert_before("\n\nBlock quote begins.\n")
             bq_tag.insert_after("\n\nBlock quote ends.\n")
 
-        # Insert extra newlines before paragraphs.
+        # Insert extra newlines before paragraphs and headings.
         for p_tag in soup.find_all("p"):
             p_tag.insert_before("\n\n")
+        for heading_tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+            heading_tag.insert_before("\n\n")
 
         # Convert to text, then do final text cleanup.
         text_content = soup.get_text()

@@ -429,3 +429,64 @@ MIME-Version: 1.0
 
     # Footer content after the footnote div should be removed.
     assert "This footer content should be removed" not in body
+
+
+# --- Heading separation tests (Bloomberg/Levine section headers) ---
+
+# Minimal reproduction: paragraphs directly followed by h2 headings.
+# The bare <h2> case (no table wrapper) clearly demonstrates the bug where
+# heading text gets glued to the end of the previous paragraph.
+HEADING_AFTER_PARAGRAPH_EMAIL = """\
+Date: Wed, 26 Feb 2026 19:00:00 +0000
+Subject: Money Stuff: Test Headings
+Content-Type: text/html; charset="UTF-8"
+MIME-Version: 1.0
+
+<html>
+<body>
+  <p>Sometimes they give you the satisfaction of being right.</p>
+  <h2>Optimum</h2>
+  <p>We have talked a few times about this topic.</p>
+  <h2>Venture fraud</h2>
+  <p>One model you could have is interesting.</p>
+</body>
+</html>
+"""
+
+
+def test_heading_separated_from_preceding_paragraph() -> None:
+    """
+    Section headings (h1-h6) must be separated from the preceding paragraph
+    by a blank line, not glued to the end of the previous text.
+
+    Reproduces a long-standing bug in Levine email processing where e.g.
+    "...satisfaction of being right. Optimum" appeared on one line.
+    """
+    processor = EmailProcessor(HEADING_AFTER_PARAGRAPH_EMAIL)
+    result = processor.parse()
+    body = result["body"]
+
+    # Each heading must NOT be glued to the end of the previous paragraph.
+    # Bad:  "...being right. Optimum"
+    # Good: "...being right.\n\nOptimum"
+    assert "right.\n\nOptimum" in body, (
+        f"Heading 'Optimum' not separated from preceding paragraph.\n"
+        f"Got: ...{body[body.find('right') - 5 : body.find('Optimum') + 15]!r}"
+    )
+
+    assert "topic.\n\nVenture fraud" in body, (
+        f"Heading 'Venture fraud' not separated from preceding paragraph.\n"
+        f"Got: ...{body[body.find('topic') - 5 : body.find('Venture') + 20]!r}"
+    )
+
+
+def test_heading_separated_from_following_paragraph() -> None:
+    """
+    Section headings should also have a blank line before the next paragraph.
+    """
+    processor = EmailProcessor(HEADING_AFTER_PARAGRAPH_EMAIL)
+    result = processor.parse()
+    body = result["body"]
+
+    assert "Optimum\n\nWe have" in body
+    assert "Venture fraud\n\nOne model" in body
