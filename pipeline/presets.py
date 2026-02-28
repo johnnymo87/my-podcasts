@@ -30,6 +30,14 @@ PRESETS: tuple[NewsletterPreset, ...] = (
         category="News",
         feed_slug="yglesias",
     ),
+    NewsletterPreset(
+        name="Nate Silver - Silver Bulletin",
+        route_tags=("silver", "natesilver", "silverbulletin"),
+        tts_model="tts-1-hd",
+        tts_voice="echo",
+        category="News",
+        feed_slug="silver",
+    ),
 )
 
 
