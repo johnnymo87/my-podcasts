@@ -18,17 +18,21 @@ interface InboxMessage {
 const DEFAULT_ALLOWED_SENDERS = [
   "noreply@news.bloomberg.com",
   "matthewyglesias@substack.com",
+  "natesilver@substack.com",
 ];
 
 const SENDER_ROUTE_TAGS: Record<string, string> = {
   "noreply@news.bloomberg.com": "levine",
   "matthewyglesias@substack.com": "yglesias",
+  "natesilver@substack.com": "silver",
 };
 
 const LIST_ID_ROUTE_TAGS: Array<{ pattern: string; routeTag: string }> = [
   { pattern: "money stuff", routeTag: "levine" },
   { pattern: "slowboring", routeTag: "yglesias" },
   { pattern: "yglesias", routeTag: "yglesias" },
+  { pattern: "natesilver", routeTag: "silver" },
+  { pattern: "silver bulletin", routeTag: "silver" },
 ];
 
 function getAllowedSenders(env: Env): string[] {
