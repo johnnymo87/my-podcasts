@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pipeline.source_adapters import LevineAdapter, YglesiasAdapter
+from pipeline.source_adapters import LevineAdapter, SubstackAdapter
 
 
 def test_levine_money_stuff_title_is_normalized() -> None:
@@ -13,7 +13,9 @@ def test_levine_money_stuff_title_is_normalized() -> None:
 
 
 def test_yglesias_title_uses_slow_boring_format() -> None:
-    title = YglesiasAdapter().format_title(
+    title = SubstackAdapter(
+        brand_name="Slow Boring", domain="slowboring.com"
+    ).format_title(
         date_str="2026-02-12",
         subject_raw="Slow Boring: Housing Policy",
         subject_slug="Slow-Boring-Housing-Policy",

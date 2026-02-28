@@ -145,12 +145,13 @@ def _extract_levine_source_url(
     return None
 
 
-def _extract_yglesias_source_url(raw_email: bytes) -> str | None:
+def _extract_substack_source_url(raw_email: bytes, domain: str) -> str | None:
     msg = email.message_from_bytes(raw_email)
     list_post = msg.get("List-Post", "")
 
+    escaped_domain = re.escape(domain)
     substack_post_pattern = re.compile(
-        r"https://www\.slowboring\.com/p/[^\s<>?#]+",
+        rf"https://(?:www\.)?{escaped_domain}/p/[^\s<>?#]+",
         flags=re.IGNORECASE,
     )
 
@@ -168,7 +169,7 @@ def _extract_yglesias_source_url(raw_email: bytes) -> str | None:
         link
         for link in links
         if link.startswith("https://substack.com/redirect/")
-        or link.startswith("https://www.slowboring.com/action/")
+        or f"{domain}/action/" in link
     ]
     for link in redirect_links:
         redirected = _resolve_once(link)
@@ -178,7 +179,7 @@ def _extract_yglesias_source_url(raw_email: bytes) -> str | None:
     return None
 
 
-def _clean_yglesias_body(raw_email: bytes, fallback_body: str) -> str:
+def _clean_substack_body(raw_email: bytes, fallback_body: str) -> str:
     source_text = _extract_plain_text_part(raw_email) or fallback_body
     text = source_text.replace("\r", "")
     text = text.replace("\u00ad", "").replace("\u034f", "")
@@ -245,7 +246,10 @@ class LevineAdapter(DefaultAdapter):
 
 
 @dataclass(frozen=True)
-class YglesiasAdapter(DefaultAdapter):
+class SubstackAdapter(DefaultAdapter):
+    brand_name: str
+    domain: str
+
     def format_title(
         self,
         *,
@@ -254,11 +258,16 @@ class YglesiasAdapter(DefaultAdapter):
         subject_slug: str,
     ) -> str:
         subject = subject_raw.strip() or subject_slug.replace("-", " ")
-        subject = re.sub(r"^Slow Boring:\s*", "", subject, flags=re.IGNORECASE)
-        return f"{date_str} - Slow Boring - {subject}"
+        subject = re.sub(
+            rf"^{re.escape(self.brand_name)}:\s*",
+            "",
+            subject,
+            flags=re.IGNORECASE,
+        )
+        return f"{date_str} - {self.brand_name} - {subject}"
 
     def clean_body(self, *, raw_email: bytes, body: str) -> str:
-        return _clean_yglesias_body(raw_email, body)
+        return _clean_substack_body(raw_email, body)
 
     def extract_source_url(
         self,
@@ -267,14 +276,15 @@ class YglesiasAdapter(DefaultAdapter):
         date_str: str,
         subject_raw: str,
     ) -> str | None:
-        return _extract_yglesias_source_url(raw_email)
+        return _extract_substack_source_url(raw_email, self.domain)
 
 
 DEFAULT_ADAPTER = DefaultAdapter()
 
 ADAPTERS: dict[str, SourceAdapter] = {
     "levine": LevineAdapter(),
-    "yglesias": YglesiasAdapter(),
+    "yglesias": SubstackAdapter(brand_name="Slow Boring", domain="slowboring.com"),
+    "silver": SubstackAdapter(brand_name="Silver Bulletin", domain="natesilver.net"),
 }
 
 
