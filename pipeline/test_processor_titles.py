@@ -21,3 +21,13 @@ def test_yglesias_title_uses_slow_boring_format() -> None:
         subject_slug="Slow-Boring-Housing-Policy",
     )
     assert title == "2026-02-12 - Slow Boring - Housing Policy"
+
+
+def test_silver_bulletin_title_uses_brand_format() -> None:
+    adapter = SubstackAdapter(brand_name="Silver Bulletin", domain="natesilver.net")
+    title = adapter.format_title(
+        date_str="2026-02-28",
+        subject_raw="Silver Bulletin: The Forecast Was Wrong",
+        subject_slug="Silver-Bulletin-The-Forecast-Was-Wrong",
+    )
+    assert title == "2026-02-28 - Silver Bulletin - The Forecast Was Wrong"

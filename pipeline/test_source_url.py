@@ -83,3 +83,27 @@ def test_extract_substack_source_from_body_link() -> None:
     )
     url = adapters._extract_substack_source_url(raw, "slowboring.com")
     assert url == "https://www.slowboring.com/p/ai-progress-is-giving-me-writers"
+
+
+def test_extract_silver_source_from_list_post_header() -> None:
+    raw = (
+        b"Subject: The Forecast Was Wrong\n"
+        b"Date: Fri, 28 Feb 2026 12:00:00 +0000\n"
+        b"List-Post: <https://www.natesilver.net/p/the-forecast-was-wrong>\n"
+        b"Content-Type: text/plain; charset=utf-8\n\n"
+        b"Text body\n"
+    )
+    url = adapters._extract_substack_source_url(raw, "natesilver.net")
+    assert url == "https://www.natesilver.net/p/the-forecast-was-wrong"
+
+
+def test_extract_silver_source_from_body_link() -> None:
+    raw = (
+        b"Subject: The Forecast Was Wrong\n"
+        b"Date: Fri, 28 Feb 2026 12:00:00 +0000\n"
+        b"Content-Type: text/plain; charset=utf-8\n\n"
+        b"View this post on the web at "
+        b"https://www.natesilver.net/p/the-forecast-was-wrong?utm_source=email\n"
+    )
+    url = adapters._extract_substack_source_url(raw, "natesilver.net")
+    assert url == "https://www.natesilver.net/p/the-forecast-was-wrong"
