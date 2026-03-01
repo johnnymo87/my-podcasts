@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 
@@ -46,6 +48,16 @@ CREATE TABLE IF NOT EXISTS processed_emails (
     r2_key TEXT PRIMARY KEY,
     processed_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS pending_things_happen (
+    id TEXT PRIMARY KEY,
+    email_r2_key TEXT NOT NULL,
+    date_str TEXT NOT NULL,
+    links_json TEXT NOT NULL,
+    process_after TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -66,12 +78,10 @@ class StateStore:
         }
 
         feed_slug_ddl = (
-            "ALTER TABLE episodes "
-            "ADD COLUMN feed_slug TEXT NOT NULL DEFAULT 'general'"
+            "ALTER TABLE episodes ADD COLUMN feed_slug TEXT NOT NULL DEFAULT 'general'"
         )
         category_ddl = (
-            "ALTER TABLE episodes "
-            "ADD COLUMN category TEXT NOT NULL DEFAULT 'News'"
+            "ALTER TABLE episodes ADD COLUMN category TEXT NOT NULL DEFAULT 'News'"
         )
         preset_name_ddl = (
             "ALTER TABLE episodes "
@@ -208,3 +218,41 @@ class StateStore:
             "SELECT DISTINCT feed_slug FROM episodes ORDER BY feed_slug ASC"
         ).fetchall()
         return [str(row["feed_slug"]) for row in rows if row["feed_slug"]]
+
+    def insert_pending_things_happen(
+        self,
+        email_r2_key: str,
+        date_str: str,
+        links_json: str,
+        delay_hours: int = 24,
+    ) -> str:
+        job_id = str(uuid.uuid4())
+        process_after = (
+            datetime.now(tz=UTC) + timedelta(hours=delay_hours)
+        ).isoformat()
+        self._conn.execute(
+            """INSERT INTO pending_things_happen
+               (id, email_r2_key, date_str, links_json, process_after, status)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (job_id, email_r2_key, date_str, links_json, process_after, "pending"),
+        )
+        self._conn.commit()
+        return job_id
+
+    def list_due_things_happen(self) -> list[dict]:
+        now = datetime.now(tz=UTC).isoformat()
+        rows = self._conn.execute(
+            """SELECT id, email_r2_key, date_str, links_json, process_after
+               FROM pending_things_happen
+               WHERE status = 'pending' AND process_after <= ?
+               ORDER BY process_after ASC""",
+            (now,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_things_happen_completed(self, job_id: str) -> None:
+        self._conn.execute(
+            "UPDATE pending_things_happen SET status = 'completed' WHERE id = ?",
+            (job_id,),
+        )
+        self._conn.commit()
