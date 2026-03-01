@@ -14,17 +14,20 @@ Quick start and navigation for humans and coding agents.
    - Main: `https://podcast.mohrbacher.dev/feed.xml`
    - Levine: `https://podcast.mohrbacher.dev/feeds/levine.xml`
    - Yglesias: `https://podcast.mohrbacher.dev/feeds/yglesias.xml`
+   - Silver Bulletin: `https://podcast.mohrbacher.dev/feeds/silver.xml`
+   - Things Happen: `https://podcast.mohrbacher.dev/feeds/things-happen.xml` (created on first episode)
 
 ## Docs TOC
 
 - Architecture and operator context:
-  - `PLAN.md` (workspace-level plan)
   - `CLAUDE.md`
 - Agent skills:
   - `.opencode/skills/monitoring-my-podcasts-pipeline/SKILL.md`
   - `.opencode/skills/monitoring-my-podcasts-pipeline/REFERENCE.md`
   - `.opencode/skills/shipping-my-podcasts-workers/SKILL.md`
   - `.opencode/skills/shipping-my-podcasts-workers/REFERENCE.md`
+  - `.opencode/skills/operating-things-happen-digest/SKILL.md`
+  - `.opencode/skills/operating-things-happen-digest/REFERENCE.md`
 
 ## Asset Locations
 
@@ -32,10 +35,14 @@ Quick start and navigation for humans and coding agents.
   - `assets/podcast/cover-general.jpg`
   - `assets/podcast/cover-levine.jpg`
   - `assets/podcast/cover-yglesias.jpg`
+  - `assets/podcast/cover-silver.jpg`
+  - `assets/podcast/cover-things-happen.jpg`
 - Artwork served via worker URLs:
   - `https://podcast.mohrbacher.dev/cover-general.jpg`
   - `https://podcast.mohrbacher.dev/cover-levine.jpg`
   - `https://podcast.mohrbacher.dev/cover-yglesias.jpg`
+  - `https://podcast.mohrbacher.dev/cover-silver.jpg`
+  - `https://podcast.mohrbacher.dev/cover-things-happen.jpg`
 
 ## Core Paths
 

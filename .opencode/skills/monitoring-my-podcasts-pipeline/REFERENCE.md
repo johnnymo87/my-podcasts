@@ -14,7 +14,7 @@ uv run python -c "import sqlite3; conn=sqlite3.connect('/persist/my-podcasts/sta
 ## R2 object checks
 
 ```bash
-R2_ACCOUNT_ID="$(sudo cat /run/secrets/r2_account_id)" R2_ACCESS_KEY_ID="$(sudo cat /run/secrets/r2_access_key_id)" R2_SECRET_ACCESS_KEY="$(sudo cat /run/secrets/r2_secret_access_key)" uv run python -c "from pipeline.r2 import R2Client; r2=R2Client(); keys=['feed.xml','feeds/levine.xml','feeds/yglesias.xml']; print({k:r2.head_object_size(k) for k in keys})"
+R2_ACCOUNT_ID="$(sudo cat /run/secrets/r2_account_id)" R2_ACCESS_KEY_ID="$(sudo cat /run/secrets/r2_access_key_id)" R2_SECRET_ACCESS_KEY="$(sudo cat /run/secrets/r2_secret_access_key)" uv run python -c "from pipeline.r2 import R2Client; r2=R2Client(); keys=['feed.xml','feeds/levine.xml','feeds/yglesias.xml','feeds/silver.xml','feeds/things-happen.xml']; print({k:r2.head_object_size(k) for k in keys})"
 ```
 
 ## Common failures
