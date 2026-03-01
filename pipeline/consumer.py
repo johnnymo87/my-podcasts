@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import requests
 
 from pipeline.processor import process_r2_email_key
+from pipeline.things_happen_processor import process_things_happen_job
 
 
 if TYPE_CHECKING:
@@ -116,21 +117,39 @@ def consume_forever(
 
     while True:
         messages = consumer.pull(batch_size=5)
+
+        if messages:
+            ack_messages: list[QueueMessage] = []
+            for message in messages:
+                if store.is_processed(message.key):
+                    ack_messages.append(message)
+                    continue
+
+                try:
+                    process_r2_email_key(
+                        message.key, message.route_tag, store, r2_client
+                    )
+                except Exception as exc:
+                    print(f"Failed processing {message.key}: {exc}")
+                    continue
+                ack_messages.append(message)
+
+            consumer.ack(ack_messages)
+
+        # Process any due Things Happen jobs.
+        try:
+            due_jobs = store.list_due_things_happen()
+            for job in due_jobs:
+                try:
+                    print(
+                        f"Processing Things Happen job: {job['id']} ({job['date_str']})"
+                    )
+                    process_things_happen_job(job, store, r2_client)
+                    print(f"Completed Things Happen job: {job['id']}")
+                except Exception as exc:
+                    print(f"Failed Things Happen job {job['id']}: {exc}")
+        except Exception as exc:
+            print(f"Error checking Things Happen jobs: {exc}")
+
         if not messages:
             time.sleep(poll_interval)
-            continue
-
-        ack_messages: list[QueueMessage] = []
-        for message in messages:
-            if store.is_processed(message.key):
-                ack_messages.append(message)
-                continue
-
-            try:
-                process_r2_email_key(message.key, message.route_tag, store, r2_client)
-            except Exception as exc:
-                print(f"Failed processing {message.key}: {exc}")
-                continue
-            ack_messages.append(message)
-
-        consumer.ack(ack_messages)
