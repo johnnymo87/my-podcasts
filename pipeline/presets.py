@@ -38,6 +38,14 @@ PRESETS: tuple[NewsletterPreset, ...] = (
         category="News",
         feed_slug="silver",
     ),
+    NewsletterPreset(
+        name="Things Happen - Money Stuff Links",
+        route_tags=("things-happen",),
+        tts_model="tts-1-hd",
+        tts_voice="nova",
+        category="Business",
+        feed_slug="things-happen",
+    ),
 )
 
 
