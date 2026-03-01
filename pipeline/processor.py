@@ -15,6 +15,7 @@ from pipeline.db import Episode, StateStore
 from pipeline.feed import regenerate_and_upload_feed
 from pipeline.presets import resolve_preset
 from pipeline.source_adapters import get_source_adapter
+from pipeline.things_happen_extractor import extract_things_happen
 
 
 if TYPE_CHECKING:
@@ -52,6 +53,39 @@ def _parse_duration_seconds(mp3_path: Path) -> int | None:
         return int(round(float(result.stdout.strip())))
     except ValueError:
         return None
+
+
+def _maybe_queue_things_happen(
+    *,
+    raw_email_html: str,
+    source_r2_key: str,
+    date_str: str,
+    feed_slug: str,
+    store: StateStore,
+) -> None:
+    """If this is a Levine email, extract Things Happen links and queue a job."""
+    if feed_slug != "levine":
+        return
+    links = extract_things_happen(raw_email_html)
+    if not links:
+        return
+    import json
+
+    links_json = json.dumps(
+        [
+            {
+                "link_text": link.link_text,
+                "raw_url": link.raw_url,
+                "headline_context": link.headline_context,
+            }
+            for link in links
+        ]
+    )
+    store.insert_pending_things_happen(
+        email_r2_key=source_r2_key,
+        date_str=date_str,
+        links_json=links_json,
+    )
 
 
 def process_email_bytes(
@@ -125,6 +159,18 @@ def process_email_bytes(
         duration_seconds=duration_seconds,
     )
     store.insert_episode(episode)
+    # Queue Things Happen job if this is a Levine email.
+    try:
+        raw_html = EmailProcessor(raw_email)._extract_html_part()
+        _maybe_queue_things_happen(
+            raw_email_html=raw_html,
+            source_r2_key=source_r2_key,
+            date_str=date_str,
+            feed_slug=preset.feed_slug,
+            store=store,
+        )
+    except Exception:
+        pass  # Don't let Things Happen extraction failure block the main pipeline.
     store.mark_processed(source_r2_key)
     regenerate_and_upload_feed(store, r2_client)
 

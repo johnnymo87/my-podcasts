@@ -106,3 +106,38 @@ def test_process_things_happen_job_end_to_end(tmp_path, monkeypatch) -> None:
     assert upload_key.startswith("episodes/things-happen/")
 
     store.close()
+
+
+def test_levine_email_creates_pending_things_happen_job(tmp_path) -> None:
+    """Processing a Levine email with Things Happen should create a pending job."""
+    import json
+
+    from pipeline.db import StateStore
+    from pipeline.processor import _maybe_queue_things_happen
+
+    store = StateStore(tmp_path / "test.sqlite3")
+
+    raw_html = """\
+<html><body>
+<h2>Things happen</h2>
+<p>How <a href="https://links.message.bloomberg.com/s/c/FAKE1">Blue Owl</a> sparked a chill. <a href="https://links.message.bloomberg.com/s/c/FAKE2">Janus Bidding War</a> begins.</p>
+</body></html>
+"""
+
+    _maybe_queue_things_happen(
+        raw_email_html=raw_html,
+        source_r2_key="inbox/raw/test.eml",
+        date_str="2026-02-26",
+        feed_slug="levine",
+        store=store,
+    )
+
+    # A pending job should exist (not yet due).
+    rows = store._conn.execute(
+        "SELECT * FROM pending_things_happen WHERE status = 'pending'"
+    ).fetchall()
+    assert len(rows) == 1
+    links = json.loads(rows[0]["links_json"])
+    assert len(links) == 2
+    assert links[0]["link_text"] == "Blue Owl"
+    store.close()
