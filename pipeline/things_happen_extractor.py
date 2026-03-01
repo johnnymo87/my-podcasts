@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+import requests
 from bs4 import BeautifulSoup
 
 
@@ -59,3 +60,12 @@ def extract_things_happen(html_content: str) -> list[ThingsHappenLink]:
         )
 
     return links
+
+
+def resolve_redirect_url(url: str) -> str:
+    """Follow redirects to get the final URL. Returns original on failure."""
+    try:
+        response = requests.head(url, allow_redirects=True, timeout=10)
+        return response.url
+    except Exception:
+        return url

@@ -43,3 +43,33 @@ def test_returns_empty_list_when_no_things_happen_section() -> None:
     html = "<html><body><p>No Things Happen here.</p></body></html>"
     links = extract_things_happen(html)
     assert links == []
+
+
+def test_resolve_redirect_urls(monkeypatch) -> None:
+    """Resolving Bloomberg redirect URLs produces real article URLs."""
+    from pipeline.things_happen_extractor import resolve_redirect_url
+
+    def fake_head(url, **kwargs):
+        class FakeResponse:
+            url = "https://www.bloomberg.com/news/articles/2026-02-26/blue-owl"
+            status_code = 200
+
+        return FakeResponse()
+
+    monkeypatch.setattr("requests.head", fake_head)
+
+    result = resolve_redirect_url("https://links.message.bloomberg.com/s/c/FAKE1")
+    assert result == "https://www.bloomberg.com/news/articles/2026-02-26/blue-owl"
+
+
+def test_resolve_redirect_returns_original_on_failure(monkeypatch) -> None:
+    """If redirect resolution fails, return the original URL."""
+    from pipeline.things_happen_extractor import resolve_redirect_url
+
+    def fake_head(url, **kwargs):
+        raise Exception("network error")
+
+    monkeypatch.setattr("requests.head", fake_head)
+
+    result = resolve_redirect_url("https://links.message.bloomberg.com/s/c/FAKE1")
+    assert result == "https://links.message.bloomberg.com/s/c/FAKE1"
