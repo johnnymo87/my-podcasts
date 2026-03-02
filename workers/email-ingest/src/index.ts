@@ -52,8 +52,14 @@ function isAllowedMessageSender(
 ): boolean {
   const envelopeFrom = message.from.toLowerCase();
   const headerFrom = (message.headers.get("from") ?? "").toLowerCase();
+  const envelopeFromStripped = stripPlusTag(extractEmailAddress(envelopeFrom));
+  const headerFromStripped = stripPlusTag(extractEmailAddress(headerFrom));
   return allowedSenders.some(
-    (sender) => envelopeFrom.includes(sender) || headerFrom.includes(sender),
+    (sender) =>
+      envelopeFrom.includes(sender) ||
+      headerFrom.includes(sender) ||
+      envelopeFromStripped === sender ||
+      headerFromStripped === sender,
   );
 }
 
@@ -75,9 +81,18 @@ function extractEmailAddress(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function stripPlusTag(email: string): string {
+  const [localPart, domain] = email.split("@");
+  if (!domain) return email;
+  const plusIndex = localPart.indexOf("+");
+  if (plusIndex === -1) return email;
+  return `${localPart.slice(0, plusIndex)}@${domain}`;
+}
+
 function routeTagFromSender(from: string): string | null {
   const senderEmail = extractEmailAddress(from);
-  return SENDER_ROUTE_TAGS[senderEmail] ?? null;
+  const stripped = stripPlusTag(senderEmail);
+  return SENDER_ROUTE_TAGS[senderEmail] ?? SENDER_ROUTE_TAGS[stripped] ?? null;
 }
 
 function routeTagFromListId(listIdHeader: string | null): string | null {
