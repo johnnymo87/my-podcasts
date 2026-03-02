@@ -116,7 +116,12 @@ def consume_forever(
     consumer = CloudflareQueueConsumer()
 
     while True:
-        messages = consumer.pull(batch_size=5)
+        try:
+            messages = consumer.pull(batch_size=5)
+        except Exception as exc:
+            print(f"Queue pull failed: {exc}")
+            time.sleep(poll_interval)
+            continue
 
         if messages:
             ack_messages: list[QueueMessage] = []
