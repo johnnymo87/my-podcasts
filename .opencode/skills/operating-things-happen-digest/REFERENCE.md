@@ -15,8 +15,7 @@
 
 3. **Redirect resolution** (`pipeline/things_happen_extractor.py:resolve_redirect_url`): Follows Bloomberg's `links.message.bloomberg.com/s/c/...` redirects via `requests.head(allow_redirects=True)`. Returns original URL on failure.
 
-4. **Article fetching** (`pipeline/article_fetcher.py`): Three-tier fallback:
-   - `archive`: `archive.today/newest/<url>` — full archived article
+4. **Article fetching** (`pipeline/article_fetcher.py`): Two-tier fallback:
    - `live`: Direct URL fetch — publicly available portion (requires 200+ chars)
    - `headline_only`: Just the headline text
 
@@ -48,7 +47,6 @@ The `fetch_article()` function tries sources in order:
 
 | Tier | Source | What you get | Typical issues |
 |------|--------|-------------|----------------|
-| `archive` | `archive.today/newest/<url>` | Full article text | 429 rate limiting, no archived version |
 | `live` | Direct URL | Publicly available portion | Paywall (< 200 chars extracted = rejected) |
 | `headline_only` | N/A | Just the headline | Always succeeds |
 
@@ -69,11 +67,6 @@ Each `FetchedArticle` carries a `source_tier` and `source_label` so the LLM can 
   - No markdown, no "delve"
 
 ## Common failures
-
-### archive.today returns 429 for all requests
-- Expected behavior in production. The fetcher gracefully falls back to `live` or `headline_only`.
-- Future improvement: headless browser or delayed retries.
-- Check: `curl -I "https://archive.today/newest/https://www.bloomberg.com/example"` — if 429, archive.today is blocking automated requests.
 
 ### opencode run fails or times out
 - Check that `opencode` is on the PATH for the service user.

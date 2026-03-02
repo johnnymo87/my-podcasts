@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from urllib.parse import quote
 
 import requests
 from bs4 import BeautifulSoup
@@ -17,7 +16,6 @@ _BROWSER_HEADERS = {
 }
 
 SOURCE_LABELS = {
-    "archive": "Based on the full archived article",
     "live": "Based on the publicly available portion of the article",
     "headline_only": "Based on the headline alone",
 }
@@ -27,7 +25,7 @@ SOURCE_LABELS = {
 class FetchedArticle:
     url: str
     content: str
-    source_tier: str  # "archive", "live", or "headline_only"
+    source_tier: str  # "live" or "headline_only"
 
     @property
     def source_label(self) -> str:
@@ -44,25 +42,6 @@ def _extract_article_text(html: str) -> str:
     text = target.get_text(separator="\n")
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return "\n".join(lines)
-
-
-def _try_archive_today(url: str) -> str | None:
-    """Try to fetch the article from archive.today."""
-    archive_url = f"https://archive.today/newest/{quote(url, safe='')}"
-    try:
-        response = requests.get(
-            archive_url,
-            headers=_BROWSER_HEADERS,
-            timeout=15,
-            allow_redirects=True,
-        )
-        if response.status_code != 200:
-            return None
-        if "/newest/" in response.url:
-            return None
-        return _extract_article_text(response.text)
-    except Exception:
-        return None
 
 
 def _try_live_url(url: str) -> str | None:
@@ -85,11 +64,7 @@ def _try_live_url(url: str) -> str | None:
 
 
 def fetch_article(url: str, headline: str) -> FetchedArticle:
-    """Fetch article content with fallback chain: archive -> live -> headline."""
-    content = _try_archive_today(url)
-    if content:
-        return FetchedArticle(url=url, content=content, source_tier="archive")
-
+    """Fetch article content with fallback: live URL -> headline only."""
     content = _try_live_url(url)
     if content:
         return FetchedArticle(url=url, content=content, source_tier="live")

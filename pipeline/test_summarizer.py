@@ -9,7 +9,7 @@ def test_build_prompt_includes_all_articles() -> None:
         FetchedArticle(
             url="https://example.com/1",
             content="Article about banks.",
-            source_tier="archive",
+            source_tier="live",
         ),
         FetchedArticle(
             url="https://example.com/2",
@@ -21,7 +21,7 @@ def test_build_prompt_includes_all_articles() -> None:
     assert "Article about banks" in prompt
     assert "Tech layoffs headline" in prompt
     assert "2026-02-26" in prompt
-    assert "full archived article" in prompt.lower()
+    assert "publicly available" in prompt.lower()
     assert "headline alone" in prompt.lower()
 
 
