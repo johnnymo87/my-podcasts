@@ -13,6 +13,7 @@ from pipeline.things_happen_agent import (
     is_agent_running,
     launch_things_happen_agent,
     script_path_for_job,
+    stop_agent,
 )
 from pipeline.things_happen_processor import process_things_happen_job
 
@@ -162,6 +163,7 @@ def consume_forever(
                             job, store, r2_client, script_path=script_file
                         )
                         script_file.unlink(missing_ok=True)
+                        stop_agent()
                         print(f"Completed Things Happen job: {job['id']}")
                     elif not is_agent_running():
                         # No script, no agent — launch one.

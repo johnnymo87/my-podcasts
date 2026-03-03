@@ -50,8 +50,7 @@ def test_build_agent_prompt_contains_job_data():
     assert "job-abc" in prompt
     assert "2026-03-02" in prompt
     assert "Blue Owl" in prompt
-    assert "5555" in prompt
-    assert "things-happen-opencode.pid" in prompt
-    assert "fuser" in prompt
     assert "search_related" in prompt
     assert "search_twitter" in prompt
+    assert "Do NOT self-terminate" in prompt
+    assert "operator confirmation" in prompt

@@ -33,6 +33,18 @@ def is_agent_running() -> bool:
         return False
 
 
+def stop_agent() -> None:
+    """Kill the opencode serve process and clean up the PID file."""
+    if not AGENT_PID_FILE.exists():
+        return
+    try:
+        pid = int(AGENT_PID_FILE.read_text().strip())
+        os.kill(pid, 15)  # SIGTERM
+    except (ValueError, ProcessLookupError, PermissionError):
+        pass
+    AGENT_PID_FILE.unlink(missing_ok=True)
+
+
 def build_agent_prompt(job: dict) -> str:
     """Build the initial prompt for the Things Happen agent."""
     job_id = job["id"]
@@ -60,9 +72,13 @@ def build_agent_prompt(job: dict) -> str:
 
 {links_section}
 
-## Step-by-Step Instructions
+## How This Works
 
-Work through the following steps to produce the briefing script:
+Your messages are relayed to the operator's Telegram via pigeon. When you go idle (finish a response and wait), your message is sent to Telegram. The operator can reply, and their reply will be injected as your next user message. Use this to collaborate.
+
+**Do NOT self-terminate.** The consumer process will shut down this server after it detects your script file. Just write the script and stop.
+
+## Step-by-Step Instructions
 
 ### Step 1: Resolve redirect URLs
 
@@ -98,18 +114,20 @@ For each article:
   twitter_result = search_twitter(headline_context)
   ```
 
-### Step 4: Write briefing script
+### Step 4: Present research plan to operator
 
-Write the final briefing script to: `{script_path}`
+After completing research, present a summary of what you found and your plan for the briefing script. Include:
 
-### Step 5: Terminate this agent
+- Which stories have strong content and which were paywalled
+- Which stories you plan to lead with
+- Any interesting angles from Exa or Twitter enrichment
+- Your proposed story order and approximate time allocation
 
-Once the script has been written, terminate the agent server by running:
+**Then stop and wait for operator confirmation before writing the script.** The operator may have feedback on story selection, emphasis, or angles.
 
-```bash
-fuser -k {AGENT_PORT}/tcp
-kill $(cat {AGENT_PID_FILE})
-```
+### Step 5: Write briefing script
+
+After the operator confirms (or if no response within a reasonable time), write the final briefing script to: `{script_path}`
 
 ## Enrichment Guidelines
 
@@ -121,15 +139,11 @@ kill $(cat {AGENT_PID_FILE})
 
 - Write in a conversational, spoken style — this will be read aloud by a text-to-speech system.
 - No markdown formatting (no headers, bullet points, bold, italics, etc.).
-- No the word "delve" — ever.
+- Never use the word "delve."
 - Use plain spoken English suitable for podcast TTS.
 - Keep each story segment focused and digestible.
 - Connect the stories naturally with brief transitions.
 - Aim for 5-8 minutes of spoken content total.
-
-## Pigeon Communication Note
-
-Messages you write while idle will be relayed to Telegram so the operator can follow your progress. Use the question tool when you need to make a decision that requires human input.
 """
     return prompt
 
