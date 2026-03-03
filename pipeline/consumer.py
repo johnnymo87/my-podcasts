@@ -155,16 +155,32 @@ def consume_forever(
                     script_file = script_path_for_job(job["id"])
                     if script_file.exists():
                         # Agent finished — run TTS + publish with the script.
-                        print(
-                            f"Processing Things Happen job with agent script: "
-                            f"{job['id']} ({job['date_str']})"
-                        )
-                        process_things_happen_job(
-                            job, store, r2_client, script_path=script_file
-                        )
-                        script_file.unlink(missing_ok=True)
-                        stop_agent()
-                        print(f"Completed Things Happen job: {job['id']}")
+                        try:
+                            dry_run = os.environ.get(
+                                "THINGS_HAPPEN_DRY_RUN", ""
+                            ).strip()
+                            if dry_run:
+                                print(
+                                    f"DRY RUN: skipping TTS for "
+                                    f"{job['id']} ({job['date_str']}). "
+                                    f"Script at: {script_file}"
+                                )
+                            else:
+                                print(
+                                    f"Processing Things Happen job with "
+                                    f"agent script: "
+                                    f"{job['id']} ({job['date_str']})"
+                                )
+                                process_things_happen_job(
+                                    job,
+                                    store,
+                                    r2_client,
+                                    script_path=script_file,
+                                )
+                                print(f"Completed Things Happen job: {job['id']}")
+                        finally:
+                            script_file.unlink(missing_ok=True)
+                            stop_agent()
                     elif not is_agent_running():
                         # No script, no agent — launch one.
                         print(

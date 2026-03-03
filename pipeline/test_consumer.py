@@ -93,3 +93,103 @@ def test_consume_forever_launches_agent_for_due_job(monkeypatch) -> None:
             pass
 
     assert launched == ["job-1"]
+
+
+def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
+    """When THINGS_HAPPEN_DRY_RUN is set, skip TTS but still clean up."""
+    monkeypatch.setenv("THINGS_HAPPEN_DRY_RUN", "1")
+
+    store = MagicMock()
+    r2_client = MagicMock()
+
+    # Create a fake script file
+    script = tmp_path / "things-happen-job-dry.txt"
+    script.write_text("test script content")
+
+    monkeypatch.setattr("pipeline.consumer.script_path_for_job", lambda job_id: script)
+
+    stopped = []
+    monkeypatch.setattr("pipeline.consumer.stop_agent", lambda: stopped.append(1))
+
+    process_calls = []
+    monkeypatch.setattr(
+        "pipeline.consumer.process_things_happen_job",
+        lambda *a, **kw: process_calls.append(1),
+    )
+
+    store.list_due_things_happen.return_value = [
+        {"id": "job-dry", "date_str": "2026-03-02", "links_json": "[]"}
+    ]
+
+    call_count = 0
+
+    def flaky_pull(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return []
+        raise _Done("done")
+
+    mock_consumer = MagicMock()
+    mock_consumer.pull.side_effect = flaky_pull
+    monkeypatch.setattr(time, "sleep", lambda n: None)
+
+    with patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer):
+        try:
+            consume_forever(store, r2_client, poll_interval=5)
+        except _Done:
+            pass
+
+    # TTS should NOT have been called
+    assert process_calls == []
+    # Cleanup should still happen
+    assert stopped == [1]
+    assert not script.exists()
+
+
+def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> None:
+    """If TTS crashes, stop_agent() and script cleanup still happen via finally."""
+    store = MagicMock()
+    r2_client = MagicMock()
+
+    script = tmp_path / "things-happen-job-fail.txt"
+    script.write_text("test script content")
+
+    monkeypatch.setattr("pipeline.consumer.script_path_for_job", lambda job_id: script)
+
+    stopped = []
+    monkeypatch.setattr("pipeline.consumer.stop_agent", lambda: stopped.append(1))
+
+    def boom(*a, **kw):
+        raise RuntimeError("TTS exploded")
+
+    monkeypatch.setattr("pipeline.consumer.process_things_happen_job", boom)
+
+    store.list_due_things_happen.return_value = [
+        {"id": "job-fail", "date_str": "2026-03-02", "links_json": "[]"}
+    ]
+
+    call_count = 0
+
+    def flaky_pull(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return []
+        raise _Done("done")
+
+    mock_consumer = MagicMock()
+    mock_consumer.pull.side_effect = flaky_pull
+    monkeypatch.setattr(time, "sleep", lambda n: None)
+    monkeypatch.delenv("THINGS_HAPPEN_DRY_RUN", raising=False)
+
+    with patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer):
+        try:
+            consume_forever(store, r2_client, poll_interval=5)
+        except _Done:
+            pass
+
+    # Agent should be stopped even though TTS failed
+    assert stopped == [1]
+    # Script should be cleaned up even though TTS failed
+    assert not script.exists()
