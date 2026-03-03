@@ -141,3 +141,86 @@ def test_levine_email_creates_pending_things_happen_job(tmp_path) -> None:
     assert len(links) == 2
     assert links[0]["link_text"] == "Blue Owl"
     store.close()
+
+
+def test_process_things_happen_job_with_script_file(tmp_path, monkeypatch) -> None:
+    """When script_path is provided, skip steps 1-3 and go straight to TTS."""
+    import subprocess
+
+    from pipeline.db import StateStore
+    from pipeline.things_happen_processor import process_things_happen_job
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+
+    # Insert a pending job with empty links (they won't be used).
+    past = (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()
+    store._conn.execute(
+        """INSERT INTO pending_things_happen
+           (id, email_r2_key, date_str, links_json, process_after, status)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        ("job-script", "inbox/raw/abc.eml", "2026-02-26", "[]", past, "pending"),
+    )
+    store._conn.commit()
+
+    # Write a pre-made script to a temp file.
+    script_file = tmp_path / "my_script.txt"
+    script_file.write_text("This is a pre-written briefing script.", encoding="utf-8")
+
+    # Ensure steps 1-3 are NOT called by making them raise if invoked.
+    monkeypatch.setattr(
+        "pipeline.things_happen_processor.resolve_redirect_url",
+        lambda url: (_ for _ in ()).throw(
+            AssertionError("resolve_redirect_url should not be called")
+        ),
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_processor.fetch_all_articles",
+        lambda links, **kw: (_ for _ in ()).throw(
+            AssertionError("fetch_all_articles should not be called")
+        ),
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_processor.generate_briefing_script",
+        lambda articles, date_str: (_ for _ in ()).throw(
+            AssertionError("generate_briefing_script should not be called")
+        ),
+    )
+
+    # Mock ttsjoin and ffprobe subprocess.
+    def fake_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "ttsjoin":
+            output_file = cmd[cmd.index("--output-file") + 1]
+            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
+            return subprocess.CompletedProcess(cmd, 0)
+        if cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(cmd, 0, stdout="45.0\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+
+    # Mock feed regeneration.
+    monkeypatch.setattr(
+        "pipeline.things_happen_processor.regenerate_and_upload_feed",
+        lambda store, r2_client: None,
+    )
+
+    job = store.list_due_things_happen()[0]
+    process_things_happen_job(job, store, r2_client, script_path=script_file)
+
+    # Job should be marked completed.
+    assert store.list_due_things_happen() == []
+
+    # Episode should be inserted.
+    episodes = store.list_episodes(feed_slug="things-happen")
+    assert len(episodes) == 1
+    assert "Things Happen" in episodes[0].title
+    assert "2026-02-26" in episodes[0].title
+
+    # R2 upload should have been called.
+    r2_client.upload_file.assert_called_once()
+    upload_args = r2_client.upload_file.call_args
+    upload_key = upload_args[0][1]
+    assert upload_key.startswith("episodes/things-happen/")
+
+    store.close()

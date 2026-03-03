@@ -51,21 +51,27 @@ def process_things_happen_job(
     job: dict,
     store: StateStore,
     r2_client: R2Client,
+    script_path: Path | None = None,
 ) -> None:
     """Process a single pending Things Happen job."""
     job_id = job["id"]
     date_str = job["date_str"]
-    links_raw = json.loads(job["links_json"])
 
-    # Step 1: Resolve redirect URLs.
-    for link in links_raw:
-        link["resolved_url"] = resolve_redirect_url(link["raw_url"])
+    if script_path is not None:
+        # Use the pre-written script; skip steps 1-3.
+        script = script_path.read_text(encoding="utf-8")
+    else:
+        links_raw = json.loads(job["links_json"])
 
-    # Step 2: Fetch articles with fallback chain.
-    articles = fetch_all_articles(links_raw, delay_between=3.0)
+        # Step 1: Resolve redirect URLs.
+        for link in links_raw:
+            link["resolved_url"] = resolve_redirect_url(link["raw_url"])
 
-    # Step 3: Generate briefing script via LLM.
-    script = generate_briefing_script(articles, date_str=date_str)
+        # Step 2: Fetch articles with fallback chain.
+        articles = fetch_all_articles(links_raw, delay_between=3.0)
+
+        # Step 3: Generate briefing script via LLM.
+        script = generate_briefing_script(articles, date_str=date_str)
 
     # Step 4: TTS.
     episode_slug = f"{date_str}-things-happen"
