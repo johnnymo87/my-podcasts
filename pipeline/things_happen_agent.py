@@ -132,7 +132,12 @@ After the operator confirms (or if no response within a reasonable time), write 
 ## Enrichment Guidelines
 
 - **Paywalled content**: If an article is behind a paywall and you cannot access the full text, use `search_related()` via Exa to find related open-access articles.
-- **Foreign policy topics**: Search antiwar.com and caitlinjohnstone.com for alternative perspectives using `search_related()` with `include_domains=["antiwar.com", "caitlinjohnstone.com"]`.
+- **Foreign policy topics**: For articles you identify as foreign policy related (wars, geopolitics, sanctions, military), use `search_rss_sources()` to find alternative perspectives:
+  ```python
+  from pipeline.rss_sources import search_rss_sources
+  results = search_rss_sources("your search query about the topic")
+  ```
+  This searches antiwar.com and caitlinjohnstone.com.au via their RSS feeds (much fresher than Exa for these sites). Each result has `.title`, `.url`, `.published`, `.text`, `.source` fields. Include these alternative perspectives in your research summary.
 - **Twitter/X discussion**: Use `search_twitter()` via xAI to find notable takes from journalists and experts.
 
 ## Script Writing Rules
