@@ -190,10 +190,10 @@ def launch_things_happen_agent(job: dict) -> bool:
         session_resp.raise_for_status()
         session_id = session_resp.json()["id"]
 
-        # Send prompt
+        # Send prompt (opencode API expects {parts: [{type:"text", text:"..."}]})
         prompt_resp = requests.post(
             f"{base_url}/session/{session_id}/prompt_async",
-            json={"content": prompt},
+            json={"parts": [{"type": "text", "text": prompt}]},
             timeout=10,
         )
         prompt_resp.raise_for_status()
