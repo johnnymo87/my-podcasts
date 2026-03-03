@@ -11,6 +11,9 @@ import requests
 
 AGENT_PORT = 5555
 AGENT_PID_FILE = Path("/tmp/things-happen-opencode.pid")
+OPENCODE_BIN = os.environ.get(
+    "OPENCODE_BIN", str(Path.home() / ".nix-profile" / "bin" / "opencode")
+)
 
 
 def script_path_for_job(job_id: str) -> Path:
@@ -150,9 +153,12 @@ def launch_things_happen_agent(job: dict) -> bool:
     # Build the prompt
     prompt = build_agent_prompt(job)
 
-    # Start opencode server
+    # Start opencode server in the project directory so it picks up
+    # AGENTS.md, skills, and .opencode/ configuration.
+    project_dir = Path(__file__).resolve().parent.parent
     proc = subprocess.Popen(
-        ["opencode", "serve", "--port", str(AGENT_PORT)],
+        [OPENCODE_BIN, "serve", "--port", str(AGENT_PORT)],
+        cwd=project_dir,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
