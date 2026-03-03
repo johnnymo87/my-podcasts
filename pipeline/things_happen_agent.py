@@ -156,9 +156,12 @@ def launch_things_happen_agent(job: dict) -> bool:
     # Start opencode server in the project directory so it picks up
     # AGENTS.md, skills, and .opencode/ configuration.
     # Auto-approve all tool permissions so the headless agent doesn't hang
-    # waiting for user approval.
+    # waiting for user approval. Include explicit external_directory allow.
     project_dir = Path(__file__).resolve().parent.parent
-    env = {**os.environ, "OPENCODE_PERMISSION": '{"*": "allow"}'}
+    env = {
+        **os.environ,
+        "OPENCODE_PERMISSION": '{"*": "allow", "external_directory": "allow", "doom_loop": "allow"}',
+    }
     proc = subprocess.Popen(
         [OPENCODE_BIN, "serve", "--port", str(AGENT_PORT)],
         cwd=project_dir,
