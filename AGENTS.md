@@ -50,6 +50,23 @@ Quick start and navigation for humans and coding agents.
 - Pipeline + feed generation: `pipeline/`
 - Email ingest worker: `workers/email-ingest/`
 - Podcast serving worker: `workers/podcast-serve/`
+- Things Happen AI agent: `pipeline/things_happen_agent.py` (launcher), `pipeline/exa_client.py` (Exa wrapper), `pipeline/xai_client.py` (xAI/Grok wrapper)
+
+## Things Happen Pipeline
+
+When a Levine email with a "Things Happen" section is processed, the consumer **immediately** queues and launches an AI agent — there is no 24-hour delay.
+
+**Flow:**
+1. Email parsed → links extracted by `things_happen_extractor.py`
+2. Consumer calls `things_happen_agent.py` which launches an `opencode serve` agent on port 5555
+3. Agent enriches headlines using **Exa** (full-text article search) and **xAI/Grok** for analysis
+4. Agent writes the briefing script to `/tmp/things-happen-<job_id>.txt`
+5. Script handed off to existing TTS + publish pipeline (`ttsjoin` → R2 upload → feed update)
+
+**New modules:**
+- `pipeline/things_happen_agent.py` — agent launcher; contains `build_agent_prompt()`
+- `pipeline/exa_client.py` — Exa search API wrapper
+- `pipeline/xai_client.py` — xAI/Grok API wrapper
 
 ## Landing the Plane (Session Completion)
 
