@@ -142,6 +142,8 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
 
     # TTS should NOT have been called
     assert process_calls == []
+    # Job should be marked completed so it doesn't re-launch
+    store.mark_things_happen_completed.assert_called_once_with("job-dry")
     # Cleanup should still happen
     assert stopped == [1]
     assert not script.exists()

@@ -14,6 +14,8 @@ dependencies = [
     "requests (>=2.32.0)",
     "exa-py (>=2.0.0)",
     "xai-sdk>=1.7.0",
+    "feedparser>=6.0.12",
+    "trafilatura>=2.0.0",
 ]
 
 

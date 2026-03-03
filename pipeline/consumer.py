@@ -165,6 +165,7 @@ def consume_forever(
                                     f"{job['id']} ({job['date_str']}). "
                                     f"Script at: {script_file}"
                                 )
+                                store.mark_things_happen_completed(job["id"])
                             else:
                                 print(
                                     f"Processing Things Happen job with "
