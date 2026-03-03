@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from pipeline.consumer import consume_forever
@@ -45,3 +46,50 @@ def test_consume_forever_retries_on_pull_exception(monkeypatch) -> None:
     assert call_count == 2, f"Expected 2 pull calls, got {call_count}"
     # Should have slept once after the first failure
     assert 5 in slept, f"Expected sleep(5) after failure, got slept={slept}"
+
+
+def test_consume_forever_launches_agent_for_due_job(monkeypatch) -> None:
+    """When a due Things Happen job exists with no script file and no agent running,
+    consumer launches agent."""
+    store = MagicMock()
+    r2_client = MagicMock()
+
+    launched = []
+
+    def fake_launch(job):
+        launched.append(job["id"])
+        return True
+
+    monkeypatch.setattr("pipeline.consumer.launch_things_happen_agent", fake_launch)
+    monkeypatch.setattr("pipeline.consumer.is_agent_running", lambda: False)
+    monkeypatch.setattr(
+        "pipeline.consumer.script_path_for_job",
+        lambda job_id: Path("/nonexistent/script.txt"),
+    )
+
+    store.list_due_things_happen.return_value = [
+        {"id": "job-1", "date_str": "2026-03-02", "links_json": "[]"}
+    ]
+
+    call_count = 0
+
+    def flaky_pull(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return []
+        raise _Done("done")
+
+    mock_consumer = MagicMock()
+    mock_consumer.pull.side_effect = flaky_pull
+
+    slept = []
+    monkeypatch.setattr(time, "sleep", lambda n: slept.append(n))
+
+    with patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer):
+        try:
+            consume_forever(store, r2_client, poll_interval=5)
+        except _Done:
+            pass
+
+    assert launched == ["job-1"]

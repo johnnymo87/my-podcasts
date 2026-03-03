@@ -9,6 +9,11 @@ from typing import TYPE_CHECKING, Any
 import requests
 
 from pipeline.processor import process_r2_email_key
+from pipeline.things_happen_agent import (
+    is_agent_running,
+    launch_things_happen_agent,
+    script_path_for_job,
+)
 from pipeline.things_happen_processor import process_things_happen_job
 
 
@@ -146,11 +151,26 @@ def consume_forever(
             due_jobs = store.list_due_things_happen()
             for job in due_jobs:
                 try:
-                    print(
-                        f"Processing Things Happen job: {job['id']} ({job['date_str']})"
-                    )
-                    process_things_happen_job(job, store, r2_client)
-                    print(f"Completed Things Happen job: {job['id']}")
+                    script_file = script_path_for_job(job["id"])
+                    if script_file.exists():
+                        # Agent finished — run TTS + publish with the script.
+                        print(
+                            f"Processing Things Happen job with agent script: "
+                            f"{job['id']} ({job['date_str']})"
+                        )
+                        process_things_happen_job(
+                            job, store, r2_client, script_path=script_file
+                        )
+                        script_file.unlink(missing_ok=True)
+                        print(f"Completed Things Happen job: {job['id']}")
+                    elif not is_agent_running():
+                        # No script, no agent — launch one.
+                        print(
+                            f"Launching Things Happen agent for job: "
+                            f"{job['id']} ({job['date_str']})"
+                        )
+                        launch_things_happen_agent(job)
+                    # else: agent is running, wait for it to finish.
                 except Exception as exc:
                     print(f"Failed Things Happen job {job['id']}: {exc}")
         except Exception as exc:
