@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 import xai_sdk
-from xai_sdk.chat import SearchParameters, user
-from xai_sdk.search import x_source
+from xai_sdk.chat import user
+from xai_sdk.tools import x_search
 
 logger = logging.getLogger(__name__)
 
@@ -36,19 +36,11 @@ def search_twitter(
         now = datetime.now(tz=UTC)
         from_date = now - timedelta(days=lookback_days)
 
-        search_params = SearchParameters(
-            sources=[x_source()],
-            mode="on",
-            from_date=from_date,
-            to_date=now,
-            return_citations=True,
-        )
-
         client = xai_sdk.Client(api_key=api_key)
         try:
             chat = client.chat.create(
                 model=XAI_MODEL,
-                search_parameters=search_params,
+                tools=[x_search(from_date=from_date, to_date=now)],
             )
             chat.append(
                 user(
