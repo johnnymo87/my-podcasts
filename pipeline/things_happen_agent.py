@@ -210,4 +210,4 @@ def launch_things_happen_agent(job: dict) -> bool:
             AGENT_PID_FILE.unlink(missing_ok=True)
         except Exception:
             pass
-        return False
+        raise
