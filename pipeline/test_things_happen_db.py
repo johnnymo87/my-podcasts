@@ -21,11 +21,10 @@ def test_insert_and_list_pending_things_happen(tmp_path) -> None:
         email_r2_key="inbox/raw/abc.eml",
         date_str="2026-02-26",
         links_json=links_json,
-        delay_hours=24,
     )
-    # Should not be due yet (24h in the future).
+    # Default delay is 0, so the job should be immediately due.
     due = store.list_due_things_happen()
-    assert len(due) == 0
+    assert len(due) == 1
     store.close()
 
 

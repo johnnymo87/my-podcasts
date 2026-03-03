@@ -224,7 +224,7 @@ class StateStore:
         email_r2_key: str,
         date_str: str,
         links_json: str,
-        delay_hours: int = 24,
+        delay_hours: int = 0,
     ) -> str:
         job_id = str(uuid.uuid4())
         process_after = (
