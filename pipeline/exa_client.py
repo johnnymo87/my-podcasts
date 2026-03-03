@@ -29,15 +29,13 @@ def search_related(
 
     try:
         exa = Exa(api_key=api_key)
-        kwargs: dict = {
-            "num_results": num_results,
-            "type": "auto",
-            "contents": {"text": {"max_characters": 3000}},
-        }
-        if include_domains:
-            kwargs["include_domains"] = include_domains
-
-        response = exa.search_and_contents(headline, **kwargs)
+        response = exa.search(
+            headline,
+            num_results=num_results,
+            type="auto",
+            contents={"text": {"max_characters": 3000}},
+            include_domains=include_domains,
+        )
 
         return [
             ExaResult(

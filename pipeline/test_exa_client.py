@@ -27,7 +27,7 @@ def test_search_related_returns_results(monkeypatch: pytest.MonkeyPatch) -> None
 
     with patch("pipeline.exa_client.Exa") as MockExa:
         mock_exa_instance = MockExa.return_value
-        mock_exa_instance.search_and_contents.return_value = mock_response
+        mock_exa_instance.search.return_value = mock_response
 
         results = search_related("test headline")
 
@@ -51,14 +51,14 @@ def test_search_related_with_include_domains(monkeypatch: pytest.MonkeyPatch) ->
 
     with patch("pipeline.exa_client.Exa") as MockExa:
         mock_exa_instance = MockExa.return_value
-        mock_exa_instance.search_and_contents.return_value = mock_response
+        mock_exa_instance.search.return_value = mock_response
 
         results = search_related(
             "test headline",
             include_domains=["reuters.com", "apnews.com"],
         )
 
-        call_kwargs = mock_exa_instance.search_and_contents.call_args
+        call_kwargs = mock_exa_instance.search.call_args
         assert call_kwargs.kwargs.get("include_domains") == [
             "reuters.com",
             "apnews.com",
