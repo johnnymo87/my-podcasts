@@ -12,6 +12,8 @@ dependencies = [
     "beautifulsoup4 (>=4.12.3,<5.0.0)",
     "boto3 (>=1.35.0)",
     "requests (>=2.32.0)",
+    "exa-py (>=2.0.0)",
+    "openai (>=1.0.0)",
 ]
 
 
