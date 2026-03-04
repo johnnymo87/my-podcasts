@@ -27,6 +27,12 @@ class ResearchDirective(BaseModel):
     fp_query: str = Field(
         description="A concise query to search antiwar/independent RSS feeds (2-4 keywords). Empty string if is_foreign_policy is false."  # noqa: E501
     )
+    is_ai: bool = Field(
+        description="True if the story focuses on artificial intelligence, LLMs, AI companies, or AI safety"  # noqa: E501
+    )
+    ai_query: str = Field(
+        description="A concise query to search AI-focused independent RSS feeds (2-4 keywords). Empty string if is_ai is false."  # noqa: E501
+    )
 
 
 class ResearchPlan(BaseModel):
@@ -36,7 +42,7 @@ class ResearchPlan(BaseModel):
 def generate_research_plan(
     headlines_with_snippets: list[str],
 ) -> list[ResearchDirective]:
-    """Ask Gemini 2.5 Flash to generate a research plan for the provided articles."""
+    """Ask Gemini 3.1 Flash-Lite to generate a research plan for the provided articles."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return []
@@ -52,7 +58,7 @@ def generate_research_plan(
 
     try:
         response = client.models.generate_content(
-            model="gemini-3-flash-preview",
+            model="gemini-3.1-flash-lite",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",

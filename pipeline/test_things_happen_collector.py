@@ -46,6 +46,8 @@ def test_collect_all_artifacts(
             xai_query="xai test",
             is_foreign_policy=True,
             fp_query="rss test",
+            is_ai=True,
+            ai_query="ai test",
         )
     ]
 
@@ -97,5 +99,12 @@ def test_collect_all_artifacts(
     xai_file = list((work_dir / "enrichment" / "xai").glob("*.md"))[0]
     assert "Xai summary" in xai_file.read_text()
 
-    rss_file = list((work_dir / "enrichment" / "rss").glob("*.md"))[0]
-    assert "Rss text" in rss_file.read_text()
+    rss_fp_files = list((work_dir / "enrichment" / "rss").glob("*-fp.md"))
+    assert len(rss_fp_files) == 1
+    assert "Rss text" in rss_fp_files[0].read_text()
+    assert "Alternative Perspectives" in rss_fp_files[0].read_text()
+
+    rss_ai_files = list((work_dir / "enrichment" / "rss").glob("*-ai.md"))
+    assert len(rss_ai_files) == 1
+    assert "Rss text" in rss_ai_files[0].read_text()
+    assert "AI Perspectives" in rss_ai_files[0].read_text()

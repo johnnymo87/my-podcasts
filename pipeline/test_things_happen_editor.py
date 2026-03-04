@@ -37,6 +37,8 @@ def test_generate_research_plan_success(mock_client_class, monkeypatch) -> None:
                 xai_query="Middle East war",
                 is_foreign_policy=True,
                 fp_query="Middle East war",
+                is_ai=False,
+                ai_query="",
             )
         ]
     )
@@ -51,7 +53,7 @@ def test_generate_research_plan_success(mock_client_class, monkeypatch) -> None:
     # Verify the client was called correctly
     mock_client.models.generate_content.assert_called_once()
     kwargs = mock_client.models.generate_content.call_args[1]
-    assert kwargs["model"] == "gemini-2.5-flash"
+    assert kwargs["model"] == "gemini-3.1-flash-lite"
     assert "War in Middle East escalates" in kwargs["contents"]
 
 

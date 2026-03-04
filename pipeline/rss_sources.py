@@ -43,6 +43,16 @@ DEFAULT_SOURCES: list[RssSource] = [
     ),
 ]
 
+FP_SOURCES = DEFAULT_SOURCES
+
+AI_SOURCES: list[RssSource] = [
+    RssSource(
+        name="zvi_substack",
+        feed_url="https://thezvi.substack.com/feed",
+        wp_search_base=None,  # Substack RSS ignores ?s=, relies on fallback keyword scoring
+    ),
+]
+
 _WORD_RE = re.compile(r"[a-z0-9']+")
 _SESSION: requests.Session | None = None
 
