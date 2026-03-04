@@ -48,23 +48,25 @@ def test_consume_forever_retries_on_pull_exception(monkeypatch) -> None:
     assert 5 in slept, f"Expected sleep(5) after failure, got slept={slept}"
 
 
-def test_consume_forever_launches_agent_for_due_job(monkeypatch) -> None:
+def test_consume_forever_launches_agent_for_due_job(monkeypatch, tmp_path) -> None:
     """When a due Things Happen job exists with no script file and no agent running,
-    consumer launches agent."""
+    consumer runs collection phase then launches agent."""
     store = MagicMock()
     r2_client = MagicMock()
 
     launched = []
 
-    def fake_launch(job):
+    def fake_launch(job, work_dir):
         launched.append(job["id"])
         return True
 
     monkeypatch.setattr("pipeline.consumer.launch_things_happen_agent", fake_launch)
     monkeypatch.setattr("pipeline.consumer.is_agent_running", lambda: False)
+
+    collect_calls = []
     monkeypatch.setattr(
-        "pipeline.consumer.script_path_for_job",
-        lambda job_id: Path("/nonexistent/script.txt"),
+        "pipeline.consumer.collect_all_artifacts",
+        lambda job_id, links_raw, work_dir: collect_calls.append(job_id),
     )
 
     store.list_due_things_happen.return_value = [
@@ -93,6 +95,7 @@ def test_consume_forever_launches_agent_for_due_job(monkeypatch) -> None:
             pass
 
     assert launched == ["job-1"]
+    assert collect_calls == ["job-1"]
 
 
 def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
@@ -102,11 +105,12 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
     store = MagicMock()
     r2_client = MagicMock()
 
-    # Create a fake script file
-    script = tmp_path / "things-happen-job-dry.txt"
+    # Use a unique job ID, create the work dir and script at /tmp/things-happen-<id>
+    job_id = "job-dry-test-unique-12345"
+    work_dir = Path(f"/tmp/things-happen-{job_id}")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    script = work_dir / "script.txt"
     script.write_text("test script content")
-
-    monkeypatch.setattr("pipeline.consumer.script_path_for_job", lambda job_id: script)
 
     stopped = []
     monkeypatch.setattr("pipeline.consumer.stop_agent", lambda: stopped.append(1))
@@ -118,7 +122,7 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
     )
 
     store.list_due_things_happen.return_value = [
-        {"id": "job-dry", "date_str": "2026-03-02", "links_json": "[]"}
+        {"id": job_id, "date_str": "2026-03-02", "links_json": "[]"}
     ]
 
     call_count = 0
@@ -134,7 +138,14 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
     mock_consumer.pull.side_effect = flaky_pull
     monkeypatch.setattr(time, "sleep", lambda n: None)
 
-    with patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer):
+    copy_calls: list[tuple] = []
+    rmtree_calls: list = []
+
+    with (
+        patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
+        patch("shutil.copy", lambda src, dst: copy_calls.append((src, dst))),
+        patch("shutil.rmtree", lambda path: rmtree_calls.append(path)),
+    ):
         try:
             consume_forever(store, r2_client, poll_interval=5)
         except _Done:
@@ -143,21 +154,28 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
     # TTS should NOT have been called
     assert process_calls == []
     # Job should be marked completed so it doesn't re-launch
-    store.mark_things_happen_completed.assert_called_once_with("job-dry")
-    # Cleanup should still happen
+    store.mark_things_happen_completed.assert_called_once_with(job_id)
+    # stop_agent should be called
     assert stopped == [1]
-    assert not script.exists()
+    # work_dir should be cleaned up via rmtree
+    assert len(rmtree_calls) == 1
+    assert rmtree_calls[0] == work_dir
+    # Script should have been copied to persist
+    assert len(copy_calls) == 1
+    assert copy_calls[0][0] == script
 
 
 def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> None:
-    """If TTS crashes, stop_agent() and script cleanup still happen via finally."""
+    """If TTS crashes, stop_agent() and work_dir cleanup still happen via finally."""
     store = MagicMock()
     r2_client = MagicMock()
 
-    script = tmp_path / "things-happen-job-fail.txt"
+    # Use a unique job ID, create the work dir and script at /tmp/things-happen-<id>
+    job_id = "job-fail-test-unique-67890"
+    work_dir = Path(f"/tmp/things-happen-{job_id}")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    script = work_dir / "script.txt"
     script.write_text("test script content")
-
-    monkeypatch.setattr("pipeline.consumer.script_path_for_job", lambda job_id: script)
 
     stopped = []
     monkeypatch.setattr("pipeline.consumer.stop_agent", lambda: stopped.append(1))
@@ -168,7 +186,7 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
     monkeypatch.setattr("pipeline.consumer.process_things_happen_job", boom)
 
     store.list_due_things_happen.return_value = [
-        {"id": "job-fail", "date_str": "2026-03-02", "links_json": "[]"}
+        {"id": job_id, "date_str": "2026-03-02", "links_json": "[]"}
     ]
 
     call_count = 0
@@ -185,7 +203,13 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(time, "sleep", lambda n: None)
     monkeypatch.delenv("THINGS_HAPPEN_DRY_RUN", raising=False)
 
-    with patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer):
+    rmtree_calls: list = []
+
+    with (
+        patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
+        patch("shutil.rmtree", lambda path: rmtree_calls.append(path)),
+        patch("shutil.copy", lambda src, dst: None),
+    ):
         try:
             consume_forever(store, r2_client, poll_interval=5)
         except _Done:
@@ -193,5 +217,6 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
 
     # Agent should be stopped even though TTS failed
     assert stopped == [1]
-    # Script should be cleaned up even though TTS failed
-    assert not script.exists()
+    # work_dir should be cleaned up via rmtree even though TTS failed
+    assert len(rmtree_calls) == 1
+    assert rmtree_calls[0] == work_dir

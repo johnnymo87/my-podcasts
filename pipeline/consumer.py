@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import requests
@@ -12,9 +14,9 @@ from pipeline.processor import process_r2_email_key
 from pipeline.things_happen_agent import (
     is_agent_running,
     launch_things_happen_agent,
-    script_path_for_job,
     stop_agent,
 )
+from pipeline.things_happen_collector import collect_all_artifacts
 from pipeline.things_happen_processor import process_things_happen_job
 
 
@@ -152,7 +154,9 @@ def consume_forever(
             due_jobs = store.list_due_things_happen()
             for job in due_jobs:
                 try:
-                    script_file = script_path_for_job(job["id"])
+                    work_dir = Path(f"/tmp/things-happen-{job['id']}")
+                    script_file = work_dir / "script.txt"
+
                     if script_file.exists():
                         # Agent finished — run TTS + publish with the script.
                         try:
@@ -179,16 +183,36 @@ def consume_forever(
                                     script_path=script_file,
                                 )
                                 print(f"Completed Things Happen job: {job['id']}")
+
+                            # Copy to persistent storage for future context
+                            persist_dir = Path(
+                                "/persist/my-podcasts/scripts/things-happen"
+                            )
+                            persist_dir.mkdir(parents=True, exist_ok=True)
+                            persist_path = persist_dir / f"{job['date_str']}.txt"
+
+                            # Use shutil.copy to overwrite if it exists
+                            shutil.copy(script_file, persist_path)
+
                         finally:
-                            script_file.unlink(missing_ok=True)
+                            # Clean up the entire working directory
+                            if work_dir.exists():
+                                shutil.rmtree(work_dir)
                             stop_agent()
                     elif not is_agent_running():
-                        # No script, no agent — launch one.
+                        # No script, no agent — run collection phase then launch agent.
+                        print(
+                            f"Running collection phase for job: "
+                            f"{job['id']} ({job['date_str']})"
+                        )
+                        links_raw = json.loads(job["links_json"])
+                        collect_all_artifacts(job["id"], links_raw, work_dir)
+
                         print(
                             f"Launching Things Happen agent for job: "
                             f"{job['id']} ({job['date_str']})"
                         )
-                        launch_things_happen_agent(job)
+                        launch_things_happen_agent(job, work_dir)
                     # else: agent is running, wait for it to finish.
                 except Exception as exc:
                     print(f"Failed Things Happen job {job['id']}: {exc}")
