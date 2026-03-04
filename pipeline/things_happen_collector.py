@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from pipeline.article_fetcher import fetch_all_articles
@@ -20,7 +19,12 @@ def _slugify(text: str) -> str:
     return safe.strip("-")[:50]
 
 
-def collect_all_artifacts(job_id: str, links_raw: list[dict], work_dir: Path) -> None:
+def collect_all_artifacts(
+    job_id: str,
+    links_raw: list[dict],
+    work_dir: Path,
+    scripts_source_dir: Path | None = None,
+) -> None:
     """
     Phase 1: Fetch articles and setup directories.
     Phase 2: Generate research plan via Editor AI.
@@ -43,6 +47,9 @@ def collect_all_artifacts(job_id: str, links_raw: list[dict], work_dir: Path) ->
 
     articles = fetch_all_articles(links_raw, delay_between=1.0)
 
+    if not articles:
+        return
+
     headlines_with_snippets = []
 
     for i, art in enumerate(articles):
@@ -54,11 +61,17 @@ def collect_all_artifacts(job_id: str, links_raw: list[dict], work_dir: Path) ->
         art_path.write_text(content, encoding="utf-8")
 
         # Build snippet for the Editor AI
-        snippet = f"Headline: {art.headline}\nContext: {art.content[:300]}..."
+        truncated = art.content[:300]
+        suffix = "..." if len(art.content) > 300 else ""
+        snippet = f"Headline: {art.headline}\nContext: {truncated}{suffix}"
         headlines_with_snippets.append(snippet)
 
     # Copy trailing window context (last 3 scripts)
-    scripts_dir = Path("/persist/my-podcasts/scripts/things-happen")
+    scripts_dir = (
+        scripts_source_dir
+        if scripts_source_dir is not None
+        else Path("/persist/my-podcasts/scripts/things-happen")
+    )
     if scripts_dir.exists():
         scripts = sorted(scripts_dir.glob("*.txt"), reverse=True)[:3]
         for script in scripts:
@@ -79,8 +92,8 @@ def collect_all_artifacts(job_id: str, links_raw: list[dict], work_dir: Path) ->
             exa_results = search_related(directive.exa_query)
             if exa_results:
                 out = f"# Exa Results for: {directive.headline}\nQuery: {directive.exa_query}\n\n"
-                for r in exa_results:
-                    out += f"## [{r.title}]({r.url})\n{r.text}\n\n"
+                for exa_r in exa_results:
+                    out += f"## [{exa_r.title}]({exa_r.url})\n{exa_r.text}\n\n"
                 (exa_dir / f"{slug}.md").write_text(out, encoding="utf-8")
 
         # xAI search
@@ -95,7 +108,11 @@ def collect_all_artifacts(job_id: str, links_raw: list[dict], work_dir: Path) ->
             rss_results = search_rss_sources(directive.fp_query)
             if rss_results:
                 out = f"# RSS Alternative Perspectives for: {directive.headline}\nQuery: {directive.fp_query}\n\n"
-                for r in rss_results:
-                    pub = r.published.strftime("%Y-%m-%d") if r.published else "Unknown"
-                    out += f"## [{r.source}] {r.title}\nPublished: {pub}\nURL: {r.url}\n\n{r.text}\n\n"
+                for rss_r in rss_results:
+                    pub = (
+                        rss_r.published.strftime("%Y-%m-%d")
+                        if rss_r.published
+                        else "Unknown"
+                    )
+                    out += f"## [{rss_r.source}] {rss_r.title}\nPublished: {pub}\nURL: {rss_r.url}\n\n{rss_r.text}\n\n"
                 (rss_dir / f"{slug}.md").write_text(out, encoding="utf-8")

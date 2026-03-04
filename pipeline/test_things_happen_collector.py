@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from pipeline.article_fetcher import Article
 from pipeline.exa_client import ExaResult
@@ -72,19 +71,7 @@ def test_collect_all_artifacts(
     links = [{"raw_url": "http://raw.com", "headline_context": "context"}]
     work_dir = tmp_path / "work"
 
-    with patch("pipeline.things_happen_collector.Path") as mock_path:
-        # We need Path to behave normally for work_dir, but intercept the scripts_dir
-        # The easiest way is to mock just the specific path string
-        original_path = Path
-
-        def side_effect(path_str):
-            if path_str == "/persist/my-podcasts/scripts/things-happen":
-                return scripts_dir
-            return original_path(path_str)
-
-        mock_path.side_effect = side_effect
-
-        collect_all_artifacts("job123", links, work_dir)
+    collect_all_artifacts("job123", links, work_dir, scripts_source_dir=scripts_dir)
 
     # Verify directories created
     assert (work_dir / "articles").exists()
