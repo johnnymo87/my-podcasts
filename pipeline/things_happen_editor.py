@@ -42,7 +42,7 @@ class ResearchPlan(BaseModel):
 def generate_research_plan(
     headlines_with_snippets: list[str],
 ) -> list[ResearchDirective]:
-    """Ask Gemini 3.1 Flash-Lite to generate a research plan for the provided articles."""
+    """Ask Gemini 3.1 Flash-Lite Preview to generate a research plan for the provided articles."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return []
@@ -58,7 +58,7 @@ def generate_research_plan(
 
     try:
         response = client.models.generate_content(
-            model="gemini-3.1-flash-lite",
+            model="gemini-3.1-flash-lite-preview",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
