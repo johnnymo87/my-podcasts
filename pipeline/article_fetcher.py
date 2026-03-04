@@ -32,6 +32,15 @@ class FetchedArticle:
         return SOURCE_LABELS.get(self.source_tier, self.source_tier)
 
 
+@dataclass(frozen=True)
+class Article:
+    """An article with its headline, URL, and fetched content."""
+
+    headline: str
+    url: str
+    content: str
+
+
 def _extract_article_text(html: str) -> str:
     """Extract readable text from an HTML page."""
     soup = BeautifulSoup(html, "html.parser")
@@ -75,12 +84,18 @@ def fetch_article(url: str, headline: str) -> FetchedArticle:
 def fetch_all_articles(
     links: list[dict],
     delay_between: float = 3.0,
-) -> list[FetchedArticle]:
+) -> list[Article]:
     """Fetch all articles with a delay between requests to be polite."""
-    results: list[FetchedArticle] = []
+    results: list[Article] = []
     for i, link in enumerate(links):
         if i > 0:
             time.sleep(delay_between)
-        article = fetch_article(link["resolved_url"], link["headline_context"])
-        results.append(article)
+        fetched = fetch_article(link["resolved_url"], link["headline_context"])
+        results.append(
+            Article(
+                headline=link["headline_context"],
+                url=fetched.url,
+                content=fetched.content,
+            )
+        )
     return results
