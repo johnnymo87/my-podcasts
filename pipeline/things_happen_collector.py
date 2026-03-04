@@ -89,30 +89,39 @@ def collect_all_artifacts(
 
         # Exa search
         if directive.needs_exa and directive.exa_query:
-            exa_results = search_related(directive.exa_query)
-            if exa_results:
-                out = f"# Exa Results for: {directive.headline}\nQuery: {directive.exa_query}\n\n"
-                for exa_r in exa_results:
-                    out += f"## [{exa_r.title}]({exa_r.url})\n{exa_r.text}\n\n"
-                (exa_dir / f"{slug}.md").write_text(out, encoding="utf-8")
+            try:
+                exa_results = search_related(directive.exa_query)
+                if exa_results:
+                    out = f"# Exa Results for: {directive.headline}\nQuery: {directive.exa_query}\n\n"
+                    for exa_r in exa_results:
+                        out += f"## [{exa_r.title}]({exa_r.url})\n{exa_r.text}\n\n"
+                    (exa_dir / f"{slug}.md").write_text(out, encoding="utf-8")
+            except Exception as e:
+                print(f"[collector] Exa search failed for '{directive.exa_query}': {e}")
 
         # xAI search
         if directive.needs_xai and directive.xai_query:
-            xai_result = search_twitter(directive.xai_query)
-            if xai_result:
-                out = f"# Twitter Summary for: {directive.headline}\nQuery: {directive.xai_query}\n\n{xai_result.summary}"
-                (xai_dir / f"{slug}.md").write_text(out, encoding="utf-8")
+            try:
+                xai_result = search_twitter(directive.xai_query)
+                if xai_result:
+                    out = f"# Twitter Summary for: {directive.headline}\nQuery: {directive.xai_query}\n\n{xai_result.summary}"
+                    (xai_dir / f"{slug}.md").write_text(out, encoding="utf-8")
+            except Exception as e:
+                print(f"[collector] xAI search failed for '{directive.xai_query}': {e}")
 
         # RSS search
         if directive.is_foreign_policy and directive.fp_query:
-            rss_results = search_rss_sources(directive.fp_query)
-            if rss_results:
-                out = f"# RSS Alternative Perspectives for: {directive.headline}\nQuery: {directive.fp_query}\n\n"
-                for rss_r in rss_results:
-                    pub = (
-                        rss_r.published.strftime("%Y-%m-%d")
-                        if rss_r.published
-                        else "Unknown"
-                    )
-                    out += f"## [{rss_r.source}] {rss_r.title}\nPublished: {pub}\nURL: {rss_r.url}\n\n{rss_r.text}\n\n"
-                (rss_dir / f"{slug}.md").write_text(out, encoding="utf-8")
+            try:
+                rss_results = search_rss_sources(directive.fp_query)
+                if rss_results:
+                    out = f"# RSS Alternative Perspectives for: {directive.headline}\nQuery: {directive.fp_query}\n\n"
+                    for rss_r in rss_results:
+                        pub = (
+                            rss_r.published.strftime("%Y-%m-%d")
+                            if rss_r.published
+                            else "Unknown"
+                        )
+                        out += f"## [{rss_r.source}] {rss_r.title}\nPublished: {pub}\nURL: {rss_r.url}\n\n{rss_r.text}\n\n"
+                    (rss_dir / f"{slug}.md").write_text(out, encoding="utf-8")
+            except Exception as e:
+                print(f"[collector] RSS search failed for '{directive.fp_query}': {e}")
