@@ -10,22 +10,22 @@ from pydantic import BaseModel, Field
 class ResearchDirective(BaseModel):
     headline: str = Field(description="The original headline")
     needs_exa: bool = Field(
-        description="True if the article needs general web search for alternative sources (e.g. if the original is likely paywalled, like Bloomberg/WSJ)"
+        description="True if the article needs general web search for alternative sources (e.g. if the original is likely paywalled, like Bloomberg/WSJ)"  # noqa: E501
     )
     exa_query: str = Field(
-        description="A specific search query for Exa to find similar open-access reporting (3-6 keywords). Empty string if needs_exa is false."
+        description="A specific search query for Exa to find similar open-access reporting (3-6 keywords). Empty string if needs_exa is false."  # noqa: E501
     )
     needs_xai: bool = Field(
-        description="True if understanding public sentiment, expert commentary, or Twitter discussion adds value to this story"
+        description="True if understanding public sentiment, expert commentary, or Twitter discussion adds value to this story"  # noqa: E501
     )
     xai_query: str = Field(
-        description="A concise query for Twitter/X search to find commentary (3-5 keywords). Empty string if needs_xai is false."
+        description="A concise query for Twitter/X search to find commentary (3-5 keywords). Empty string if needs_xai is false."  # noqa: E501
     )
     is_foreign_policy: bool = Field(
-        description="True if the story relates to war, geopolitics, international relations, or military conflicts"
+        description="True if the story relates to war, geopolitics, international relations, or military conflicts"  # noqa: E501
     )
     fp_query: str = Field(
-        description="A concise query to search antiwar/independent RSS feeds (2-4 keywords). Empty string if is_foreign_policy is false."
+        description="A concise query to search antiwar/independent RSS feeds (2-4 keywords). Empty string if is_foreign_policy is false."  # noqa: E501
     )
 
 
@@ -46,7 +46,7 @@ def generate_research_plan(
 
     client = genai.Client(api_key=api_key)
 
-    prompt = "Analyze these headlines and generate a research plan for a podcast briefing.\n\n"
+    prompt = "Analyze these headlines and generate a research plan for a podcast briefing.\n\n"  # noqa: E501
     for item in headlines_with_snippets:
         prompt += f"- {item}\n"
 
@@ -60,8 +60,9 @@ def generate_research_plan(
                 temperature=0.1,
             ),
         )
-        if response.parsed:
-            return response.parsed.directives
+        parsed = response.parsed
+        if isinstance(parsed, ResearchPlan):
+            return parsed.directives
         return []
     except Exception as e:
         print(f"Error generating research plan: {e}")
