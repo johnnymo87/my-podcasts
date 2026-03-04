@@ -1,0 +1,68 @@
+from __future__ import annotations
+
+import os
+
+from google import genai
+from google.genai import types
+from pydantic import BaseModel, Field
+
+
+class ResearchDirective(BaseModel):
+    headline: str = Field(description="The original headline")
+    needs_exa: bool = Field(
+        description="True if the article needs general web search for alternative sources (e.g. if the original is likely paywalled, like Bloomberg/WSJ)"
+    )
+    exa_query: str = Field(
+        description="A specific search query for Exa to find similar open-access reporting (3-6 keywords). Empty string if needs_exa is false."
+    )
+    needs_xai: bool = Field(
+        description="True if understanding public sentiment, expert commentary, or Twitter discussion adds value to this story"
+    )
+    xai_query: str = Field(
+        description="A concise query for Twitter/X search to find commentary (3-5 keywords). Empty string if needs_xai is false."
+    )
+    is_foreign_policy: bool = Field(
+        description="True if the story relates to war, geopolitics, international relations, or military conflicts"
+    )
+    fp_query: str = Field(
+        description="A concise query to search antiwar/independent RSS feeds (2-4 keywords). Empty string if is_foreign_policy is false."
+    )
+
+
+class ResearchPlan(BaseModel):
+    directives: list[ResearchDirective]
+
+
+def generate_research_plan(
+    headlines_with_snippets: list[str],
+) -> list[ResearchDirective]:
+    """Ask Gemini 2.5 Flash to generate a research plan for the provided articles."""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return []
+
+    if not headlines_with_snippets:
+        return []
+
+    client = genai.Client(api_key=api_key)
+
+    prompt = "Analyze these headlines and generate a research plan for a podcast briefing.\n\n"
+    for item in headlines_with_snippets:
+        prompt += f"- {item}\n"
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=ResearchPlan,
+                temperature=0.1,
+            ),
+        )
+        if response.parsed:
+            return response.parsed.directives
+        return []
+    except Exception as e:
+        print(f"Error generating research plan: {e}")
+        return []
