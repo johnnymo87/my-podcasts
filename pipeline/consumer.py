@@ -197,7 +197,7 @@ def consume_forever(
                         finally:
                             # Clean up the entire working directory
                             if work_dir.exists():
-                                shutil.rmtree(work_dir)
+                                shutil.rmtree(work_dir, ignore_errors=True)
                             stop_agent()
                     elif not is_agent_running():
                         # No script, no agent — run collection phase then launch agent.

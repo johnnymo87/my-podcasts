@@ -144,7 +144,7 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
     with (
         patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
         patch("shutil.copy", lambda src, dst: copy_calls.append((src, dst))),
-        patch("shutil.rmtree", lambda path: rmtree_calls.append(path)),
+        patch("shutil.rmtree", lambda path, **kw: rmtree_calls.append(path)),
     ):
         try:
             consume_forever(store, r2_client, poll_interval=5)
@@ -207,7 +207,7 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
 
     with (
         patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
-        patch("shutil.rmtree", lambda path: rmtree_calls.append(path)),
+        patch("shutil.rmtree", lambda path, **kw: rmtree_calls.append(path)),
         patch("shutil.copy", lambda src, dst: None),
     ):
         try:
