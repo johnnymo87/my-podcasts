@@ -99,7 +99,7 @@ def test_consume_forever_launches_agent_for_due_job(monkeypatch, tmp_path) -> No
 
 
 def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
-    """When THINGS_HAPPEN_DRY_RUN is set, skip TTS but still clean up."""
+    """When THINGS_HAPPEN_DRY_RUN is set, skip TTS but keep work dir for inspection."""
     monkeypatch.setenv("THINGS_HAPPEN_DRY_RUN", "1")
 
     store = MagicMock()
@@ -139,12 +139,15 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(time, "sleep", lambda n: None)
 
     copy_calls: list[tuple] = []
-    rmtree_calls: list = []
+    cleanup_calls: list[int] = []
 
     with (
         patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
         patch("shutil.copy", lambda src, dst: copy_calls.append((src, dst))),
-        patch("shutil.rmtree", lambda path, **kw: rmtree_calls.append(path)),
+        patch(
+            "pipeline.consumer._cleanup_old_work_dirs",
+            lambda **kw: cleanup_calls.append(1),
+        ),
     ):
         try:
             consume_forever(store, r2_client, poll_interval=5)
@@ -157,16 +160,17 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
     store.mark_things_happen_completed.assert_called_once_with(job_id)
     # stop_agent should be called
     assert stopped == [1]
-    # work_dir should be cleaned up via rmtree
-    assert len(rmtree_calls) == 1
-    assert rmtree_calls[0] == work_dir
+    # Work dir should still exist (not immediately deleted)
+    assert work_dir.exists()
+    # Deferred cleanup should have been invoked
+    assert cleanup_calls == [1]
     # Script should have been copied to persist
     assert len(copy_calls) == 1
     assert copy_calls[0][0] == script
 
 
 def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> None:
-    """If TTS crashes, stop_agent() and work_dir cleanup still happen via finally."""
+    """If TTS crashes, stop_agent() and deferred cleanup still happen via finally."""
     store = MagicMock()
     r2_client = MagicMock()
 
@@ -203,11 +207,14 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(time, "sleep", lambda n: None)
     monkeypatch.delenv("THINGS_HAPPEN_DRY_RUN", raising=False)
 
-    rmtree_calls: list = []
+    cleanup_calls: list[int] = []
 
     with (
         patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
-        patch("shutil.rmtree", lambda path, **kw: rmtree_calls.append(path)),
+        patch(
+            "pipeline.consumer._cleanup_old_work_dirs",
+            lambda **kw: cleanup_calls.append(1),
+        ),
         patch("shutil.copy", lambda src, dst: None),
     ):
         try:
@@ -217,6 +224,7 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
 
     # Agent should be stopped even though TTS failed
     assert stopped == [1]
-    # work_dir should be cleaned up via rmtree even though TTS failed
-    assert len(rmtree_calls) == 1
-    assert rmtree_calls[0] == work_dir
+    # Work dir should still exist (not immediately deleted)
+    assert work_dir.exists()
+    # Deferred cleanup should have been invoked
+    assert cleanup_calls == [1]

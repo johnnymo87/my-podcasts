@@ -5,6 +5,7 @@ import os
 import shutil
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -116,6 +117,22 @@ class CloudflareQueueConsumer:
         response.raise_for_status()
 
 
+def _cleanup_old_work_dirs(max_age_days: int = 180) -> None:
+    """Remove things-happen work directories older than max_age_days."""
+    cutoff = datetime.now(tz=UTC) - timedelta(days=max_age_days)
+    tmp = Path("/tmp")
+    for d in tmp.glob("things-happen-*"):
+        if not d.is_dir():
+            continue
+        try:
+            mtime = datetime.fromtimestamp(d.stat().st_mtime, tz=UTC)
+            if mtime < cutoff:
+                shutil.rmtree(d, ignore_errors=True)
+                print(f"Cleaned up old work dir: {d.name}")
+        except OSError:
+            pass
+
+
 def consume_forever(
     store: StateStore,
     r2_client: R2Client,
@@ -195,9 +212,8 @@ def consume_forever(
                             shutil.copy(script_file, persist_path)
 
                         finally:
-                            # Clean up the entire working directory
-                            if work_dir.exists():
-                                shutil.rmtree(work_dir, ignore_errors=True)
+                            # Clean up old work directories (>6 months)
+                            _cleanup_old_work_dirs()
                             stop_agent()
                     elif not is_agent_running():
                         # No script, no agent — run collection phase then launch agent.
