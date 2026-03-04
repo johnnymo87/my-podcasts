@@ -45,115 +45,38 @@ def stop_agent() -> None:
     AGENT_PID_FILE.unlink(missing_ok=True)
 
 
-def build_agent_prompt(job: dict) -> str:
+def build_agent_prompt(job: dict, work_dir: Path) -> str:
     """Build the initial prompt for the Things Happen agent."""
-    job_id = job["id"]
-    date_str = job["date_str"]
-    links = json.loads(job["links_json"])
-
-    links_section_lines = []
-    for i, link in enumerate(links, 1):
-        links_section_lines.append(f"  {i}. {link['link_text']}")
-        links_section_lines.append(f"     Headline context: {link['headline_context']}")
-        links_section_lines.append(f"     URL: {link['raw_url']}")
-    links_section = "\n".join(links_section_lines)
-
-    script_path = script_path_for_job(job_id)
+    links_json = job["links_json"]
 
     prompt = f"""You are an AI assistant helping produce a daily podcast briefing for the "Things Happen" segment from Matt Levine's Money Stuff newsletter.
 
 ## Job Details
+- Job ID: {job["id"]}
+- Date: {job["date_str"]}
 
-- Job ID: {job_id}
-- Date: {date_str}
-- Script output path: {script_path}
+## Original Links
+These were extracted from the newsletter:
+{links_json}
 
-## Links to Research
+## Your Task
 
-{links_section}
+All research for this episode has already been completed and collected for you on disk. You do NOT need to search the web or fetch articles yourself.
 
-## How This Works
+Your working directory is: `{work_dir}`
 
-Your messages are relayed to the operator's Telegram via pigeon. When you go idle (finish a response and wait), your message is sent to Telegram. The operator can reply, and their reply will be injected as your next user message. Use this to collaborate.
+1. **Read the Articles:** Use your tools to read the markdown files in `{work_dir}/articles/`. These contain the full text (or headlines if paywalled) of the original newsletter links.
+2. **Read the Enrichment Data:** Read the files in `{work_dir}/enrichment/`. This directory contains Exa web search results, xAI Twitter summaries, and RSS alternative perspectives (for foreign policy stories). Use this context to enrich the original articles.
+3. **Check the Trailing Window:** Read the prior episode scripts in `{work_dir}/context/`. If a story is adequately covered in these prior scripts and has no new developments, **skip it**. Do not repeat background context we already explained to the listener yesterday.
+4. **Draft a Plan:** Once you have read the files, write a short summary of what you found and your proposed script plan. Present this plan via Telegram and wait for the operator to reply.
+5. **Write the Script:** Once approved by the operator, write your final podcast script to `{work_dir}/script.txt`. Make it conversational, engaging, and suitable for TTS.
 
-**Do NOT self-terminate.** The consumer process will shut down this server after it detects your script file. Just write the script and stop.
-
-## Step-by-Step Instructions
-
-### Step 1: Resolve redirect URLs
-
-For each link above, resolve the redirect URL using:
-
-```python
-from pipeline.things_happen_extractor import resolve_redirect_url
-resolved_url = resolve_redirect_url(raw_url)
-```
-
-### Step 2: Fetch articles
-
-Fetch each article using:
-
-```python
-from pipeline.article_fetcher import fetch_article
-article = fetch_article(resolved_url)
-```
-
-### Step 3: Enrich with additional context
-
-For each article:
-
-- Search for related articles using:
-  ```python
-  from pipeline.exa_client import search_related
-  results = search_related(headline_context)
-  ```
-
-- Search Twitter/X for discussion using:
-  ```python
-  from pipeline.xai_client import search_twitter
-  twitter_result = search_twitter(headline_context)
-  ```
-
-### Step 4: Present research plan to operator
-
-After completing research, present a summary of what you found and your plan for the briefing script. Include:
-
-- Which stories have strong content and which were paywalled
-- Which stories you plan to lead with
-- Any interesting angles from Exa or Twitter enrichment
-- Your proposed story order and approximate time allocation
-
-**Then stop and wait for operator confirmation before writing the script.** The operator may have feedback on story selection, emphasis, or angles.
-
-### Step 5: Write briefing script
-
-After the operator confirms (or if no response within a reasonable time), write the final briefing script to: `{script_path}`
-
-## Enrichment Guidelines
-
-- **Paywalled content**: If an article is behind a paywall and you cannot access the full text, use `search_related()` via Exa to find related open-access articles.
-- **Foreign policy topics**: For articles you identify as foreign policy related (wars, geopolitics, sanctions, military), use `search_rss_sources()` to find alternative perspectives:
-  ```python
-  from pipeline.rss_sources import search_rss_sources
-  results = search_rss_sources("your search query about the topic")
-  ```
-  This searches antiwar.com and caitlinjohnstone.com.au via their RSS feeds (much fresher than Exa for these sites). Each result has `.title`, `.url`, `.published`, `.text`, `.source` fields. Include these alternative perspectives in your research summary.
-- **Twitter/X discussion**: Use `search_twitter()` via xAI to find notable takes from journalists and experts.
-
-## Script Writing Rules
-
-- Write in a conversational, spoken style — this will be read aloud by a text-to-speech system.
-- No markdown formatting (no headers, bullet points, bold, italics, etc.).
-- Never use the word "delve."
-- Use plain spoken English suitable for podcast TTS.
-- Keep each story segment focused and digestible.
-- Connect the stories naturally with brief transitions.
-- Aim for 5-8 minutes of spoken content total.
+Remember: Do not use the `bash` tool to run python scripts to fetch articles or search APIs. Just read the files that have already been gathered for you.
 """
     return prompt
 
 
-def launch_things_happen_agent(job: dict) -> bool:
+def launch_things_happen_agent(job: dict, work_dir: Path) -> bool:
     """Orchestrate the launch of the Things Happen agent.
 
     Returns True on success, False if already running or script already written.
@@ -170,7 +93,7 @@ def launch_things_happen_agent(job: dict) -> bool:
         return False
 
     # Build the prompt
-    prompt = build_agent_prompt(job)
+    prompt = build_agent_prompt(job, work_dir)
 
     # Start opencode server in the project directory so it picks up
     # AGENTS.md, skills, and .opencode/ configuration.

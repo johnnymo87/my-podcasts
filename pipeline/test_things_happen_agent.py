@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
-
-import pytest
 
 from pipeline.things_happen_agent import (
     AGENT_PID_FILE,
@@ -32,25 +29,16 @@ def test_is_agent_running_false_when_pid_dead(tmp_path, monkeypatch):
     assert is_agent_running() is False
 
 
-def test_build_agent_prompt_contains_job_data():
+def test_build_agent_prompt_contains_job_data() -> None:
     job = {
-        "id": "job-abc",
+        "id": "123-abc",
         "date_str": "2026-03-02",
-        "links_json": json.dumps(
-            [
-                {
-                    "link_text": "Blue Owl",
-                    "raw_url": "https://example.com/1",
-                    "headline_context": "Blue Owl battles",
-                }
-            ]
-        ),
+        "links_json": '[{"link_text": "War", "raw_url": "http://bloomberg.com"}]',
     }
-    prompt = build_agent_prompt(job)
-    assert "job-abc" in prompt
+    work_dir = Path("/tmp/things-happen-123-abc")
+    prompt = build_agent_prompt(job, work_dir)
+
+    assert "123-abc" in prompt
     assert "2026-03-02" in prompt
-    assert "Blue Owl" in prompt
-    assert "search_related" in prompt
-    assert "search_twitter" in prompt
-    assert "Do NOT self-terminate" in prompt
-    assert "operator confirmation" in prompt
+    assert "http://bloomberg.com" in prompt
+    assert "/tmp/things-happen-123-abc/articles/" in prompt
