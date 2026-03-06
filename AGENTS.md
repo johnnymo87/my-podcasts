@@ -10,7 +10,9 @@ Quick start and navigation for humans and coding agents.
    - `uv run pytest`
 3. Check consumer service:
    - `sudo systemctl status my-podcasts-consumer --no-pager`
-4. Subscription URLs:
+4. Restart consumer (after code changes):
+   - `sudo systemctl restart my-podcasts-consumer`
+5. Subscription URLs:
    - Main: `https://podcast.mohrbacher.dev/feed.xml`
    - Levine: `https://podcast.mohrbacher.dev/feeds/levine.xml`
    - Yglesias: `https://podcast.mohrbacher.dev/feeds/yglesias.xml`
@@ -19,8 +21,6 @@ Quick start and navigation for humans and coding agents.
 
 ## Docs TOC
 
-- Architecture and operator context:
-  - `CLAUDE.md`
 - Agent skills:
   - `.opencode/skills/monitoring-my-podcasts-pipeline/SKILL.md`
   - `.opencode/skills/monitoring-my-podcasts-pipeline/REFERENCE.md`
