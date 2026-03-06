@@ -52,7 +52,7 @@ Your working directory is: `{work_dir}`
 1. **Read the Articles:** Use your tools to read the markdown files in `{work_dir}/articles/`. These contain the full text (or headlines if paywalled) of the original newsletter links.
 2. **Read the Enrichment Data:** Read the files in `{work_dir}/enrichment/`. This directory contains Exa web search results, xAI Twitter summaries, and RSS alternative perspectives (for foreign policy stories). Use this context to enrich the original articles.
 3. **Check the Trailing Window:** Read the prior episode scripts in `{work_dir}/context/`. If a story is adequately covered in these prior scripts and has no new developments, **skip it**. Do not repeat background context we already explained to the listener yesterday.
-4. **Draft a Plan:** Once you have read the files, write a short summary of what you found and your proposed script plan. Present this plan via Telegram and wait for the operator to reply.
+4. **Draft a Plan:** Once you have read the files, write a short summary of what you found and your proposed script plan. Then use the Question tool to ask the operator for approval. Present your plan summary as the question text, and offer options like "Approved", "Revise", etc. The operator will see your message on Telegram and reply there. Wait for their response before proceeding.
 5. **Write the Script:** Once approved by the operator, write your final podcast script to `{work_dir}/script.txt`. Make it conversational, engaging, and suitable for TTS.
 
 Remember: Do not use the `bash` tool to run python scripts to fetch articles or search APIs. Just read the files that have already been gathered for you.
