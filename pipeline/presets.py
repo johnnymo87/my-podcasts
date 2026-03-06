@@ -46,6 +46,14 @@ PRESETS: tuple[NewsletterPreset, ...] = (
         category="Business",
         feed_slug="things-happen",
     ),
+    NewsletterPreset(
+        name="Foreign Policy Digest",
+        route_tags=("fp-digest",),
+        tts_model="tts-1-hd",
+        tts_voice="coral",
+        category="News",
+        feed_slug="fp-digest",
+    ),
 )
 
 
