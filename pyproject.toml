@@ -61,6 +61,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "test_*.py" = ["E712"] # Allow e.g. `assert foo() == True` in test files
 "email_processor/test_email_processor.py" = ["E501"] # Allow long test data lines
+"pipeline/things_happen_agent.py" = ["E501"] # Allow long lines in prompt strings
 
 [tool.ruff.lint.isort]
 # Configure isort to be compatible with black formatting
