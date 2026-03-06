@@ -80,7 +80,8 @@ def get_messages(session_id: str) -> list[dict]:
 def get_last_assistant_text(messages: list[dict]) -> str:
     """Extract concatenated text from the last assistant message."""
     for msg in reversed(messages):
-        if msg.get("role") == "assistant":
+        role = msg.get("role") or msg.get("info", {}).get("role")
+        if role == "assistant":
             parts = msg.get("parts", [])
             texts = [p["text"] for p in parts if p.get("type") == "text"]
             return "".join(texts)

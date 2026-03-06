@@ -128,6 +128,23 @@ class TestGetLastAssistantText:
         ]
         assert get_last_assistant_text(messages) == "Hello world"
 
+    def test_extracts_text_from_nested_role(self) -> None:
+        """Handle opencode API format where role is under info.role."""
+        from pipeline.opencode_client import get_last_assistant_text
+
+        messages = [
+            {"info": {"role": "user"}, "parts": [{"type": "text", "text": "hi"}]},
+            {
+                "info": {"role": "assistant"},
+                "parts": [
+                    {"type": "step-start", "id": "s1"},
+                    {"type": "text", "text": "PONG"},
+                    {"type": "step-finish", "reason": "done"},
+                ],
+            },
+        ]
+        assert get_last_assistant_text(messages) == "PONG"
+
     def test_returns_empty_when_no_assistant(self) -> None:
         from pipeline.opencode_client import get_last_assistant_text
 
