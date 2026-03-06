@@ -174,6 +174,8 @@ def consume_forever(
                     work_dir = Path(f"/tmp/things-happen-{job['id']}")
                     script_file = work_dir / "script.txt"
 
+                    session_id = store.get_things_happen_session_id(job["id"])
+
                     if script_file.exists():
                         # Agent finished — run TTS + publish with the script.
                         try:
@@ -207,16 +209,17 @@ def consume_forever(
                             )
                             persist_dir.mkdir(parents=True, exist_ok=True)
                             persist_path = persist_dir / f"{job['date_str']}.txt"
-
-                            # Use shutil.copy to overwrite if it exists
                             shutil.copy(script_file, persist_path)
 
                         finally:
-                            # Clean up old work directories (>6 months)
                             _cleanup_old_work_dirs()
-                            stop_agent()
-                    elif not is_agent_running():
-                        # No script, no agent — run collection phase then launch agent.
+                            stop_agent(session_id)
+                            store.clear_things_happen_session_id(job["id"])
+                    elif not is_agent_running(session_id):
+                        # No script, no agent — run collection then launch.
+                        if session_id:
+                            store.clear_things_happen_session_id(job["id"])
+
                         print(
                             f"Running collection phase for job: "
                             f"{job['id']} ({job['date_str']})"
@@ -228,7 +231,11 @@ def consume_forever(
                             f"Launching Things Happen agent for job: "
                             f"{job['id']} ({job['date_str']})"
                         )
-                        launch_things_happen_agent(job, work_dir)
+                        new_session_id = launch_things_happen_agent(job, work_dir)
+                        if new_session_id:
+                            store.set_things_happen_session_id(
+                                job["id"], new_session_id
+                            )
                     # else: agent is running, wait for it to finish.
                 except Exception as exc:
                     print(f"Failed Things Happen job {job['id']}: {exc}")

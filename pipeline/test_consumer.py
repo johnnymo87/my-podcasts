@@ -61,7 +61,8 @@ def test_consume_forever_launches_agent_for_due_job(monkeypatch, tmp_path) -> No
         return True
 
     monkeypatch.setattr("pipeline.consumer.launch_things_happen_agent", fake_launch)
-    monkeypatch.setattr("pipeline.consumer.is_agent_running", lambda: False)
+    monkeypatch.setattr("pipeline.consumer.is_agent_running", lambda session_id: False)
+    store.get_things_happen_session_id.return_value = None
 
     collect_calls = []
     monkeypatch.setattr(
@@ -113,7 +114,9 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
     script.write_text("test script content")
 
     stopped = []
-    monkeypatch.setattr("pipeline.consumer.stop_agent", lambda: stopped.append(1))
+    monkeypatch.setattr(
+        "pipeline.consumer.stop_agent", lambda session_id: stopped.append(1)
+    )
 
     process_calls = []
     monkeypatch.setattr(
@@ -124,6 +127,7 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
     store.list_due_things_happen.return_value = [
         {"id": job_id, "date_str": "2026-03-02", "links_json": "[]"}
     ]
+    store.get_things_happen_session_id.return_value = None
 
     call_count = 0
 
@@ -182,7 +186,9 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
     script.write_text("test script content")
 
     stopped = []
-    monkeypatch.setattr("pipeline.consumer.stop_agent", lambda: stopped.append(1))
+    monkeypatch.setattr(
+        "pipeline.consumer.stop_agent", lambda session_id: stopped.append(1)
+    )
 
     def boom(*a, **kw):
         raise RuntimeError("TTS exploded")
@@ -192,6 +198,7 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
     store.list_due_things_happen.return_value = [
         {"id": job_id, "date_str": "2026-03-02", "links_json": "[]"}
     ]
+    store.get_things_happen_session_id.return_value = None
 
     call_count = 0
 
