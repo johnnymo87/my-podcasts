@@ -19,16 +19,13 @@ if TYPE_CHECKING:
 PROMPT_TEMPLATE = """\
 You are generating a podcast briefing script for a listener who reads Matt Levine's Money Stuff newsletter. Today's date is {date_str}. Below are the stories from the "Things Happen" section at the end of the newsletter. Your job is to brief the listener on each story: what happened, why it matters, and which stories are the biggest deals today.
 
-IMPORTANT RULES:
-- Be conversational and concise. This will be read aloud by a TTS engine.
-- For each story, clearly state your source quality BEFORE summarizing:
+Write naturally and conversationally, as though you're a knowledgeable friend catching someone up. This will be read aloud by a TTS engine, so use plain spoken English -- no markdown, bullet points, or special characters.
+
+For each story, clearly state your source quality BEFORE summarizing:
   - If marked "PUBLICLY AVAILABLE PORTION": you have the article content. Summarize the key points.
   - If marked "HEADLINE ONLY": you only have the headline. Give brief context based on your knowledge, and be upfront that you're working from the headline alone.
-- Start with a brief intro: "Here are today's Things Happen stories from Money Stuff."
-- End with a brief sign-off.
-- Flag the 2-3 biggest stories early on.
-- Do NOT use any markdown formatting, bullet points, or special characters. Plain spoken English only.
-- Do NOT use the word "delve" or any of its variants.
+
+Start with a brief intro, flag the 2-3 biggest stories early on, and end with a brief sign-off.
 
 ---
 

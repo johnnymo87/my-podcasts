@@ -17,14 +17,9 @@ Your job is to produce a natural, conversational podcast script covering the mos
 important foreign policy stories of the day, grouped by theme. The script will be
 read aloud by a TTS engine.
 
-IMPORTANT RULES:
-- Write naturally and conversationally for TTS. No markdown, no bullet points,
-  no special characters.
-- Aim for 1500-2200 words (approximately 10-15 minutes of spoken content).
-- Introduce each theme section clearly for the listener.
-- Start with a brief welcome and overview of today's themes.
-- End with a brief sign-off.
-- Do NOT use the word "delve" or any of its variants.
+Write naturally and conversationally, as though you're a knowledgeable friend catching someone up on the day's foreign policy news. This will be read aloud by a TTS engine, so use plain spoken English -- no markdown, bullet points, or special characters.
+
+Aim for 1500-2200 words (approximately 10-15 minutes of spoken content). Introduce each theme section clearly, start with a brief welcome and overview, and end with a brief sign-off.
 {context_block}
 ---
 
