@@ -89,14 +89,19 @@ def feed_command(output_file: Path | None) -> None:
     type=str,
     help="Date (YYYY-MM-DD). Defaults to today.",
 )
-def fp_digest_command(date_str: str | None) -> None:
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Stop after script generation (skip TTS and publish).",
+)
+def fp_digest_command(date_str: str | None, dry_run: bool) -> None:
     """Create and process an FP Digest episode."""
     import shutil
     from datetime import UTC, datetime
 
     from pipeline.fp_collector import collect_fp_artifacts
     from pipeline.fp_editor import FPResearchPlan
-    from pipeline.fp_processor import process_fp_digest_job
     from pipeline.fp_writer import generate_fp_script
 
     if date_str is None:
@@ -104,8 +109,6 @@ def fp_digest_command(date_str: str | None) -> None:
 
     store = StateStore(_default_state_db_path())
     try:
-        r2_client = R2Client()
-
         job_id = store.insert_pending_fp_digest(date_str)
         if job_id is None:
             click.echo(f"FP Digest job already exists for {date_str}")
@@ -163,6 +166,15 @@ def fp_digest_command(date_str: str | None) -> None:
 
         script_file = work_dir / "script.txt"
         script_file.write_text(script, encoding="utf-8")
+
+        if dry_run:
+            click.echo(f"Dry run complete. Script saved to: {script_file}")
+            click.echo(f"Work directory: {work_dir}")
+            return
+
+        from pipeline.fp_processor import process_fp_digest_job
+
+        r2_client = R2Client()
 
         click.echo("Running TTS...")
         process_fp_digest_job(job, store, r2_client, script_path=script_file)
