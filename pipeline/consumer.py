@@ -11,6 +11,10 @@ from typing import TYPE_CHECKING, Any
 
 import requests
 
+from pipeline.fp_collector import _slugify, collect_fp_artifacts
+from pipeline.fp_editor import FPResearchPlan
+from pipeline.fp_processor import process_fp_digest_job
+from pipeline.fp_writer import generate_fp_script
 from pipeline.processor import process_r2_email_key
 from pipeline.things_happen_agent import (
     is_agent_running,
@@ -118,19 +122,52 @@ class CloudflareQueueConsumer:
 
 
 def _cleanup_old_work_dirs(max_age_days: int = 180) -> None:
-    """Remove things-happen work directories older than max_age_days."""
+    """Remove things-happen and fp-digest work directories older than max_age_days."""
     cutoff = datetime.now(tz=UTC) - timedelta(days=max_age_days)
     tmp = Path("/tmp")
-    for d in tmp.glob("things-happen-*"):
-        if not d.is_dir():
-            continue
-        try:
-            mtime = datetime.fromtimestamp(d.stat().st_mtime, tz=UTC)
-            if mtime < cutoff:
-                shutil.rmtree(d, ignore_errors=True)
-                print(f"Cleaned up old work dir: {d.name}")
-        except OSError:
-            pass
+    for pattern in ("things-happen-*", "fp-digest-*"):
+        for d in tmp.glob(pattern):
+            if not d.is_dir():
+                continue
+            try:
+                mtime = datetime.fromtimestamp(d.stat().st_mtime, tz=UTC)
+                if mtime < cutoff:
+                    shutil.rmtree(d, ignore_errors=True)
+                    print(f"Cleaned up old work dir: {d.name}")
+            except OSError:
+                pass
+
+
+def _find_article_text(directive: Any, work_dir: Path) -> str:
+    """Find the article file matching a directive by slugifying the headline.
+
+    Searches:
+    - work_dir/articles/homepage/*/{slug}.md (rglob)
+    - work_dir/articles/rss/*/{slug}.md (rglob)
+    - work_dir/enrichment/exa/{slug}.md
+
+    Returns the file content or empty string.
+    """
+    slug = _slugify(directive.headline)
+
+    # Search homepage articles
+    homepage_dir = work_dir / "articles" / "homepage"
+    if homepage_dir.exists():
+        for match in homepage_dir.rglob(f"{slug}.md"):
+            return match.read_text(encoding="utf-8")
+
+    # Search RSS articles
+    rss_dir = work_dir / "articles" / "rss"
+    if rss_dir.exists():
+        for match in rss_dir.rglob(f"{slug}.md"):
+            return match.read_text(encoding="utf-8")
+
+    # Search Exa enrichment
+    exa_file = work_dir / "enrichment" / "exa" / f"{slug}.md"
+    if exa_file.exists():
+        return exa_file.read_text(encoding="utf-8")
+
+    return ""
 
 
 def consume_forever(
@@ -241,6 +278,85 @@ def consume_forever(
                     print(f"Failed Things Happen job {job['id']}: {exc}")
         except Exception as exc:
             print(f"Error checking Things Happen jobs: {exc}")
+
+        # Process any due FP Digest jobs.
+        try:
+            fp_jobs = store.list_due_fp_digest()
+            for job in fp_jobs:
+                try:
+                    work_dir = Path(f"/tmp/fp-digest-{job['id']}")
+                    script_file = work_dir / "script.txt"
+
+                    if script_file.exists():
+                        # Script already generated -- TTS + publish
+                        dry_run = os.environ.get("FP_DIGEST_DRY_RUN", "").strip()
+                        if dry_run:
+                            print(
+                                f"DRY RUN: skipping TTS for FP digest "
+                                f"{job['id']} ({job['date_str']})"
+                            )
+                            store.mark_fp_digest_completed(job["id"])
+                        else:
+                            print(
+                                f"Processing FP digest with script: "
+                                f"{job['id']} ({job['date_str']})"
+                            )
+                            process_fp_digest_job(
+                                job, store, r2_client, script_path=script_file
+                            )
+                            print(f"Completed FP digest: {job['id']}")
+                        # Copy to persistent storage
+                        persist_dir = Path("/persist/my-podcasts/scripts/fp-digest")
+                        persist_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.copy(script_file, persist_dir / f"{job['date_str']}.txt")
+                    else:
+                        # Full pipeline: collect -> edit -> write -> save script
+                        print(
+                            f"Running FP digest collection: "
+                            f"{job['id']} ({job['date_str']})"
+                        )
+                        collect_fp_artifacts(job["id"], work_dir)
+
+                        plan_path = work_dir / "plan.json"
+                        if not plan_path.exists():
+                            print(
+                                f"No plan generated for FP digest {job['id']}, skipping"
+                            )
+                            continue
+
+                        plan = FPResearchPlan.model_validate_json(plan_path.read_text())
+
+                        # Build articles_by_theme
+                        articles_by_theme: dict[str, list[str]] = {}
+                        for directive in plan.directives:
+                            if not directive.include_in_episode:
+                                continue
+                            text = _find_article_text(directive, work_dir)
+                            if text:
+                                articles_by_theme.setdefault(
+                                    directive.theme, []
+                                ).append(text)
+
+                        # Load context scripts
+                        context_scripts = []
+                        context_dir = work_dir / "context"
+                        if context_dir.exists():
+                            for f in sorted(context_dir.glob("*.txt"), reverse=True):
+                                context_scripts.append(f.read_text(encoding="utf-8"))
+
+                        script = generate_fp_script(
+                            themes=plan.themes,
+                            articles_by_theme=articles_by_theme,
+                            date_str=job["date_str"],
+                            context_scripts=context_scripts,
+                        )
+                        script_file.parent.mkdir(parents=True, exist_ok=True)
+                        script_file.write_text(script, encoding="utf-8")
+                        # Next loop will pick up the script and run TTS
+                except Exception as exc:
+                    print(f"Failed FP digest job {job['id']}: {exc}")
+        except Exception as exc:
+            print(f"Error checking FP digest jobs: {exc}")
 
         if not messages:
             time.sleep(poll_interval)
