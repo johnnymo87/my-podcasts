@@ -64,6 +64,7 @@ ignore = [
 "pipeline/things_happen_agent.py" = ["E501"] # Allow long lines in prompt strings
 "pipeline/summarizer.py" = ["E501"] # Allow long lines in prompt strings
 "pipeline/test_summarizer.py" = ["E501"] # Allow long lines in test strings
+"pipeline/test_fp_homepage_scraper.py" = ["E501"] # Allow long lines in HTML fixtures
 
 [tool.ruff.lint.isort]
 # Configure isort to be compatible with black formatting
