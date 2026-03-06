@@ -26,21 +26,38 @@ def test_build_prompt_includes_all_articles() -> None:
 
 
 def test_generate_briefing_calls_opencode(monkeypatch) -> None:
-    """Verify that generate_briefing_script invokes opencode run."""
-    import subprocess
-
-    captured_args = {}
-
-    def fake_run(cmd, **kwargs):
-        captured_args["cmd"] = cmd
-
-        class FakeResult:
-            returncode = 0
-            stdout = "Here is your briefing script about today's news."
-
-        return FakeResult()
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    """Verify that generate_briefing_script uses the opencode client."""
+    monkeypatch.setattr(
+        "pipeline.summarizer.create_session",
+        lambda directory=None: "sess-sum",
+    )
+    monkeypatch.setattr(
+        "pipeline.summarizer.send_prompt_async",
+        lambda session_id, text: None,
+    )
+    monkeypatch.setattr(
+        "pipeline.summarizer.wait_for_idle",
+        lambda session_id, timeout=120: True,
+    )
+    monkeypatch.setattr(
+        "pipeline.summarizer.get_messages",
+        lambda session_id: [
+            {"role": "user", "parts": [{"type": "text", "text": "prompt"}]},
+            {
+                "role": "assistant",
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "Here is your briefing script about today's news.",
+                    },
+                ],
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "pipeline.summarizer.delete_session",
+        lambda session_id: None,
+    )
 
     articles = [
         FetchedArticle(
@@ -49,5 +66,3 @@ def test_generate_briefing_calls_opencode(monkeypatch) -> None:
     ]
     result = generate_briefing_script(articles, date_str="2026-02-26")
     assert "briefing script" in result
-    assert captured_args["cmd"][0] == "opencode"
-    assert "run" in captured_args["cmd"]

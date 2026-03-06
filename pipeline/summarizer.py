@@ -1,9 +1,15 @@
 from __future__ import annotations
 
-import subprocess
-import tempfile
-from pathlib import Path
 from typing import TYPE_CHECKING
+
+from pipeline.opencode_client import (
+    create_session,
+    delete_session,
+    get_last_assistant_text,
+    get_messages,
+    send_prompt_async,
+    wait_for_idle,
+)
 
 
 if TYPE_CHECKING:
@@ -50,49 +56,23 @@ def generate_briefing_script(
     articles: list[FetchedArticle],
     date_str: str,
 ) -> str:
-    """Generate a TTS briefing script using Claude Opus 4.6 via opencode."""
+    """Generate a TTS briefing script via the shared opencode server."""
     prompt = build_prompt(articles, date_str)
 
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        suffix=".txt",
-        prefix="things-happen-prompt-",
-        delete=False,
-    ) as f:
-        f.write(prompt)
-        prompt_path = f.name
+    instruction = (
+        "Read the following prompt with instructions and article content. "
+        "Follow the instructions exactly and generate the podcast briefing "
+        "script. Output ONLY the script text, nothing else.\n\n" + prompt
+    )
 
+    session_id = create_session()
     try:
-        cmd = [
-            "opencode",
-            "run",
-            "--file",
-            prompt_path,
-            "Read the attached file. It contains a prompt with instructions "
-            "and article content. Follow the instructions in the file exactly "
-            "and generate the podcast briefing script. Output ONLY the script "
-            "text, nothing else.",
-        ]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"opencode run failed (exit {result.returncode}): {result.stderr}"
-            )
-        output = result.stdout.strip()
-        lines = output.splitlines()
-        content_lines = []
-        past_header = False
-        for line in lines:
-            if not past_header and (line.startswith(">") or line.strip() == ""):
-                continue
-            past_header = True
-            content_lines.append(line)
-        return "\n".join(content_lines).strip()
+        send_prompt_async(session_id, instruction)
+
+        if not wait_for_idle(session_id, timeout=120):
+            raise RuntimeError("opencode session did not complete within 120 seconds")
+
+        messages = get_messages(session_id)
+        return get_last_assistant_text(messages).strip()
     finally:
-        Path(prompt_path).unlink(missing_ok=True)
+        delete_session(session_id)
