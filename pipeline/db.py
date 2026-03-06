@@ -58,6 +58,14 @@ CREATE TABLE IF NOT EXISTS pending_things_happen (
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS pending_fp_digest (
+    id TEXT PRIMARY KEY,
+    date_str TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    process_after TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -288,6 +296,45 @@ class StateStore:
     def clear_things_happen_session_id(self, job_id: str) -> None:
         self._conn.execute(
             "UPDATE pending_things_happen SET opencode_session_id = NULL WHERE id = ?",
+            (job_id,),
+        )
+        self._conn.commit()
+
+    def insert_pending_fp_digest(self, date_str: str) -> str | None:
+        """Insert a pending fp_digest job.
+
+        Return job_id or None if date already exists.
+        """
+        job_id = str(uuid.uuid4())
+        process_after = datetime.now(tz=UTC).isoformat()
+        try:
+            self._conn.execute(
+                """INSERT INTO pending_fp_digest
+                   (id, date_str, status, process_after)
+                   VALUES (?, ?, ?, ?)""",
+                (job_id, date_str, "pending", process_after),
+            )
+            self._conn.commit()
+        except sqlite3.IntegrityError:
+            return None
+        return job_id
+
+    def list_due_fp_digest(self) -> list[dict]:
+        """Return pending fp_digest jobs where process_after <= now."""
+        now = datetime.now(tz=UTC).isoformat()
+        rows = self._conn.execute(
+            """SELECT id, date_str, status, process_after
+               FROM pending_fp_digest
+               WHERE status = 'pending' AND process_after <= ?
+               ORDER BY process_after ASC""",
+            (now,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_fp_digest_completed(self, job_id: str) -> None:
+        """Set fp_digest job status to 'completed'."""
+        self._conn.execute(
+            "UPDATE pending_fp_digest SET status = 'completed' WHERE id = ?",
             (job_id,),
         )
         self._conn.commit()
