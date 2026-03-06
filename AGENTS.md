@@ -18,6 +18,7 @@ Quick start and navigation for humans and coding agents.
    - Yglesias: `https://podcast.mohrbacher.dev/feeds/yglesias.xml`
    - Silver Bulletin: `https://podcast.mohrbacher.dev/feeds/silver.xml`
    - Things Happen: `https://podcast.mohrbacher.dev/feeds/things-happen.xml` (created on first episode)
+   - FP Digest: `https://podcast.mohrbacher.dev/feeds/fp-digest.xml`
 
 ## Docs TOC
 
@@ -68,6 +69,28 @@ When a Levine email with a "Things Happen" section is processed, the consumer **
 - `pipeline/things_happen_agent.py` — agent launcher; contains `build_agent_prompt()`
 - `pipeline/exa_client.py` — Exa search API wrapper
 - `pipeline/xai_client.py` — xAI/Grok API wrapper
+
+## FP Digest Pipeline
+
+Daily foreign policy podcast from antiwar.com + Caitlin Johnstone. Fully automated, no human-in-the-loop.
+
+**Flow:**
+1. Systemd timer triggers daily at 6 PM EST (23:00 UTC)
+2. `fp_homepage_scraper.py` scrapes antiwar.com homepage region links (~49 external links)
+3. `fp_collector.py` fetches 3 antiwar.com RSS feeds + Caitlin Johnstone feed + homepage articles
+4. `fp_editor.py` (Gemini Flash-Lite) triages into 3-5 themes, selects 8-12 stories
+5. Exa enrichment for paywalled articles
+6. `fp_writer.py` generates script via opencode-serve
+7. `fp_processor.py` runs TTS + publishes to R2
+
+**Key modules:**
+- `pipeline/fp_homepage_scraper.py` -- antiwar.com homepage parser
+- `pipeline/fp_editor.py` -- story triage and theme identification
+- `pipeline/fp_collector.py` -- multi-source collection orchestrator
+- `pipeline/fp_writer.py` -- script generation via opencode-serve
+- `pipeline/fp_processor.py` -- TTS + publish
+
+**CLI:** `uv run python -m pipeline fp-digest [--date YYYY-MM-DD]`
 
 ## Landing the Plane (Session Completion)
 
