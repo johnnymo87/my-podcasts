@@ -45,6 +45,24 @@ DEFAULT_SOURCES: list[RssSource] = [
 
 FP_SOURCES = DEFAULT_SOURCES
 
+ANTIWAR_ORIGINAL = RssSource(
+    name="antiwar_original",
+    feed_url="https://original.antiwar.com/feed/",
+    wp_search_base="https://original.antiwar.com/",
+)
+
+ANTIWAR_BLOG = RssSource(
+    name="antiwar_blog",
+    feed_url="https://feeds.feedburner.com/AWCBlog",
+    wp_search_base="https://www.antiwar.com/blog/",
+)
+
+FP_DIGEST_RSS_SOURCES: list[RssSource] = [
+    *DEFAULT_SOURCES,  # antiwar_news + caitlinjohnstone
+    ANTIWAR_ORIGINAL,
+    ANTIWAR_BLOG,
+]
+
 AI_SOURCES: list[RssSource] = [
     RssSource(
         name="zvi_substack",
