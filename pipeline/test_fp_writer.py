@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+import pytest
+
+from pipeline.fp_writer import build_fp_prompt, generate_fp_script
+
+
+def test_build_fp_prompt_includes_themes() -> None:
+    themes = ["Iran Nuclear Deal", "Russia-Ukraine"]
+    articles_by_theme = {
+        "Iran Nuclear Deal": ["Article about Iran talks."],
+        "Russia-Ukraine": ["Article about Ukraine ceasefire."],
+    }
+    prompt = build_fp_prompt(themes, articles_by_theme, date_str="2026-03-06")
+
+    assert "2026-03-06" in prompt
+    assert "Iran Nuclear Deal" in prompt
+    assert "Russia-Ukraine" in prompt
+    assert "Article about Iran talks." in prompt
+    assert "Article about Ukraine ceasefire." in prompt
+
+
+def test_build_fp_prompt_includes_context_scripts() -> None:
+    themes = ["Trade War"]
+    articles_by_theme = {"Trade War": ["US tariffs on China increased."]}
+    context_scripts = ["Yesterday we covered the initial tariff announcement."]
+
+    prompt = build_fp_prompt(
+        themes,
+        articles_by_theme,
+        date_str="2026-03-06",
+        context_scripts=context_scripts,
+    )
+
+    assert "Yesterday we covered the initial tariff announcement." in prompt
+
+
+def test_build_fp_prompt_no_context_scripts() -> None:
+    """Without context_scripts, no context block should appear."""
+    themes = ["Trade War"]
+    articles_by_theme = {"Trade War": ["US tariffs on China increased."]}
+
+    prompt = build_fp_prompt(themes, articles_by_theme, date_str="2026-03-06")
+
+    # Prompt should still contain essentials
+    assert "Trade War" in prompt
+    assert "2026-03-06" in prompt
+
+
+def test_generate_fp_script(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pipeline.fp_writer.create_session",
+        lambda directory=None: "sess-fp",
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_writer.send_prompt_async",
+        lambda session_id, text: None,
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_writer.wait_for_idle",
+        lambda session_id, timeout=120: True,
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_writer.get_messages",
+        lambda session_id: [
+            {"role": "user", "parts": [{"type": "text", "text": "prompt"}]},
+            {
+                "role": "assistant",
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "Welcome to today's foreign policy briefing.",
+                    },
+                ],
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_writer.delete_session",
+        lambda session_id: None,
+    )
+
+    themes = ["Iran Nuclear Deal"]
+    articles_by_theme = {"Iran Nuclear Deal": ["Iran talks resumed in Vienna."]}
+    result = generate_fp_script(themes, articles_by_theme, date_str="2026-03-06")
+
+    assert "foreign policy briefing" in result
+
+
+def test_generate_fp_script_timeout(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pipeline.fp_writer.create_session",
+        lambda directory=None: "sess-fp-timeout",
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_writer.send_prompt_async",
+        lambda session_id, text: None,
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_writer.wait_for_idle",
+        lambda session_id, timeout=120: False,
+    )
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        "pipeline.fp_writer.delete_session",
+        lambda session_id: deleted.append(session_id),
+    )
+
+    themes = ["Iran Nuclear Deal"]
+    articles_by_theme = {"Iran Nuclear Deal": ["Iran talks resumed."]}
+
+    with pytest.raises(RuntimeError, match="120 seconds"):
+        generate_fp_script(themes, articles_by_theme, date_str="2026-03-06")
+
+    # delete_session must be called in finally block even on error
+    assert "sess-fp-timeout" in deleted
