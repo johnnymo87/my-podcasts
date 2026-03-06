@@ -224,3 +224,30 @@ def test_process_things_happen_job_with_script_file(tmp_path, monkeypatch) -> No
     assert upload_key.startswith("episodes/things-happen/")
 
     store.close()
+
+
+def test_things_happen_session_id_column_and_accessors(tmp_path) -> None:
+    """Verify the opencode_session_id column is added and accessors work."""
+    from pipeline.db import StateStore
+
+    store = StateStore(tmp_path / "test.sqlite3")
+
+    # Insert a job
+    job_id = store.insert_pending_things_happen(
+        email_r2_key="inbox/raw/test.eml",
+        date_str="2026-03-05",
+        links_json="[]",
+    )
+
+    # Initially null
+    assert store.get_things_happen_session_id(job_id) is None
+
+    # Set it
+    store.set_things_happen_session_id(job_id, "sess-abc-123")
+    assert store.get_things_happen_session_id(job_id) == "sess-abc-123"
+
+    # Clear it
+    store.clear_things_happen_session_id(job_id)
+    assert store.get_things_happen_session_id(job_id) is None
+
+    store.close()

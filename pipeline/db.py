@@ -98,6 +98,18 @@ class StateStore:
             if column not in existing_cols:
                 self._conn.execute(ddl)
 
+        # pending_things_happen migrations
+        th_cols = {
+            row["name"]
+            for row in self._conn.execute(
+                "PRAGMA table_info(pending_things_happen)"
+            ).fetchall()
+        }
+        if "opencode_session_id" not in th_cols:
+            self._conn.execute(
+                "ALTER TABLE pending_things_happen ADD COLUMN opencode_session_id TEXT"
+            )
+
     def close(self) -> None:
         self._conn.close()
 
@@ -253,6 +265,29 @@ class StateStore:
     def mark_things_happen_completed(self, job_id: str) -> None:
         self._conn.execute(
             "UPDATE pending_things_happen SET status = 'completed' WHERE id = ?",
+            (job_id,),
+        )
+        self._conn.commit()
+
+    def set_things_happen_session_id(self, job_id: str, session_id: str) -> None:
+        self._conn.execute(
+            "UPDATE pending_things_happen SET opencode_session_id = ? WHERE id = ?",
+            (session_id, job_id),
+        )
+        self._conn.commit()
+
+    def get_things_happen_session_id(self, job_id: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT opencode_session_id FROM pending_things_happen WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["opencode_session_id"]
+
+    def clear_things_happen_session_id(self, job_id: str) -> None:
+        self._conn.execute(
+            "UPDATE pending_things_happen SET opencode_session_id = NULL WHERE id = ?",
             (job_id,),
         )
         self._conn.commit()
