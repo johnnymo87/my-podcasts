@@ -7,7 +7,7 @@ description: Operates the Things Happen AI agent pipeline. Use when checking pen
 
 ## How it works
 
-When a Levine email is processed, the pipeline extracts "Things Happen" links and **immediately** launches an AI agent — there is no 24-hour delay. The consumer calls `things_happen_agent.py`, which starts an `opencode serve` agent on port 5555. The agent enriches headlines using Exa (full-text search) and xAI/Grok, then writes a briefing script to `/tmp/things-happen-<job_id>.txt`. The script is handed to the existing TTS pipeline: `ttsjoin` (voice: nova) → R2 upload → feed publication to `feeds/things-happen.xml`.
+When a Levine email is processed, the pipeline extracts "Things Happen" links and **immediately** launches an AI agent — there is no 24-hour delay. The consumer calls `things_happen_agent.py`, which creates a session on the shared `opencode-serve` daemon (port 4096) via `pipeline/opencode_client.py`. The agent enriches headlines using Exa (full-text search) and xAI/Grok, then writes a briefing script to `<work_dir>/script.txt`. The script is handed to the existing TTS pipeline: `ttsjoin` (voice: nova) → R2 upload → feed publication to `feeds/things-happen.xml`. Session IDs are tracked in the `opencode_session_id` column of `pending_things_happen`.
 
 ## Quick checks
 
@@ -39,21 +39,25 @@ curl -sI https://podcast.mohrbacher.dev/feeds/things-happen.xml | head -3
 
 Expected healthy state:
 - Service is `active (running)`
-- On email arrival, agent launches immediately and PID file appears at `/tmp/things-happen-opencode.pid`
+- Shared opencode-serve is healthy: `curl -s http://127.0.0.1:4096/global/health`
+- On email arrival, agent session is created and session ID stored in `pending_things_happen.opencode_session_id`
 - Pending jobs transition from `pending` to `completed` after the agent finishes
 - Feed returns `200` once the first episode has been published
 
 ### Check if an agent is currently running
 
 ```bash
-# Check PID file
-ls /tmp/things-happen-opencode.pid
+# Check for active sessions on the shared opencode server
+curl -s http://127.0.0.1:4096/session | python3 -m json.tool
 
-# Check if port 5555 is in use
-fuser 5555/tcp
-
-# Kill a stuck agent
-fuser -k 5555/tcp
+# Check session ID stored in the DB for a pending job
+uv run python -c "
+import sqlite3
+conn = sqlite3.connect('/persist/my-podcasts/state.sqlite3')
+conn.row_factory = sqlite3.Row
+rows = conn.execute('SELECT id, date_str, opencode_session_id FROM pending_things_happen WHERE status = \"pending\"').fetchall()
+for r in rows: print(dict(r))
+"
 ```
 
 ### Inspect the generated briefing script
@@ -90,15 +94,16 @@ if row: print(json.dumps(json.loads(row['links_json']), indent=2))
 
 ## Failure modes
 
-### Agent crashes or never starts
-- Check logs: `journalctl -u my-podcasts-consumer -n 100 --no-pager | grep -i "things happen\|agent\|opencode"`
-- Check if port 5555 is already occupied from a previous stuck agent: `fuser 5555/tcp`
-- Kill the stuck process and restart the consumer: `fuser -k 5555/tcp && sudo systemctl restart my-podcasts-consumer`
+### Shared opencode-serve is down
+- Check: `systemctl status opencode-serve.service --no-pager`
+- Health: `curl -s http://127.0.0.1:4096/global/health`
+- Restart: `sudo systemctl restart opencode-serve.service`
+- The consumer will log errors and retry on the next poll cycle.
 
-### opencode serve won't start (port conflict)
-- Another process may be holding port 5555: `fuser 5555/tcp`
-- Free the port: `fuser -k 5555/tcp`
-- No PID file cleanup needed — `things_happen_agent.py` manages `/tmp/things-happen-opencode.pid`
+### Agent session fails or never starts
+- Check logs: `journalctl -u my-podcasts-consumer -n 100 --no-pager | grep -i "things happen\|agent\|opencode"`
+- Check opencode-serve logs: `journalctl -u opencode-serve.service -n 50 --no-pager`
+- The consumer clears stale session IDs automatically on the next cycle.
 
 ### Job stays pending
 - Consumer service may be down: `sudo systemctl status my-podcasts-consumer`

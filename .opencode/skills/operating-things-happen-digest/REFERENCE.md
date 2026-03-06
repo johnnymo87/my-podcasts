@@ -16,18 +16,19 @@
 
 3. **Redirect resolution** (`pipeline/things_happen_extractor.py:resolve_redirect_url`): Follows Bloomberg's `links.message.bloomberg.com/s/c/...` redirects via `requests.head(allow_redirects=True)`. Returns original URL on failure.
 
-4. **AI agent launch** (`pipeline/things_happen_agent.py`): Consumer calls the agent launcher, which starts an `opencode serve` process on **port 5555** and writes a PID file to `/tmp/things-happen-opencode.pid`. The agent:
+4. **AI agent launch** (`pipeline/things_happen_agent.py`): Consumer calls the agent launcher, which creates a session on the shared `opencode-serve` daemon (port 4096) via `pipeline/opencode_client.py`. The session ID is stored in `pending_things_happen.opencode_session_id`. The agent:
    - Enriches headlines via **Exa** (`pipeline/exa_client.py`) — full-text article search
    - Analyzes content via **xAI/Grok** (`pipeline/xai_client.py`)
-   - Writes the finished briefing script to `/tmp/things-happen-<job_id>.txt`
-   - Shuts down and removes the PID file when done
+   - Writes the finished briefing script to `<work_dir>/script.txt`
+   - Session is deleted on completion or failure
 
 5. **TTS + publish** (`pipeline/things_happen_processor.py`): Reads script from `/tmp/things-happen-<job_id>.txt`, runs `ttsjoin` (model: tts-1-hd, voice: nova), uploads MP3 to `episodes/things-happen/<date>-things-happen.mp3`, inserts episode, regenerates feeds.
 
-## New modules
+## Key modules
 
 | Module | Role |
 |--------|------|
+| `pipeline/opencode_client.py` | Shared HTTP client for the opencode-serve API (port 4096) |
 | `pipeline/things_happen_agent.py` | Agent launcher; contains `build_agent_prompt()` for the agent system prompt |
 | `pipeline/exa_client.py` | Exa search API wrapper used by the agent for full-text article retrieval |
 | `pipeline/xai_client.py` | xAI/Grok API wrapper used by the agent for headline analysis |
@@ -44,7 +45,8 @@ CREATE TABLE IF NOT EXISTS pending_things_happen (
     links_json TEXT NOT NULL,
     process_after TEXT NOT NULL,    -- ISO 8601, UTC
     status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' or 'completed'
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    opencode_session_id TEXT       -- tracks the active opencode session for this job
 );
 ```
 
@@ -67,10 +69,11 @@ Each `FetchedArticle` carries a `source_tier` and `source_label` so the LLM can 
 
 ## Agent details
 
-- Launched via: `things_happen_agent.py` → `opencode serve` on port 5555
-- PID file: `/tmp/things-happen-opencode.pid`
-- Script output: `/tmp/things-happen-<job_id>.txt`
+- Launched via: `things_happen_agent.py` → session on shared `opencode-serve` daemon (port 4096)
+- Session ID tracked in: `pending_things_happen.opencode_session_id`
+- Script output: `<work_dir>/script.txt` (work_dir = `/tmp/things-happen-<job_id>`)
 - Agent uses Exa for article retrieval and xAI/Grok for analysis
+- Pigeon/Telegram notifications work automatically (pigeon plugin loaded in shared server)
 - Prompt template (`build_agent_prompt()`) instructs the agent to:
   - Be conversational and TTS-friendly
   - State source quality before each story
@@ -79,11 +82,16 @@ Each `FetchedArticle` carries a `source_tier` and `source_label` so the LLM can 
 
 ## Common failures
 
-### opencode serve fails or agent crashes
-- Check that `opencode` is on the PATH for the service user.
-- Check logs: `journalctl -u my-podcasts-consumer -n 100 --no-pager | grep -i "opencode\|things happen\|agent"`
-- If port 5555 is already in use: `fuser -k 5555/tcp` then restart the consumer.
-- PID file may be stale after a crash: check `/tmp/things-happen-opencode.pid` and kill if needed.
+### Shared opencode-serve is down
+- Check: `systemctl status opencode-serve.service --no-pager`
+- Health: `curl -s http://127.0.0.1:4096/global/health`
+- Logs: `journalctl -u opencode-serve.service -n 50 --no-pager`
+- Restart: `sudo systemctl restart opencode-serve.service`
+
+### Agent session fails
+- Check consumer logs: `journalctl -u my-podcasts-consumer -n 100 --no-pager | grep -i "opencode\|things happen\|agent"`
+- Check opencode-serve logs: `journalctl -u opencode-serve.service -n 50 --no-pager`
+- The consumer clears stale session IDs automatically on the next poll cycle.
 
 ### Job stays pending
 - Consumer service may be down: `sudo systemctl status my-podcasts-consumer`
