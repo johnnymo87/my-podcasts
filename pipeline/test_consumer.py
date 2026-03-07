@@ -67,7 +67,7 @@ def test_consume_forever_launches_agent_for_due_job(monkeypatch, tmp_path) -> No
     collect_calls = []
     monkeypatch.setattr(
         "pipeline.consumer.collect_all_artifacts",
-        lambda job_id, links_raw, work_dir: collect_calls.append(job_id),
+        lambda job_id, links_raw, work_dir, **kw: collect_calls.append(job_id),
     )
 
     store.list_due_things_happen.return_value = [

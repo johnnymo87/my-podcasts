@@ -137,6 +137,19 @@ def _cleanup_old_work_dirs(max_age_days: int = 180) -> None:
             except OSError:
                 pass
 
+    # Clean up old routed link files (7-day retention)
+    routed_cutoff = datetime.now(tz=UTC) - timedelta(days=7)
+    routed_dir = Path("/persist/my-podcasts/fp-routed-links")
+    if routed_dir.exists():
+        for f in routed_dir.glob("*.json"):
+            try:
+                mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=UTC)
+                if mtime < routed_cutoff:
+                    f.unlink()
+                    print(f"Cleaned up old routed links: {f.name}")
+            except OSError:
+                pass
+
 
 def _find_article_text(directive: Any, work_dir: Path) -> str:
     """Find the article file matching a directive by slugifying the headline.
@@ -144,6 +157,8 @@ def _find_article_text(directive: Any, work_dir: Path) -> str:
     Searches:
     - work_dir/articles/homepage/*/{slug}.md (rglob)
     - work_dir/articles/rss/*/{slug}.md (rglob)
+    - work_dir/articles/routed/{slug}.md
+    - work_dir/articles/semafor/{slug}.md
     - work_dir/enrichment/exa/{slug}.md
 
     Returns the file content or empty string.
@@ -161,6 +176,16 @@ def _find_article_text(directive: Any, work_dir: Path) -> str:
     if rss_dir.exists():
         for match in rss_dir.rglob(f"{slug}.md"):
             return match.read_text(encoding="utf-8")
+
+    # Search routed articles
+    routed_file = work_dir / "articles" / "routed" / f"{slug}.md"
+    if routed_file.exists():
+        return routed_file.read_text(encoding="utf-8")
+
+    # Search semafor articles
+    semafor_file = work_dir / "articles" / "semafor" / f"{slug}.md"
+    if semafor_file.exists():
+        return semafor_file.read_text(encoding="utf-8")
 
     # Search Exa enrichment
     exa_file = work_dir / "enrichment" / "exa" / f"{slug}.md"
@@ -262,7 +287,12 @@ def consume_forever(
                             f"{job['id']} ({job['date_str']})"
                         )
                         links_raw = json.loads(job["links_json"])
-                        collect_all_artifacts(job["id"], links_raw, work_dir)
+                        collect_all_artifacts(
+                            job["id"],
+                            links_raw,
+                            work_dir,
+                            fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
+                        )
 
                         print(
                             f"Launching Things Happen agent for job: "
@@ -315,7 +345,11 @@ def consume_forever(
                             f"Running FP digest collection: "
                             f"{job['id']} ({job['date_str']})"
                         )
-                        collect_fp_artifacts(job["id"], work_dir)
+                        collect_fp_artifacts(
+                            job["id"],
+                            work_dir,
+                            fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
+                        )
 
                         plan_path = work_dir / "plan.json"
                         if not plan_path.exists():
