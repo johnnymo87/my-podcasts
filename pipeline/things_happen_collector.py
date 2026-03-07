@@ -6,7 +6,13 @@ from pathlib import Path
 
 from pipeline.article_fetcher import fetch_all_articles
 from pipeline.exa_client import search_related
-from pipeline.rss_sources import AI_SOURCES, search_rss_sources
+from pipeline.rss_sources import (
+    AI_SOURCES,
+    SEMAFOR,
+    fetch_feed,
+    categorize_semafor_article,
+    search_rss_sources,
+)
 from pipeline.things_happen_editor import generate_research_plan
 from pipeline.things_happen_extractor import resolve_redirect_url
 from pipeline.xai_client import search_twitter
@@ -19,6 +25,16 @@ def _slugify(text: str) -> str:
     while "--" in safe:
         safe = safe.replace("--", "-")
     return safe.strip("-")[:50]
+
+
+def _fetch_semafor_articles() -> list:
+    """Fetch Semafor RSS and return parsed entries."""
+    try:
+        feed = fetch_feed(SEMAFOR.feed_url)
+        return list(feed.entries)
+    except Exception as e:
+        print(f"[collector] Failed to fetch Semafor RSS: {e}")
+        return []
 
 
 def collect_all_artifacts(
@@ -51,9 +67,6 @@ def collect_all_artifacts(
 
     articles = fetch_all_articles(links_raw, delay_between=1.0)
 
-    if not articles:
-        return
-
     headlines_with_snippets = []
 
     for i, art in enumerate(articles):
@@ -69,6 +82,33 @@ def collect_all_artifacts(
         suffix = "..." if len(art.content) > 300 else ""
         snippet = f"Headline: {art.headline}\nContext: {truncated}{suffix}"
         headlines_with_snippets.append(snippet)
+
+    # Phase 1b: Semafor articles (Things Happen categories)
+    semafor_dir = articles_dir / "semafor"
+    semafor_dir.mkdir(parents=True, exist_ok=True)
+    semafor_entries = _fetch_semafor_articles()
+    for entry in semafor_entries:
+        category = ""
+        if entry.get("tags"):
+            category = entry["tags"][0].get("term", "")
+        routing = categorize_semafor_article(category)
+        if routing in ("th", "both"):
+            headline = (entry.get("title") or "").strip()
+            url = (entry.get("link") or "").strip()
+            summary = (entry.get("summary") or "").strip()
+            content_encoded = (
+                entry.get("content", [{}])[0].get("value", "")
+                if entry.get("content")
+                else ""
+            )
+            if headline:
+                slug = _slugify(headline)
+                text = content_encoded or summary
+                art_path = semafor_dir / f"{slug}.md"
+                art_path.write_text(
+                    f"# {headline}\n\nURL: {url}\nSource: semafor\nCategory: {category}\n\n{text}",
+                    encoding="utf-8",
+                )
 
     # Copy trailing window context (last 3 scripts)
     scripts_dir = (

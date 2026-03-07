@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+import feedparser
+
 from pipeline.article_fetcher import Article
 from pipeline.exa_client import ExaResult
 from pipeline.rss_sources import RssResult
@@ -26,9 +28,18 @@ def test_slugify() -> None:
 @patch("pipeline.things_happen_collector.search_related")
 @patch("pipeline.things_happen_collector.search_twitter")
 @patch("pipeline.things_happen_collector.search_rss_sources")
+@patch("pipeline.things_happen_collector._fetch_semafor_articles")
 def test_collect_all_artifacts(
-    mock_rss, mock_xai, mock_exa, mock_plan, mock_resolve, mock_fetch, tmp_path
+    mock_semafor,
+    mock_rss,
+    mock_xai,
+    mock_exa,
+    mock_plan,
+    mock_resolve,
+    mock_fetch,
+    tmp_path,
 ) -> None:
+    mock_semafor.return_value = []
     # Setup mocks
     mock_resolve.return_value = "http://resolved.com"
 
@@ -110,6 +121,9 @@ def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
     """FP-flagged links are written to fp-routed-links dir, not enriched."""
     # Mock all external calls
     monkeypatch.setattr(
+        "pipeline.things_happen_collector._fetch_semafor_articles", lambda: []
+    )
+    monkeypatch.setattr(
         "pipeline.things_happen_collector.fetch_all_articles",
         lambda *a, **kw: [
             Article(
@@ -190,3 +204,54 @@ def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
     routed = json.loads(routed_files[0].read_text())
     assert len(routed) == 1
     assert routed[0]["headline"] == "Iran War Escalates"
+
+
+def test_semafor_articles_added_to_work_dir(tmp_path, monkeypatch):
+    """Semafor articles categorized as 'th' or 'both' appear in work dir."""
+    # Mock all external calls
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_research_plan", lambda *a, **kw: []
+    )
+
+    # Mock Semafor RSS fetch to return articles with categories
+    fake_entries = [
+        feedparser.FeedParserDict(
+            {
+                "title": "Tech Company IPO",
+                "link": "https://semafor.com/tech-ipo",
+                "summary": "A tech company goes public",
+                "tags": [feedparser.FeedParserDict({"term": "Technology"})],
+            }
+        ),
+        feedparser.FeedParserDict(
+            {
+                "title": "Gulf Tensions Rise",
+                "link": "https://semafor.com/gulf-tensions",
+                "summary": "Tensions in the Gulf",
+                "tags": [feedparser.FeedParserDict({"term": "Gulf"})],
+            }
+        ),
+    ]
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector._fetch_semafor_articles", lambda: fake_entries
+    )
+
+    work_dir = tmp_path / "work"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+
+    collect_all_artifacts("test-job", [], work_dir, scripts_source_dir=scripts_dir)
+
+    # Tech article should appear (category=Technology -> "th")
+    semafor_dir = work_dir / "articles" / "semafor"
+    assert semafor_dir.exists()
+    semafor_files = list(semafor_dir.glob("*.md"))
+    # Only the Tech article, not the Gulf one (FP-only)
+    assert len(semafor_files) == 1
+    assert "Tech Company IPO" in semafor_files[0].read_text()

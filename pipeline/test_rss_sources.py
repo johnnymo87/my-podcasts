@@ -44,7 +44,7 @@ class TestParseEntryDatetime:
 
 class TestSearchRssSources:
     @patch("pipeline.rss_sources._extract_text", return_value="Article body here")
-    @patch("pipeline.rss_sources._fetch_feed")
+    @patch("pipeline.rss_sources.fetch_feed")
     def test_wp_search_feed_used_first(
         self, mock_fetch: MagicMock, mock_extract: MagicMock
     ) -> None:
@@ -80,7 +80,7 @@ class TestSearchRssSources:
         assert "feed=rss2" in call_url
 
     @patch("pipeline.rss_sources._extract_text", return_value="")
-    @patch("pipeline.rss_sources._fetch_feed")
+    @patch("pipeline.rss_sources.fetch_feed")
     def test_falls_back_to_main_feed(
         self, mock_fetch: MagicMock, mock_extract: MagicMock
     ) -> None:
@@ -122,7 +122,7 @@ class TestSearchRssSources:
         assert results[0].title == "Iran drone strike update"
 
     @patch("pipeline.rss_sources._extract_text", return_value="")
-    @patch("pipeline.rss_sources._fetch_feed")
+    @patch("pipeline.rss_sources.fetch_feed")
     def test_old_entries_filtered_out(
         self, mock_fetch: MagicMock, mock_extract: MagicMock
     ) -> None:
@@ -150,7 +150,7 @@ class TestSearchRssSources:
         assert len(results) == 0
 
     @patch("pipeline.rss_sources._extract_text", return_value="Full text")
-    @patch("pipeline.rss_sources._fetch_feed")
+    @patch("pipeline.rss_sources.fetch_feed")
     def test_fetch_text_disabled(
         self, mock_fetch: MagicMock, mock_extract: MagicMock
     ) -> None:

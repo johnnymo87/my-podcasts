@@ -103,7 +103,7 @@ def _get_session() -> requests.Session:
     return _SESSION
 
 
-def _fetch_feed(url: str) -> feedparser.FeedParserDict:
+def fetch_feed(url: str) -> feedparser.FeedParserDict:
     """Fetch RSS feed via requests (avoids feedparser SSL issues)."""
     resp = _get_session().get(url, timeout=15)
     resp.raise_for_status()
@@ -189,7 +189,7 @@ def search_rss_sources(
                 + urlencode({"s": query, "feed": "rss2"})
             )
             try:
-                feed = _fetch_feed(search_url)
+                feed = fetch_feed(search_url)
                 entries = list(feed.entries)
             except Exception:
                 entries = []
@@ -197,7 +197,7 @@ def search_rss_sources(
         # Strategy 2: Fall back to main feed + keyword scoring
         if not entries:
             try:
-                feed = _fetch_feed(src.feed_url)
+                feed = fetch_feed(src.feed_url)
                 entries = list(feed.entries)
             except Exception:
                 continue
