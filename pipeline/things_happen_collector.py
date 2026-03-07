@@ -9,8 +9,8 @@ from pipeline.exa_client import search_related
 from pipeline.rss_sources import (
     AI_SOURCES,
     SEMAFOR,
-    fetch_feed,
     categorize_semafor_article,
+    fetch_feed,
     search_rss_sources,
 )
 from pipeline.things_happen_editor import generate_research_plan
