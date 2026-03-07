@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 TTS_MODEL = "tts-1-hd"
-TTS_VOICE = "coral"
+TTS_VOICE = "onyx"
 FEED_SLUG = "fp-digest"
 CATEGORY = "News"
 
