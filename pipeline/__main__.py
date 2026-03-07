@@ -97,18 +97,86 @@ def feed_command(output_file: Path | None) -> None:
 )
 def fp_digest_command(date_str: str | None, dry_run: bool) -> None:
     """Create and process an FP Digest episode."""
-    import shutil
     from datetime import UTC, datetime
+
+    if date_str is None:
+        date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+
+    if dry_run:
+        _fp_digest_dry_run(date_str)
+    else:
+        _fp_digest_full_run(date_str)
+
+
+def _fp_digest_dry_run(date_str: str) -> None:
+    """Run collection + script generation without touching the DB."""
+    import uuid
 
     from pipeline.fp_collector import collect_fp_artifacts
     from pipeline.fp_editor import FPResearchPlan
     from pipeline.fp_writer import generate_fp_script
 
-    if date_str is None:
-        date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+    run_id = str(uuid.uuid4())
+    work_dir = Path(f"/tmp/fp-digest-{run_id}")
+    click.echo(f"Dry run for {date_str} (no DB entry created)")
+
+    click.echo("Collecting sources...")
+    collect_fp_artifacts(run_id, work_dir)
+
+    plan_path = work_dir / "plan.json"
+    if not plan_path.exists():
+        click.echo("Error: no plan generated")
+        return
+
+    plan = FPResearchPlan.model_validate_json(plan_path.read_text())
+    click.echo(f"Themes: {', '.join(plan.themes)}")
+    selected = sum(1 for d in plan.directives if d.include_in_episode)
+    click.echo(f"Selected {selected} stories")
+
+    from pipeline.consumer import _find_article_text
+
+    articles_by_theme: dict[str, list[str]] = {}
+    for directive in plan.directives:
+        if not directive.include_in_episode:
+            continue
+        text = _find_article_text(directive, work_dir)
+        if text:
+            articles_by_theme.setdefault(directive.theme, []).append(text)
+
+    context_scripts = []
+    context_dir = work_dir / "context"
+    if context_dir.exists():
+        for f in sorted(context_dir.glob("*.txt"), reverse=True):
+            context_scripts.append(f.read_text(encoding="utf-8"))
+
+    click.echo("Generating script...")
+    script = generate_fp_script(
+        themes=plan.themes,
+        articles_by_theme=articles_by_theme,
+        date_str=date_str,
+        context_scripts=context_scripts,
+    )
+
+    script_file = work_dir / "script.txt"
+    script_file.write_text(script, encoding="utf-8")
+
+    click.echo(f"Dry run complete. Script saved to: {script_file}")
+    click.echo(f"Work directory: {work_dir}")
+
+
+def _fp_digest_full_run(date_str: str) -> None:
+    """Run the full pipeline: collect, generate script, TTS, publish."""
+    import shutil
+
+    from pipeline.fp_collector import collect_fp_artifacts
+    from pipeline.fp_editor import FPResearchPlan
+    from pipeline.fp_processor import process_fp_digest_job
+    from pipeline.fp_writer import generate_fp_script
 
     store = StateStore(_default_state_db_path())
     try:
+        r2_client = R2Client()
+
         job_id = store.insert_pending_fp_digest(date_str)
         if job_id is None:
             click.echo(f"FP Digest job already exists for {date_str}")
@@ -139,7 +207,6 @@ def fp_digest_command(date_str: str | None, dry_run: bool) -> None:
         selected = sum(1 for d in plan.directives if d.include_in_episode)
         click.echo(f"Selected {selected} stories")
 
-        # Build articles by theme
         from pipeline.consumer import _find_article_text
 
         articles_by_theme: dict[str, list[str]] = {}
@@ -166,15 +233,6 @@ def fp_digest_command(date_str: str | None, dry_run: bool) -> None:
 
         script_file = work_dir / "script.txt"
         script_file.write_text(script, encoding="utf-8")
-
-        if dry_run:
-            click.echo(f"Dry run complete. Script saved to: {script_file}")
-            click.echo(f"Work directory: {work_dir}")
-            return
-
-        from pipeline.fp_processor import process_fp_digest_job
-
-        r2_client = R2Client()
 
         click.echo("Running TTS...")
         process_fp_digest_job(job, store, r2_client, script_path=script_file)
