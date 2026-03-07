@@ -71,6 +71,26 @@ AI_SOURCES: list[RssSource] = [
     ),
 ]
 
+SEMAFOR = RssSource(
+    name="semafor",
+    feed_url="https://www.semafor.com/rss.xml",
+    wp_search_base=None,
+)
+
+_SEMAFOR_FP_CATEGORIES = {"africa", "gulf", "security"}
+_SEMAFOR_TH_CATEGORIES = {"business", "technology", "media", "ceo", "energy"}
+
+
+def categorize_semafor_article(category: str) -> str:
+    """Return 'fp', 'th', or 'both' based on Semafor category tag."""
+    cat = category.strip().lower()
+    if cat in _SEMAFOR_FP_CATEGORIES:
+        return "fp"
+    if cat in _SEMAFOR_TH_CATEGORIES:
+        return "th"
+    return "both"
+
+
 _WORD_RE = re.compile(r"[a-z0-9']+")
 _SESSION: requests.Session | None = None
 

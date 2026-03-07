@@ -6,10 +6,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pipeline.rss_sources import (
+    SEMAFOR,
     RssResult,
     RssSource,
     _keyword_score,
     _parse_entry_datetime,
+    categorize_semafor_article,
     search_rss_sources,
 )
 
@@ -176,3 +178,30 @@ class TestSearchRssSources:
         assert len(results) == 1
         assert results[0].text == ""
         mock_extract.assert_not_called()
+
+
+def test_semafor_source_exists():
+    assert SEMAFOR.name == "semafor"
+    assert SEMAFOR.feed_url == "https://www.semafor.com/rss.xml"
+
+
+def test_categorize_semafor_fp():
+    assert categorize_semafor_article("Africa") == "fp"
+    assert categorize_semafor_article("Gulf") == "fp"
+    assert categorize_semafor_article("Security") == "fp"
+
+
+def test_categorize_semafor_th():
+    assert categorize_semafor_article("Business") == "th"
+    assert categorize_semafor_article("Technology") == "th"
+    assert categorize_semafor_article("Media") == "th"
+    assert categorize_semafor_article("CEO") == "th"
+    assert categorize_semafor_article("Energy") == "th"
+
+
+def test_categorize_semafor_both():
+    assert categorize_semafor_article("Politics") == "both"
+
+
+def test_categorize_semafor_unknown_defaults_to_both():
+    assert categorize_semafor_article("SomeNewCategory") == "both"
