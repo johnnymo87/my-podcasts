@@ -9,6 +9,10 @@ from pipeline.fp_editor import FPResearchPlan, FPStoryDirective
 from pipeline.fp_homepage_scraper import HomepageLink
 
 
+def _make_empty_plan():
+    return FPResearchPlan(themes=[], directives=[])
+
+
 def test_slugify() -> None:
     assert _slugify("Hello World!") == "hello-world"
     assert _slugify("A -- B") == "a-b"
@@ -18,6 +22,7 @@ def test_slugify() -> None:
     )
 
 
+@patch("pipeline.fp_collector._fetch_semafor_fp_articles")
 @patch("pipeline.fp_collector.search_related")
 @patch("pipeline.fp_collector.generate_fp_research_plan")
 @patch("pipeline.fp_collector._fetch_rss_articles")
@@ -29,8 +34,12 @@ def test_collect_fp_artifacts(
     mock_rss,
     mock_plan,
     mock_exa,
+    mock_semafor,
     tmp_path,
 ) -> None:
+    # Fake Semafor articles (return empty list)
+    mock_semafor.return_value = []
+
     # Fake homepage links
     mock_scrape.return_value = [
         HomepageLink(
@@ -151,3 +160,101 @@ def test_collect_fp_artifacts(
 
     # Verify _extract_article_text was called for homepage links
     assert mock_extract.call_count >= 2  # at least for the 2 homepage links
+
+
+def test_routed_levine_links_included(tmp_path, monkeypatch):
+    """FP Digest collector picks up routed links from Things Happen."""
+    from pipeline.fp_collector import collect_fp_artifacts
+
+    # Mock all external calls
+    monkeypatch.setattr("pipeline.fp_collector.scrape_homepage", lambda: [])
+    monkeypatch.setattr(
+        "pipeline.fp_collector._fetch_rss_articles", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_collector._extract_article_text",
+        lambda url: f"Article text for {url}",
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+    monkeypatch.setattr("pipeline.fp_collector.search_related", lambda *a, **kw: [])
+    monkeypatch.setattr("pipeline.fp_collector._fetch_semafor_fp_articles", lambda: [])
+
+    # Create routed links file
+    routed_dir = tmp_path / "fp-routed"
+    routed_dir.mkdir()
+    from datetime import UTC, datetime
+
+    today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+    (routed_dir / f"{today}.json").write_text(
+        json.dumps(
+            [
+                {
+                    "headline": "Iran Sanctions Tighten",
+                    "url": "https://example.com/iran",
+                    "snippet": "sanctions content",
+                },
+            ]
+        )
+    )
+
+    work_dir = tmp_path / "work"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+
+    collect_fp_artifacts(
+        "test-job",
+        work_dir,
+        scripts_source_dir=scripts_dir,
+        fp_routed_dir=routed_dir,
+    )
+
+    # Routed article should appear in work_dir/articles/routed/
+    routed_articles = list((work_dir / "articles" / "routed").glob("*.md"))
+    assert len(routed_articles) == 1
+    assert "Iran Sanctions Tighten" in routed_articles[0].read_text()
+
+
+def test_semafor_fp_articles_included(tmp_path, monkeypatch):
+    """FP Digest collector picks up Semafor FP-category articles."""
+    from pipeline.fp_collector import collect_fp_artifacts
+
+    monkeypatch.setattr("pipeline.fp_collector.scrape_homepage", lambda: [])
+    monkeypatch.setattr(
+        "pipeline.fp_collector._fetch_rss_articles", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_collector._extract_article_text", lambda url: "text"
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+    monkeypatch.setattr("pipeline.fp_collector.search_related", lambda *a, **kw: [])
+
+    # Mock Semafor FP fetch
+    monkeypatch.setattr(
+        "pipeline.fp_collector._fetch_semafor_fp_articles",
+        lambda: [
+            {
+                "headline": "Gulf Crisis Deepens",
+                "url": "https://semafor.com/gulf",
+                "text": "Gulf article text",
+                "category": "Gulf",
+            },
+        ],
+    )
+
+    work_dir = tmp_path / "work"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+
+    collect_fp_artifacts("test-job", work_dir, scripts_source_dir=scripts_dir)
+
+    semafor_dir = work_dir / "articles" / "semafor"
+    assert semafor_dir.exists()
+    semafor_files = list(semafor_dir.glob("*.md"))
+    assert len(semafor_files) == 1
+    assert "Gulf Crisis Deepens" in semafor_files[0].read_text()

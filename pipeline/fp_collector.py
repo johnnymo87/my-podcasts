@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,7 +12,12 @@ import trafilatura
 from pipeline.exa_client import search_related
 from pipeline.fp_editor import generate_fp_research_plan
 from pipeline.fp_homepage_scraper import scrape_homepage
-from pipeline.rss_sources import FP_DIGEST_RSS_SOURCES
+from pipeline.rss_sources import (
+    FP_DIGEST_RSS_SOURCES,
+    SEMAFOR,
+    categorize_semafor_article,
+    fetch_feed,
+)
 
 
 def _slugify(text: str) -> str:
@@ -97,10 +103,45 @@ def _fetch_rss_articles(days_back: int = 3) -> list[dict]:
     return articles
 
 
+def _fetch_semafor_fp_articles() -> list[dict]:
+    """Fetch Semafor RSS and return FP-category articles."""
+    try:
+        feed = fetch_feed(SEMAFOR.feed_url)
+    except Exception as e:
+        print(f"[fp_collector] Failed to fetch Semafor RSS: {e}")
+        return []
+    articles = []
+    for entry in feed.entries:
+        category = ""
+        if entry.get("tags"):
+            category = entry["tags"][0].get("term", "")
+        routing = categorize_semafor_article(category)
+        if routing in ("fp", "both"):
+            headline = (entry.get("title") or "").strip()
+            url = (entry.get("link") or "").strip()
+            content_encoded = (
+                entry.get("content", [{}])[0].get("value", "")
+                if entry.get("content")
+                else ""
+            )
+            summary = (entry.get("summary") or "").strip()
+            if headline:
+                articles.append(
+                    {
+                        "headline": headline,
+                        "url": url,
+                        "text": content_encoded or summary,
+                        "category": category,
+                    }
+                )
+    return articles
+
+
 def collect_fp_artifacts(
     job_id: str,
     work_dir: Path,
     scripts_source_dir: Path | None = None,
+    fp_routed_dir: Path | None = None,
 ) -> None:
     """Orchestrate FP Digest collection.
 
@@ -161,6 +202,51 @@ def collect_fp_artifacts(
         )
         art_path.write_text(content, encoding="utf-8")
 
+    # Phase 2b: Pick up routed links from Things Happen
+    articles_routed_dir = work_dir / "articles" / "routed"
+    articles_routed_dir.mkdir(parents=True, exist_ok=True)
+    routed_links_dir = (
+        fp_routed_dir
+        if fp_routed_dir is not None
+        else Path("/persist/my-podcasts/fp-routed-links")
+    )
+    if routed_links_dir.exists():
+        today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+        yesterday = (datetime.now(tz=UTC) - timedelta(days=1)).strftime("%Y-%m-%d")
+        for routed_path in sorted(routed_links_dir.glob("*.json")):
+            fname = routed_path.stem  # e.g. "2026-03-07-some-job-id"
+            if fname.startswith(today) or fname.startswith(yesterday):
+                routed_data = json.loads(routed_path.read_text())
+                for item in routed_data:
+                    headline = item.get("headline", "").strip()
+                    if not headline:
+                        continue
+                    url = item.get("url", "")
+                    if url not in homepage_urls:
+                        text = (
+                            _extract_article_text(url)
+                            if url
+                            else item.get("snippet", "")
+                        )
+                        slug = _slugify(headline)
+                        art_path = articles_routed_dir / f"{slug}.md"
+                        art_path.write_text(
+                            f"# {headline}\n\nURL: {url}\nSource: levine-routed\n\n{text}",
+                            encoding="utf-8",
+                        )
+
+    # Phase 2c: Semafor FP articles
+    articles_semafor_dir = work_dir / "articles" / "semafor"
+    articles_semafor_dir.mkdir(parents=True, exist_ok=True)
+    semafor_articles = _fetch_semafor_fp_articles()
+    for article in semafor_articles:
+        slug = _slugify(article["headline"])
+        art_path = articles_semafor_dir / f"{slug}.md"
+        art_path.write_text(
+            f"# {article['headline']}\n\nURL: {article['url']}\nSource: semafor\nCategory: {article['category']}\n\n{article['text']}",
+            encoding="utf-8",
+        )
+
     # Phase 3: Copy last 3 scripts for context
     scripts_dir = (
         scripts_source_dir
@@ -206,6 +292,28 @@ def collect_fp_artifacts(
         snippet = (
             f"[{source_label}] {article['headline']}\nContext: {truncated}{suffix}"
         )
+        headlines_with_snippets.append(snippet)
+
+    # Routed headlines
+    for routed_path in articles_routed_dir.glob("*.md"):
+        text = routed_path.read_text(encoding="utf-8")
+        parts = text.split("\n\n", 2)
+        headline = parts[0].lstrip("# ").strip() if parts else ""
+        body = parts[2].strip() if len(parts) > 2 else ""
+        truncated = body[:300]
+        suffix = "..." if len(body) > 300 else ""
+        snippet = f"[routed/levine] {headline}\nContext: {truncated}{suffix}"
+        headlines_with_snippets.append(snippet)
+
+    # Semafor FP headlines
+    for semafor_path in articles_semafor_dir.glob("*.md"):
+        text = semafor_path.read_text(encoding="utf-8")
+        parts = text.split("\n\n", 2)
+        headline = parts[0].lstrip("# ").strip() if parts else ""
+        body = parts[2].strip() if len(parts) > 2 else ""
+        truncated = body[:300]
+        suffix = "..." if len(body) > 300 else ""
+        snippet = f"[semafor] {headline}\nContext: {truncated}{suffix}"
         headlines_with_snippets.append(snippet)
 
     # Phase 5: Generate research plan
