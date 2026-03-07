@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 from pipeline.article_fetcher import Article
@@ -44,8 +45,8 @@ def test_collect_all_artifacts(
             exa_query="exa test",
             needs_xai=True,
             xai_query="xai test",
-            is_foreign_policy=True,
-            fp_query="rss test",
+            is_foreign_policy=False,
+            fp_query="",
             is_ai=True,
             ai_query="ai test",
         )
@@ -99,12 +100,93 @@ def test_collect_all_artifacts(
     xai_file = list((work_dir / "enrichment" / "xai").glob("*.md"))[0]
     assert "Xai summary" in xai_file.read_text()
 
-    rss_fp_files = list((work_dir / "enrichment" / "rss").glob("*-fp.md"))
-    assert len(rss_fp_files) == 1
-    assert "Rss text" in rss_fp_files[0].read_text()
-    assert "Alternative Perspectives" in rss_fp_files[0].read_text()
-
     rss_ai_files = list((work_dir / "enrichment" / "rss").glob("*-ai.md"))
     assert len(rss_ai_files) == 1
     assert "Rss text" in rss_ai_files[0].read_text()
     assert "AI Perspectives" in rss_ai_files[0].read_text()
+
+
+def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
+    """FP-flagged links are written to fp-routed-links dir, not enriched."""
+    # Mock all external calls
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles",
+        lambda *a, **kw: [
+            Article(
+                headline="Iran War Escalates",
+                url="https://example.com/iran",
+                content="war content",
+            ),
+            Article(
+                headline="Bitcoin Rises",
+                url="https://example.com/btc",
+                content="crypto content",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.search_related", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.search_twitter", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.search_rss_sources", lambda *a, **kw: []
+    )
+
+    # Editor returns one FP link and one non-FP link
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_research_plan",
+        lambda *a, **kw: [
+            ResearchDirective(
+                headline="Iran War Escalates",
+                needs_exa=False,
+                exa_query="",
+                needs_xai=False,
+                xai_query="",
+                is_foreign_policy=True,
+                fp_query="iran war",
+                is_ai=False,
+                ai_query="",
+            ),
+            ResearchDirective(
+                headline="Bitcoin Rises",
+                needs_exa=False,
+                exa_query="",
+                needs_xai=False,
+                xai_query="",
+                is_foreign_policy=False,
+                fp_query="",
+                is_ai=False,
+                ai_query="",
+            ),
+        ],
+    )
+
+    routed_dir = tmp_path / "fp-routed"
+    work_dir = tmp_path / "work"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+
+    links_raw = [
+        {"raw_url": "https://example.com/iran", "headline": "Iran War Escalates"},
+        {"raw_url": "https://example.com/btc", "headline": "Bitcoin Rises"},
+    ]
+
+    collect_all_artifacts(
+        "test-job",
+        links_raw,
+        work_dir,
+        scripts_source_dir=scripts_dir,
+        fp_routed_dir=routed_dir,
+    )
+
+    # FP link should be in the routed file
+    routed_files = list(routed_dir.glob("*.json"))
+    assert len(routed_files) == 1
+    routed = json.loads(routed_files[0].read_text())
+    assert len(routed) == 1
+    assert routed[0]["headline"] == "Iran War Escalates"

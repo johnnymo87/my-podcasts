@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pipeline.article_fetcher import fetch_all_articles
 from pipeline.exa_client import search_related
-from pipeline.rss_sources import FP_SOURCES, AI_SOURCES, search_rss_sources
+from pipeline.rss_sources import AI_SOURCES, search_rss_sources
 from pipeline.things_happen_editor import generate_research_plan
 from pipeline.things_happen_extractor import resolve_redirect_url
 from pipeline.xai_client import search_twitter
@@ -24,11 +26,13 @@ def collect_all_artifacts(
     links_raw: list[dict],
     work_dir: Path,
     scripts_source_dir: Path | None = None,
+    fp_routed_dir: Path | None = None,
 ) -> None:
     """
     Phase 1: Fetch articles and setup directories.
     Phase 2: Generate research plan via Editor AI.
-    Phase 3: Execute deep enrichment searches.
+    Phase 2b: Route FP-flagged directives to fp_routed_dir (if configured).
+    Phase 3: Execute deep enrichment on non-FP directives only.
     """
     # Create directory structure
     articles_dir = work_dir / "articles"
@@ -83,8 +87,34 @@ def collect_all_artifacts(
     # Phase 2: Editor AI
     directives = generate_research_plan(headlines_with_snippets)
 
-    # Phase 3: Deep Enrichment
-    for i, directive in enumerate(directives):
+    # Partition directives: FP links go to staging, non-FP get enriched
+    fp_directives = [d for d in directives if d.is_foreign_policy]
+    non_fp_directives = [d for d in directives if not d.is_foreign_policy]
+
+    # Write FP directives to the staging directory
+    if fp_directives and fp_routed_dir is None:
+        print(
+            f"[collector] {len(fp_directives)} FP directives not routed (fp_routed_dir not configured)"
+        )
+    if fp_directives and fp_routed_dir is not None:
+        fp_routed_dir.mkdir(parents=True, exist_ok=True)
+        today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+        routed_path = fp_routed_dir / f"{today}-{job_id}.json"
+        routed_data = []
+        for d in fp_directives:
+            # Find the matching article for context
+            art = next((a for a in articles if a.headline == d.headline), None)
+            routed_data.append(
+                {
+                    "headline": d.headline,
+                    "url": art.url if art else "",
+                    "snippet": (art.content[:500] if art else ""),
+                }
+            )
+        routed_path.write_text(json.dumps(routed_data, indent=2), encoding="utf-8")
+
+    # Phase 3: Deep Enrichment (non-FP only)
+    for i, directive in enumerate(non_fp_directives):
         slug = f"{i:02d}-{_slugify(directive.headline)}"
 
         # Exa search
@@ -108,25 +138,6 @@ def collect_all_artifacts(
                     (xai_dir / f"{slug}.md").write_text(out, encoding="utf-8")
             except Exception as e:
                 print(f"[collector] xAI search failed for '{directive.xai_query}': {e}")
-
-        # RSS search (Foreign Policy)
-        if directive.is_foreign_policy and directive.fp_query:
-            try:
-                rss_results = search_rss_sources(directive.fp_query, sources=FP_SOURCES)
-                if rss_results:
-                    out = f"# RSS Alternative Perspectives for: {directive.headline}\nQuery: {directive.fp_query}\n\n"
-                    for rss_r in rss_results:
-                        pub = (
-                            rss_r.published.strftime("%Y-%m-%d")
-                            if rss_r.published
-                            else "Unknown"
-                        )
-                        out += f"## [{rss_r.source}] {rss_r.title}\nPublished: {pub}\nURL: {rss_r.url}\n\n{rss_r.text}\n\n"
-                    (rss_dir / f"{slug}-fp.md").write_text(out, encoding="utf-8")
-            except Exception as e:
-                print(
-                    f"[collector] RSS FP search failed for '{directive.fp_query}': {e}"
-                )
 
         # RSS search (AI)
         if directive.is_ai and directive.ai_query:
