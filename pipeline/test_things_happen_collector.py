@@ -7,7 +7,6 @@ import feedparser
 
 from pipeline.article_fetcher import Article
 from pipeline.exa_client import ExaResult
-from pipeline.rss_sources import RssResult
 from pipeline.things_happen_collector import _slugify, collect_all_artifacts
 from pipeline.things_happen_editor import ResearchDirective
 from pipeline.xai_client import XaiResult
@@ -27,13 +26,13 @@ def test_slugify() -> None:
 @patch("pipeline.things_happen_collector.generate_research_plan")
 @patch("pipeline.things_happen_collector.search_related")
 @patch("pipeline.things_happen_collector.search_twitter")
-@patch("pipeline.things_happen_collector.search_rss_sources")
+@patch("pipeline.things_happen_collector.search_zvi_cache")
 @patch("pipeline.things_happen_collector._fetch_semafor_articles")
 @patch("pipeline.things_happen_collector.sync_zvi_cache")
 def test_collect_all_artifacts(
     mock_zvi,
     mock_semafor,
-    mock_rss,
+    mock_zvi_search,
     mock_xai,
     mock_exa,
     mock_plan,
@@ -67,15 +66,13 @@ def test_collect_all_artifacts(
 
     mock_exa.return_value = [ExaResult(title="Exa", url="http://exa", text="Exa text")]
     mock_xai.return_value = XaiResult(summary="Xai summary")
-    mock_rss.return_value = [
-        RssResult(
-            source="test",
-            title="Rss",
-            url="http://rss",
-            published=None,
-            score=1.0,
-            text="Rss text",
-        )
+    mock_zvi_search.return_value = [
+        {
+            "headline": "Zvi AI Take",
+            "path": "/fake/path",
+            "snippet": "Zvi AI text",
+            "score": 5.0,
+        }
     ]
 
     # Setup fake context scripts
@@ -115,8 +112,8 @@ def test_collect_all_artifacts(
 
     rss_ai_files = list((work_dir / "enrichment" / "rss").glob("*-ai.md"))
     assert len(rss_ai_files) == 1
-    assert "Rss text" in rss_ai_files[0].read_text()
-    assert "AI Perspectives" in rss_ai_files[0].read_text()
+    assert "Zvi AI text" in rss_ai_files[0].read_text()
+    assert "Zvi Perspectives" in rss_ai_files[0].read_text()
 
 
 def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
@@ -153,7 +150,7 @@ def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
         "pipeline.things_happen_collector.search_twitter", lambda *a, **kw: None
     )
     monkeypatch.setattr(
-        "pipeline.things_happen_collector.search_rss_sources", lambda *a, **kw: []
+        "pipeline.things_happen_collector.search_zvi_cache", lambda *a, **kw: []
     )
 
     # Editor returns one FP link and one non-FP link
@@ -315,3 +312,77 @@ def test_zvi_articles_added_to_work_dir(tmp_path, monkeypatch):
     zvi_files = list(zvi_dir.glob("*.md"))
     assert len(zvi_files) == 1
     assert "Fresh Essay" in zvi_files[0].read_text()
+
+
+def test_ai_enrichment_uses_zvi_cache(tmp_path, monkeypatch):
+    """When a directive has is_ai=True, enrichment searches the Zvi cache."""
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles",
+        lambda *a, **kw: [
+            Article(
+                headline="New AI Model",
+                url="https://example.com/ai",
+                content="AI model content",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.search_related", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.search_twitter", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector._fetch_semafor_articles", lambda: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
+    )
+
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_research_plan",
+        lambda *a, **kw: [
+            ResearchDirective(
+                headline="New AI Model",
+                needs_exa=False,
+                exa_query="",
+                needs_xai=False,
+                xai_query="",
+                is_foreign_policy=False,
+                fp_query="",
+                is_ai=True,
+                ai_query="new AI model release",
+            ),
+        ],
+    )
+
+    # Create a Zvi cache with a matching article
+    zvi_cache = tmp_path / "zvi-cache"
+    zvi_cache.mkdir()
+    (zvi_cache / "2026-03-07-ai-models.md").write_text(
+        "# AI Models Overview\n\nPost: AI Models\nURL: https://zvi.com\nPublished: 2026-03-07\nType: essay\n\n"
+        "A new AI model was released this week, achieving state of the art results."
+    )
+
+    work_dir = tmp_path / "work"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+
+    collect_all_artifacts(
+        "test-job",
+        [{"raw_url": "https://example.com/ai", "headline": "New AI Model"}],
+        work_dir,
+        scripts_source_dir=scripts_dir,
+        zvi_cache_dir=zvi_cache,
+    )
+
+    # Enrichment should have written a Zvi match file
+    rss_dir = work_dir / "enrichment" / "rss"
+    ai_files = list(rss_dir.glob("*-ai.md"))
+    assert len(ai_files) == 1
+    content = ai_files[0].read_text()
+    assert "AI Models Overview" in content
+    assert "Zvi Perspectives" in content

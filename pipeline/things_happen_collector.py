@@ -7,16 +7,14 @@ from pathlib import Path
 from pipeline.article_fetcher import fetch_all_articles
 from pipeline.exa_client import search_related
 from pipeline.rss_sources import (
-    AI_SOURCES,
     SEMAFOR,
     categorize_semafor_article,
     fetch_feed,
-    search_rss_sources,
 )
 from pipeline.things_happen_editor import generate_research_plan
 from pipeline.things_happen_extractor import resolve_redirect_url
 from pipeline.xai_client import search_twitter
-from pipeline.zvi_cache import sync_zvi_cache
+from pipeline.zvi_cache import search_zvi_cache, sync_zvi_cache
 
 
 def _slugify(text: str) -> str:
@@ -211,21 +209,16 @@ def collect_all_artifacts(
             except Exception as e:
                 print(f"[collector] xAI search failed for '{directive.xai_query}': {e}")
 
-        # RSS search (AI)
+        # Zvi cache search (AI)
         if directive.is_ai and directive.ai_query:
             try:
-                rss_results = search_rss_sources(directive.ai_query, sources=AI_SOURCES)
-                if rss_results:
-                    out = f"# RSS AI Perspectives for: {directive.headline}\nQuery: {directive.ai_query}\n\n"
-                    for rss_r in rss_results:
-                        pub = (
-                            rss_r.published.strftime("%Y-%m-%d")
-                            if rss_r.published
-                            else "Unknown"
-                        )
-                        out += f"## [{rss_r.source}] {rss_r.title}\nPublished: {pub}\nURL: {rss_r.url}\n\n{rss_r.text}\n\n"
+                zvi_results = search_zvi_cache(directive.ai_query, zvi_cache)
+                if zvi_results:
+                    out = f"# Zvi Perspectives for: {directive.headline}\nQuery: {directive.ai_query}\n\n"
+                    for r in zvi_results:
+                        out += f"## [{r['headline']}]\n{r['snippet']}\n\n"
                     (rss_dir / f"{slug}-ai.md").write_text(out, encoding="utf-8")
             except Exception as e:
                 print(
-                    f"[collector] RSS AI search failed for '{directive.ai_query}': {e}"
+                    f"[collector] Zvi cache search failed for '{directive.ai_query}': {e}"
                 )
