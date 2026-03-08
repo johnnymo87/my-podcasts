@@ -277,11 +277,12 @@ def test_zvi_articles_added_to_work_dir(tmp_path, monkeypatch):
         "pipeline.things_happen_collector._fetch_semafor_articles", lambda: []
     )
 
-    from datetime import UTC, datetime
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
     zvi_cache = tmp_path / "zvi-cache"
     zvi_cache.mkdir()
-    today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+    today = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
     (zvi_cache / f"{today}-fresh-essay.md").write_text(
         f"# Fresh Essay\n\nPost: Fresh Essay\nURL: https://zvi.com/fresh\nPublished: {today}\nType: essay\n\n"
         "Content about fresh AI topics."

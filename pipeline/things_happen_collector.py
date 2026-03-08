@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from pipeline.article_fetcher import fetch_all_articles
 from pipeline.exa_client import search_related
@@ -119,8 +120,9 @@ def collect_all_artifacts(
     sync_zvi_cache(zvi_cache)
     zvi_dir = articles_dir / "zvi"
     zvi_dir.mkdir(parents=True, exist_ok=True)
-    today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
-    yesterday = (datetime.now(tz=UTC) - timedelta(days=1)).strftime("%Y-%m-%d")
+    _et = ZoneInfo("America/New_York")
+    today = datetime.now(tz=_et).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(tz=_et) - timedelta(days=1)).strftime("%Y-%m-%d")
     for cached_file in zvi_cache.glob("*.md"):
         if cached_file.name.startswith(today) or cached_file.name.startswith(yesterday):
             target = zvi_dir / cached_file.name
