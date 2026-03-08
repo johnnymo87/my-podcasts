@@ -150,6 +150,18 @@ def _cleanup_old_work_dirs(max_age_days: int = 180) -> None:
             except OSError:
                 pass
 
+    # Clean up old Zvi cache files (180-day retention)
+    zvi_cache_dir = Path("/persist/my-podcasts/zvi-cache")
+    if zvi_cache_dir.exists():
+        for f in zvi_cache_dir.glob("*.md"):
+            try:
+                mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=UTC)
+                if mtime < cutoff:
+                    f.unlink()
+                    print(f"Cleaned up old Zvi cache: {f.name}")
+            except OSError:
+                pass
+
 
 def _find_article_text(directive: Any, work_dir: Path) -> str:
     """Find the article file matching a directive by slugifying the headline.
@@ -292,6 +304,7 @@ def consume_forever(
                             links_raw,
                             work_dir,
                             fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
+                            zvi_cache_dir=Path("/persist/my-podcasts/zvi-cache"),
                         )
 
                         print(
