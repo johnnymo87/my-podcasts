@@ -12,7 +12,9 @@ Quick start and navigation for humans and coding agents.
    - `sudo systemctl status my-podcasts-consumer --no-pager`
 4. Restart consumer (after code changes):
    - `sudo systemctl restart my-podcasts-consumer`
-5. Subscription URLs:
+5. Sync source caches:
+   - `uv run python -m pipeline sync-sources`
+6. Subscription URLs:
    - Main: `https://podcast.mohrbacher.dev/feed.xml`
    - Levine: `https://podcast.mohrbacher.dev/feeds/levine.xml`
    - Yglesias: `https://podcast.mohrbacher.dev/feeds/yglesias.xml`
@@ -59,12 +61,12 @@ When a Levine email with a "Things Happen" section is processed, the consumer **
 
 **Sources:**
 - Matt Levine's "Things Happen" links (extracted from email)
-- Semafor RSS (`semafor.com/rss.xml`) — Business, Technology, Media, CEO, Energy categories + Politics (shared with FP Digest)
+- Semafor RSS (`semafor.com/rss.xml`) — Business, Technology, Media, CEO, Energy categories + Politics (shared with FP Digest). Read from persistent cache with adaptive lookback.
 - Zvi Mowshowitz / "Don't Worry About the Vase" (`thezvi.substack.com/feed`) — AI roundup sections split by topic, essays kept whole. Persistent cache at `/persist/my-podcasts/zvi-cache/` (180-day retention). Also used for AI enrichment via keyword search.
 
 **Flow:**
 1. Email parsed → links extracted by `things_happen_extractor.py`
-2. `things_happen_collector.py` fetches articles, collects Semafor business/tech articles, syncs Zvi cache and copies day-of posts, routes FP-flagged links to `/persist/my-podcasts/fp-routed-links/` for FP Digest
+2. `things_happen_collector.py` fetches articles, reads Semafor from cache (with adaptive lookback window), syncs Zvi cache and copies lookback-window posts, routes FP-flagged links to `/persist/my-podcasts/fp-routed-links/` for FP Digest
 3. Consumer calls `things_happen_agent.py` which creates a session on the shared `opencode-serve` daemon (port 4096)
 4. Agent enriches headlines using **Exa** (full-text article search), **xAI/Grok** for analysis, and **Zvi cache** keyword search for AI perspectives
 5. Agent writes the briefing script to `<work_dir>/script.txt`
@@ -79,12 +81,13 @@ When a Levine email with a "Things Happen" section is processed, the consumer **
 - `pipeline/exa_client.py` — Exa search API wrapper
 - `pipeline/xai_client.py` — xAI/Grok API wrapper
 - `pipeline/rss_sources.py` — RSS source definitions, `SEMAFOR`, `categorize_semafor_article()`
+- `pipeline/source_cache.py` — Persistent cache sync for Semafor, Antiwar RSS, and Antiwar homepage
 
 ## FP Digest Pipeline
 
 Daily foreign policy podcast. Fully automated, no human-in-the-loop.
 
-**Sources:**
+**Sources (all read from persistent caches with adaptive lookback):**
 - antiwar.com homepage (~49 curated external links across 13 regions)
 - 3 antiwar.com RSS feeds + Caitlin Johnstone feed
 - Semafor RSS — Africa, Gulf, Security categories + Politics (shared with Things Happen)
@@ -92,8 +95,7 @@ Daily foreign policy podcast. Fully automated, no human-in-the-loop.
 
 **Flow:**
 1. Systemd timer triggers daily at 6 PM EST (23:00 UTC)
-2. `fp_homepage_scraper.py` scrapes antiwar.com homepage region links (~49 external links)
-3. `fp_collector.py` fetches RSS feeds + homepage articles + Semafor FP articles + routed Levine FP links
+2. `fp_collector.py` reads homepage articles, RSS articles, Semafor FP articles from persistent caches (with adaptive lookback window) + routed Levine FP links
 4. `fp_editor.py` (Gemini Flash-Lite) triages into 3-5 themes, selects 8-12 stories
 5. Exa enrichment for paywalled articles
 6. `fp_writer.py` generates script via opencode-serve
@@ -106,8 +108,9 @@ Daily foreign policy podcast. Fully automated, no human-in-the-loop.
 - `pipeline/fp_writer.py` — script generation via opencode-serve
 - `pipeline/fp_processor.py` — TTS + publish
 - `pipeline/rss_sources.py` — RSS source definitions, Semafor category routing
+- `pipeline/source_cache.py` — Persistent cache sync for all sources
 
-**CLI:** `uv run python -m pipeline fp-digest [--date YYYY-MM-DD]`
+**CLI:** `uv run python -m pipeline fp-digest [--date YYYY-MM-DD] [--lookback N] [--dry-run]`
 
 ## Content Routing
 
@@ -115,9 +118,29 @@ Foreign policy content is exclusively routed to FP Digest, not Things Happen:
 
 - **Things Happen editor** classifies each link with `is_foreign_policy: bool`
 - FP-flagged links are written to `/persist/my-podcasts/fp-routed-links/{date}-{job_id}.json`
-- FP Digest collector picks up today's and yesterday's routed files
+- FP Digest collector reads routed files within the lookback window
 - **Semafor** articles are split by category: FP categories → FP Digest, business/tech → Things Happen, Politics → both
 - Routed link files are cleaned up after 7 days
+
+## Source Caching
+
+All external sources are cached daily to persistent storage by the `sync-sources` timer (noon ET daily). Podcasts read from caches instead of fetching live, with an adaptive lookback window based on days since the last episode (min 2, max 14 days).
+
+**Caches:**
+- Zvi: `/persist/my-podcasts/zvi-cache/` (also synced on-demand by Things Happen collector)
+- Semafor: `/persist/my-podcasts/semafor-cache/`
+- Antiwar RSS: `/persist/my-podcasts/antiwar-rss-cache/`
+- Antiwar Homepage: `/persist/my-podcasts/antiwar-homepage-cache/`
+
+All caches use 180-day retention (cleaned up by `_cleanup_old_work_dirs` in consumer). Files are markdown with metadata headers (URL, Published, Source, Category/Region).
+
+**Key module:** `pipeline/source_cache.py` — `sync_semafor_cache`, `sync_antiwar_rss_cache`, `sync_antiwar_homepage_cache`
+
+**CLI:** `uv run python -m pipeline sync-sources`
+
+**Timer:** `sync-sources.timer` — daily at noon ET
+
+**Adaptive lookback:** `pipeline/db.py:days_since_last_episode()` queries the latest episode date per feed. `pipeline/consumer.py:_compute_lookback()` computes `min(max(2, days_since + 1), 14)`.
 
 ## Landing the Plane (Session Completion)
 
