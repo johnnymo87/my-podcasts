@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -170,7 +170,8 @@ def collect_all_artifacts(
         )
     if fp_directives and fp_routed_dir is not None:
         fp_routed_dir.mkdir(parents=True, exist_ok=True)
-        today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+        _et = ZoneInfo("America/New_York")
+        today = datetime.now(tz=_et).strftime("%Y-%m-%d")
         routed_path = fp_routed_dir / f"{today}-{job_id}.json"
         routed_data = []
         for d in fp_directives:

@@ -1,23 +1,16 @@
 from __future__ import annotations
 
 import json
-import time
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-import feedparser
 import requests
 import trafilatura
 
 from pipeline.exa_client import search_related
 from pipeline.fp_editor import generate_fp_research_plan
-from pipeline.fp_homepage_scraper import scrape_homepage
-from pipeline.rss_sources import (
-    FP_DIGEST_RSS_SOURCES,
-    SEMAFOR,
-    categorize_semafor_article,
-    fetch_feed,
-)
+from pipeline.rss_sources import categorize_semafor_article
 
 
 def _slugify(text: str) -> str:
@@ -51,108 +44,25 @@ def _extract_article_text(url: str) -> str:
         return ""
 
 
-def _fetch_rss_articles(days_back: int = 3) -> list[dict]:
-    """Fetch articles from all FP_DIGEST_RSS_SOURCES.
-
-    Returns a list of dicts with keys: source, headline, url, summary, text.
-    """
-    since = datetime.now(tz=UTC) - timedelta(days=days_back)
-    articles: list[dict] = []
-
-    session = requests.Session()
-    session.headers.update({"User-Agent": "podcast-pipeline/1.0"})
-
-    for src in FP_DIGEST_RSS_SOURCES:
-        try:
-            resp = session.get(src.feed_url, timeout=15)
-            resp.raise_for_status()
-            feed = feedparser.parse(resp.text)
-        except Exception as e:
-            print(f"[fp_collector] Failed to fetch feed {src.feed_url}: {e}")
-            continue
-
-        for entry in feed.entries:
-            # Parse publication date
-            published = None
-            for key in ("published_parsed", "updated_parsed"):
-                st = entry.get(key)
-                if st:
-                    published = datetime.fromtimestamp(time.mktime(st), tz=UTC)
-                    break
-
-            if published and published < since:
-                continue
-
-            headline = (entry.get("title") or "").strip()
-            url = (entry.get("link") or "").strip()
-            summary = (entry.get("summary") or entry.get("description") or "").strip()
-
-            if not headline or not url:
-                continue
-
-            articles.append(
-                {
-                    "source": src.name,
-                    "headline": headline,
-                    "url": url,
-                    "summary": summary,
-                    "text": "",
-                }
-            )
-
-    return articles
-
-
-def _fetch_semafor_fp_articles() -> list[dict]:
-    """Fetch Semafor RSS and return FP-category articles."""
-    try:
-        feed = fetch_feed(SEMAFOR.feed_url)
-    except Exception as e:
-        print(f"[fp_collector] Failed to fetch Semafor RSS: {e}")
-        return []
-    articles = []
-    for entry in feed.entries:
-        category = ""
-        if entry.get("tags"):
-            category = entry["tags"][0].get("term", "")
-        routing = categorize_semafor_article(category)
-        if routing in ("fp", "both"):
-            headline = (entry.get("title") or "").strip()
-            url = (entry.get("link") or "").strip()
-            content_encoded = (
-                entry.get("content", [{}])[0].get("value", "")
-                if entry.get("content")
-                else ""
-            )
-            summary = (entry.get("summary") or "").strip()
-            if headline:
-                articles.append(
-                    {
-                        "headline": headline,
-                        "url": url,
-                        "text": content_encoded or summary,
-                        "category": category,
-                    }
-                )
-    return articles
-
-
 def collect_fp_artifacts(
     job_id: str,
     work_dir: Path,
     scripts_source_dir: Path | None = None,
     fp_routed_dir: Path | None = None,
+    homepage_cache_dir: Path | None = None,
+    antiwar_rss_cache_dir: Path | None = None,
+    semafor_cache_dir: Path | None = None,
+    lookback_days: int = 2,
 ) -> None:
     """Orchestrate FP Digest collection.
 
     1. Creates directory structure.
-    2. Scrapes antiwar.com homepage, fetches full text, writes articles.
-    3. Fetches RSS articles, deduplicates, writes articles.
+    2. Reads antiwar.com homepage articles from persistent cache.
+    3. Reads RSS articles from persistent cache, deduplicates.
     4. Copies last 3 scripts for context.
     5. Builds headlines list, calls the FP editor for a research plan.
     6. Writes plan.json.
     7. Runs Exa enrichment for selected stories.
-    8. Fetches full text for RSS articles with short content.
     """
     # Create directory structure
     articles_homepage_dir = work_dir / "articles" / "homepage"
@@ -163,44 +73,109 @@ def collect_fp_artifacts(
     for d in (articles_homepage_dir, articles_rss_dir, exa_dir, context_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    # Phase 1: Homepage scraping
-    homepage_links = scrape_homepage()
+    # Compute lookback window in Eastern time
+    _et = ZoneInfo("America/New_York")
+    lookback_dates = set()
+    for i in range(lookback_days):
+        d = (datetime.now(tz=_et) - timedelta(days=i)).strftime("%Y-%m-%d")
+        lookback_dates.add(d)
+
+    def _in_window(filename: str) -> bool:
+        return any(filename.startswith(d) for d in lookback_dates)
+
+    # Phase 1: Read homepage articles from cache
+    _homepage_cache = (
+        homepage_cache_dir
+        if homepage_cache_dir is not None
+        else Path("/persist/my-podcasts/antiwar-homepage-cache")
+    )
     homepage_urls: set[str] = set()
 
-    for link in homepage_links:
-        homepage_urls.add(link.url)
-        text = _extract_article_text(link.url)
+    if not _homepage_cache.exists():
+        print(f"[fp_collector] WARNING: homepage cache not found at {_homepage_cache}")
+    if _homepage_cache.exists():
+        for cache_path in sorted(_homepage_cache.glob("*.md")):
+            if not _in_window(cache_path.name):
+                continue
+            raw = cache_path.read_text(encoding="utf-8")
+            lines = raw.split("\n")
 
-        region_slug = _slugify(link.region)
-        region_dir = articles_homepage_dir / region_slug
-        region_dir.mkdir(parents=True, exist_ok=True)
+            # Parse metadata
+            title = lines[0].lstrip("# ").strip() if lines else ""
+            url = ""
+            region = ""
+            for line in lines[1:]:
+                if line.startswith("URL: "):
+                    url = line[5:].strip()
+                elif line.startswith("Region: "):
+                    region = line[8:].strip()
 
-        slug = _slugify(link.headline)
-        art_path = region_dir / f"{slug}.md"
-        content = (
-            f"# {link.headline}\n\nURL: {link.url}\nRegion: {link.region}\n\n{text}"
-        )
-        art_path.write_text(content, encoding="utf-8")
+            if not title or not url:
+                continue
 
-    # Phase 2: RSS article fetching
-    rss_articles = _fetch_rss_articles()
+            homepage_urls.add(url)
 
-    # Deduplicate RSS articles by URL against homepage links
-    rss_articles = [a for a in rss_articles if a["url"] not in homepage_urls]
+            region_slug = _slugify(region) if region else "unknown"
+            region_dir = articles_homepage_dir / region_slug
+            region_dir.mkdir(parents=True, exist_ok=True)
 
-    for article in rss_articles:
-        source_dir = articles_rss_dir / article["source"]
-        source_dir.mkdir(parents=True, exist_ok=True)
+            slug = _slugify(title)
+            art_path = region_dir / f"{slug}.md"
+            # Extract body (everything after the metadata block)
+            # Find the blank line after metadata block (2 blank lines separate header from body)
+            body_parts = raw.split("\n\n", 2)
+            text = body_parts[2].strip() if len(body_parts) > 2 else ""
 
-        slug = _slugify(article["headline"])
-        art_path = source_dir / f"{slug}.md"
-        content = (
-            f"# {article['headline']}\n\n"
-            f"URL: {article['url']}\n"
-            f"Source: {article['source']}\n\n"
-            f"{article['text'] or article['summary']}"
-        )
-        art_path.write_text(content, encoding="utf-8")
+            content = f"# {title}\n\nURL: {url}\nRegion: {region}\n\n{text}"
+            art_path.write_text(content, encoding="utf-8")
+
+    # Phase 2: Read RSS articles from cache
+    _rss_cache = (
+        antiwar_rss_cache_dir
+        if antiwar_rss_cache_dir is not None
+        else Path("/persist/my-podcasts/antiwar-rss-cache")
+    )
+    rss_articles_data: list[dict] = []
+
+    if not _rss_cache.exists():
+        print(f"[fp_collector] WARNING: RSS cache not found at {_rss_cache}")
+    if _rss_cache.exists():
+        for cache_path in sorted(_rss_cache.glob("*.md")):
+            if not _in_window(cache_path.name):
+                continue
+            raw = cache_path.read_text(encoding="utf-8")
+            lines = raw.split("\n")
+
+            title = lines[0].lstrip("# ").strip() if lines else ""
+            url = ""
+            source = ""
+            for line in lines[1:]:
+                if line.startswith("URL: "):
+                    url = line[5:].strip()
+                elif line.startswith("Source: "):
+                    source = line[8:].strip()
+
+            if not title or not url:
+                continue
+
+            # Skip if URL already in homepage
+            if url in homepage_urls:
+                continue
+
+            body_parts = raw.split("\n\n", 2)
+            text = body_parts[2].strip() if len(body_parts) > 2 else ""
+
+            source_dir = articles_rss_dir / source
+            source_dir.mkdir(parents=True, exist_ok=True)
+
+            slug = _slugify(title)
+            art_path = source_dir / f"{slug}.md"
+            content = f"# {title}\n\nURL: {url}\nSource: {source}\n\n{text}"
+            art_path.write_text(content, encoding="utf-8")
+
+            rss_articles_data.append(
+                {"headline": title, "url": url, "source": source, "text": text}
+            )
 
     # Phase 2b: Pick up routed links from Things Happen
     articles_routed_dir = work_dir / "articles" / "routed"
@@ -211,11 +186,9 @@ def collect_fp_artifacts(
         else Path("/persist/my-podcasts/fp-routed-links")
     )
     if routed_links_dir.exists():
-        today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
-        yesterday = (datetime.now(tz=UTC) - timedelta(days=1)).strftime("%Y-%m-%d")
         for routed_path in sorted(routed_links_dir.glob("*.json")):
             fname = routed_path.stem  # e.g. "2026-03-07-some-job-id"
-            if fname.startswith(today) or fname.startswith(yesterday):
+            if _in_window(fname):
                 routed_data = json.loads(routed_path.read_text())
                 for item in routed_data:
                     headline = item.get("headline", "").strip()
@@ -235,17 +208,52 @@ def collect_fp_artifacts(
                             encoding="utf-8",
                         )
 
-    # Phase 2c: Semafor FP articles
+    # Phase 2c: Read Semafor FP articles from cache
     articles_semafor_dir = work_dir / "articles" / "semafor"
     articles_semafor_dir.mkdir(parents=True, exist_ok=True)
-    semafor_articles = _fetch_semafor_fp_articles()
-    for article in semafor_articles:
-        slug = _slugify(article["headline"])
-        art_path = articles_semafor_dir / f"{slug}.md"
-        art_path.write_text(
-            f"# {article['headline']}\n\nURL: {article['url']}\nSource: semafor\nCategory: {article['category']}\n\n{article['text']}",
-            encoding="utf-8",
-        )
+    _semafor_cache = (
+        semafor_cache_dir
+        if semafor_cache_dir is not None
+        else Path("/persist/my-podcasts/semafor-cache")
+    )
+
+    if not _semafor_cache.exists():
+        print(f"[fp_collector] WARNING: Semafor cache not found at {_semafor_cache}")
+    if _semafor_cache.exists():
+        for cache_path in sorted(_semafor_cache.glob("*.md")):
+            if not _in_window(cache_path.name):
+                continue
+            raw = cache_path.read_text(encoding="utf-8")
+            lines = raw.split("\n")
+
+            title = lines[0].lstrip("# ").strip() if lines else ""
+            url = ""
+            category = ""
+            for line in lines[1:]:
+                if line.startswith("URL: "):
+                    url = line[5:].strip()
+                elif line.startswith("Category: "):
+                    category = line[10:].strip()
+
+            if not title or not url:
+                continue
+
+            routing = categorize_semafor_article(category)
+            if routing not in ("fp", "both"):
+                continue
+
+            if url in homepage_urls:
+                continue
+
+            body_parts = raw.split("\n\n", 2)
+            text = body_parts[2].strip() if len(body_parts) > 2 else ""
+
+            slug = _slugify(title)
+            art_path = articles_semafor_dir / f"{slug}.md"
+            art_path.write_text(
+                f"# {title}\n\nURL: {url}\nSource: semafor\nCategory: {category}\n\n{text}",
+                encoding="utf-8",
+            )
 
     # Phase 3: Copy last 3 scripts for context
     scripts_dir = (
@@ -265,28 +273,27 @@ def collect_fp_artifacts(
     # Phase 4: Build headlines for the editor
     headlines_with_snippets: list[str] = []
 
-    # Homepage headlines
-    for link in homepage_links:
-        source_label = f"homepage/{_slugify(link.region)}"
-        # Try to read the written article text
-        region_dir = articles_homepage_dir / _slugify(link.region)
-        slug = _slugify(link.headline)
-        art_path = region_dir / f"{slug}.md"
-        text = ""
-        if art_path.exists():
+    # Homepage headlines — read from written article files
+    for region_dir in articles_homepage_dir.iterdir():
+        if not region_dir.is_dir():
+            continue
+        region_slug = region_dir.name
+        source_label = f"homepage/{region_slug}"
+        for art_path in sorted(region_dir.glob("*.md")):
             raw = art_path.read_text(encoding="utf-8")
-            # Strip header lines to get body text
             lines = raw.split("\n")
-            text = "\n".join(lines[4:]).strip() if len(lines) > 4 else ""
-        truncated = text[:300]
-        suffix = "..." if len(text) > 300 else ""
-        snippet = f"[{source_label}] {link.headline}\nContext: {truncated}{suffix}"
-        headlines_with_snippets.append(snippet)
+            headline = lines[0].lstrip("# ").strip() if lines else ""
+            body_parts = raw.split("\n\n", 2)
+            text = body_parts[2].strip() if len(body_parts) > 2 else ""
+            truncated = text[:300]
+            suffix = "..." if len(text) > 300 else ""
+            snippet = f"[{source_label}] {headline}\nContext: {truncated}{suffix}"
+            headlines_with_snippets.append(snippet)
 
-    # RSS headlines
-    for article in rss_articles:
+    # RSS headlines — iterate over rss_articles_data
+    for article in rss_articles_data:
         source_label = f"rss/{article['source']}"
-        text = article["text"] or article["summary"]
+        text = article["text"]
         truncated = text[:300]
         suffix = "..." if len(text) > 300 else ""
         snippet = (
@@ -343,22 +350,3 @@ def collect_fp_artifacts(
                 print(
                     f"[fp_collector] Exa search failed for '{directive.exa_query}': {e}"
                 )
-
-    # Phase 7: Fetch full text for short RSS articles
-    for article in rss_articles:
-        if len(article["text"]) < 500:
-            full_text = _extract_article_text(article["url"])
-            if full_text:
-                article["text"] = full_text
-                # Update the written file
-                source_dir = articles_rss_dir / article["source"]
-                slug = _slugify(article["headline"])
-                art_path = source_dir / f"{slug}.md"
-                if art_path.exists():
-                    content = (
-                        f"# {article['headline']}\n\n"
-                        f"URL: {article['url']}\n"
-                        f"Source: {article['source']}\n\n"
-                        f"{full_text}"
-                    )
-                    art_path.write_text(content, encoding="utf-8")
