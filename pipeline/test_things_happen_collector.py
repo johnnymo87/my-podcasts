@@ -29,7 +29,9 @@ def test_slugify() -> None:
 @patch("pipeline.things_happen_collector.search_twitter")
 @patch("pipeline.things_happen_collector.search_rss_sources")
 @patch("pipeline.things_happen_collector._fetch_semafor_articles")
+@patch("pipeline.things_happen_collector.sync_zvi_cache")
 def test_collect_all_artifacts(
+    mock_zvi,
     mock_semafor,
     mock_rss,
     mock_xai,
@@ -122,6 +124,9 @@ def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
     # Mock all external calls
     monkeypatch.setattr(
         "pipeline.things_happen_collector._fetch_semafor_articles", lambda: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
     )
     monkeypatch.setattr(
         "pipeline.things_happen_collector.fetch_all_articles",
@@ -218,6 +223,9 @@ def test_semafor_articles_added_to_work_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "pipeline.things_happen_collector.generate_research_plan", lambda *a, **kw: []
     )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
+    )
 
     # Mock Semafor RSS fetch to return articles with categories
     fake_entries = [
@@ -255,3 +263,55 @@ def test_semafor_articles_added_to_work_dir(tmp_path, monkeypatch):
     # Only the Tech article, not the Gulf one (FP-only)
     assert len(semafor_files) == 1
     assert "Tech Company IPO" in semafor_files[0].read_text()
+
+
+def test_zvi_articles_added_to_work_dir(tmp_path, monkeypatch):
+    """Zvi posts published today appear in work_dir/articles/zvi/."""
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_research_plan", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector._fetch_semafor_articles", lambda: []
+    )
+
+    from datetime import UTC, datetime
+
+    zvi_cache = tmp_path / "zvi-cache"
+    zvi_cache.mkdir()
+    today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+    (zvi_cache / f"{today}-fresh-essay.md").write_text(
+        f"# Fresh Essay\n\nPost: Fresh Essay\nURL: https://zvi.com/fresh\nPublished: {today}\nType: essay\n\n"
+        "Content about fresh AI topics."
+    )
+    (zvi_cache / "2026-01-01-old-essay.md").write_text(
+        "# Old Essay\n\nPost: Old Essay\nURL: https://zvi.com/old\nPublished: 2026-01-01\nType: essay\n\n"
+        "Content about old AI topics."
+    )
+
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
+    )
+
+    work_dir = tmp_path / "work"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+
+    collect_all_artifacts(
+        "test-job",
+        [],
+        work_dir,
+        scripts_source_dir=scripts_dir,
+        zvi_cache_dir=zvi_cache,
+    )
+
+    zvi_dir = work_dir / "articles" / "zvi"
+    assert zvi_dir.exists()
+    zvi_files = list(zvi_dir.glob("*.md"))
+    assert len(zvi_files) == 1
+    assert "Fresh Essay" in zvi_files[0].read_text()

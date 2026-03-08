@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from pipeline.article_fetcher import fetch_all_articles
@@ -16,6 +16,7 @@ from pipeline.rss_sources import (
 from pipeline.things_happen_editor import generate_research_plan
 from pipeline.things_happen_extractor import resolve_redirect_url
 from pipeline.xai_client import search_twitter
+from pipeline.zvi_cache import sync_zvi_cache
 
 
 def _slugify(text: str) -> str:
@@ -43,6 +44,7 @@ def collect_all_artifacts(
     work_dir: Path,
     scripts_source_dir: Path | None = None,
     fp_routed_dir: Path | None = None,
+    zvi_cache_dir: Path | None = None,
 ) -> None:
     """
     Phase 1: Fetch articles and setup directories.
@@ -109,6 +111,36 @@ def collect_all_artifacts(
                     f"# {headline}\n\nURL: {url}\nSource: semafor\nCategory: {category}\n\n{text}",
                     encoding="utf-8",
                 )
+
+    # Phase 1c: Zvi articles (day-of posts from persistent cache)
+    zvi_cache = (
+        zvi_cache_dir
+        if zvi_cache_dir is not None
+        else Path("/persist/my-podcasts/zvi-cache")
+    )
+    sync_zvi_cache(zvi_cache)
+    zvi_dir = articles_dir / "zvi"
+    zvi_dir.mkdir(parents=True, exist_ok=True)
+    today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(tz=UTC) - timedelta(days=1)).strftime("%Y-%m-%d")
+    for cached_file in zvi_cache.glob("*.md"):
+        if cached_file.name.startswith(today) or cached_file.name.startswith(yesterday):
+            target = zvi_dir / cached_file.name
+            if not target.exists():
+                target.write_text(
+                    cached_file.read_text(encoding="utf-8"), encoding="utf-8"
+                )
+
+    # Zvi headlines
+    for zvi_path in zvi_dir.glob("*.md"):
+        text = zvi_path.read_text(encoding="utf-8")
+        parts = text.split("\n\n", 2)
+        headline = parts[0].lstrip("# ").strip() if parts else ""
+        body = parts[2].strip() if len(parts) > 2 else ""
+        truncated = body[:300]
+        suffix = "..." if len(body) > 300 else ""
+        snippet = f"[zvi] {headline}\nContext: {truncated}{suffix}"
+        headlines_with_snippets.append(snippet)
 
     # Copy trailing window context (last 3 scripts)
     scripts_dir = (
