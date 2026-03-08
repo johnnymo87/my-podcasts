@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html as html_mod
+import math
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -137,3 +138,59 @@ def sync_zvi_cache(cache_dir: Path) -> list[Path]:
             new_files.append(path)
 
     return new_files
+
+
+_WORD_RE = re.compile(r"\w+")
+
+
+def _tokenize(text: str) -> list[str]:
+    return _WORD_RE.findall(text.lower())
+
+
+def _keyword_score(query: str, title: str, body: str) -> float:
+    """Score a document against a query using token overlap."""
+    q_tokens = _tokenize(query)
+    if not q_tokens:
+        return 0.0
+    t_tokens = set(_tokenize(title))
+    b_tokens = set(_tokenize(body))
+    idf = 1.0 / math.sqrt(len(q_tokens))
+    score = 0.0
+    for tok in q_tokens:
+        if tok in t_tokens:
+            score += 3.0 * idf
+        if tok in b_tokens:
+            score += 1.0 * idf
+    return score
+
+
+def search_zvi_cache(query: str, cache_dir: Path, max_results: int = 5) -> list[dict]:
+    """Keyword search across cached Zvi files. Returns top matches.
+
+    Each result is a dict with keys: headline, path, snippet, score.
+    """
+    if not cache_dir.exists():
+        return []
+
+    scored: list[tuple[float, Path, str, str]] = []
+    for md_file in cache_dir.glob("*.md"):
+        text = md_file.read_text(encoding="utf-8")
+        lines = text.split("\n")
+        headline = lines[0].lstrip("# ").strip() if lines else ""
+        # Body is everything after the metadata block
+        parts = text.split("\n\n", 2)
+        body = parts[2] if len(parts) > 2 else ""
+
+        score = _keyword_score(query, headline, body)
+        if score > 0:
+            # Build a snippet: first 300 chars of body
+            snippet = body[:300].strip()
+            if len(body) > 300:
+                snippet += "..."
+            scored.append((score, md_file, headline, snippet))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [
+        {"headline": h, "path": str(p), "snippet": s, "score": sc}
+        for sc, p, h, s in scored[:max_results]
+    ]

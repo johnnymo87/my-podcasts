@@ -56,6 +56,7 @@ select = [
 ignore = [
     "E203", # whitespace before ':'
     "TC002", # Move third-party import into type-checking block (requires careful handling)
+    "TC003", # Move stdlib import into type-checking block (Path etc. used at runtime)
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -68,6 +69,7 @@ ignore = [
 "pipeline/fp_collector.py" = ["E501"] # Allow long lines in template strings
 "pipeline/things_happen_collector.py" = ["E501"] # Allow long lines in template strings
 "pipeline/test_fp_homepage_scraper.py" = ["E501"] # Allow long lines in HTML fixtures
+"pipeline/test_zvi_cache.py" = ["E501"] # Allow long lines in test data strings
 
 [tool.ruff.lint.isort]
 # Configure isort to be compatible with black formatting
