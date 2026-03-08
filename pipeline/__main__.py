@@ -10,6 +10,12 @@ from pipeline.db import StateStore
 from pipeline.feed import regenerate_and_upload_feed
 from pipeline.processor import process_local_eml_file
 from pipeline.r2 import R2Client
+from pipeline.source_cache import (
+    sync_antiwar_homepage_cache,
+    sync_antiwar_rss_cache,
+    sync_semafor_cache,
+)
+from pipeline.zvi_cache import sync_zvi_cache
 
 
 def _default_state_db_path() -> Path:
@@ -244,6 +250,33 @@ def _fp_digest_full_run(date_str: str) -> None:
         click.echo(f"Published FP Digest for {date_str}")
     finally:
         store.close()
+
+
+@cli.command("sync-sources")
+def sync_sources_command() -> None:
+    """Sync all source caches (Zvi, Semafor, Antiwar RSS, Antiwar homepage)."""
+    caches = [
+        ("Zvi", sync_zvi_cache, Path("/persist/my-podcasts/zvi-cache")),
+        ("Semafor", sync_semafor_cache, Path("/persist/my-podcasts/semafor-cache")),
+        (
+            "Antiwar RSS",
+            sync_antiwar_rss_cache,
+            Path("/persist/my-podcasts/antiwar-rss-cache"),
+        ),
+        (
+            "Antiwar Homepage",
+            sync_antiwar_homepage_cache,
+            Path("/persist/my-podcasts/antiwar-homepage-cache"),
+        ),
+    ]
+
+    for name, sync_fn, cache_dir in caches:
+        click.echo(f"Syncing {name}...")
+        try:
+            new_files = sync_fn(cache_dir)
+            click.echo(f"  {name}: {len(new_files)} new files cached")
+        except Exception as e:
+            click.echo(f"  {name}: FAILED - {e}", err=True)
 
 
 if __name__ == "__main__":

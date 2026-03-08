@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
+from click.testing import CliRunner
+
+from pipeline.__main__ import cli
 from pipeline.fp_homepage_scraper import HomepageLink
 from pipeline.source_cache import (
     sync_antiwar_homepage_cache,
@@ -185,3 +188,26 @@ def test_sync_homepage_handles_scrape_failure(tmp_path):
     ):
         result = sync_antiwar_homepage_cache(tmp_path)
     assert result == []
+
+
+def test_sync_sources_cli():
+    """The sync-sources command calls all four sync functions."""
+    with (
+        patch("pipeline.__main__.sync_zvi_cache") as mock_zvi,
+        patch("pipeline.__main__.sync_semafor_cache") as mock_semafor,
+        patch("pipeline.__main__.sync_antiwar_rss_cache") as mock_rss,
+        patch("pipeline.__main__.sync_antiwar_homepage_cache") as mock_homepage,
+    ):
+        mock_zvi.return_value = []
+        mock_semafor.return_value = []
+        mock_rss.return_value = []
+        mock_homepage.return_value = []
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["sync-sources"])
+
+    assert result.exit_code == 0
+    mock_zvi.assert_called_once()
+    mock_semafor.assert_called_once()
+    mock_rss.assert_called_once()
+    mock_homepage.assert_called_once()
