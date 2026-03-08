@@ -101,7 +101,16 @@ def feed_command(output_file: Path | None) -> None:
     default=False,
     help="Stop after script generation (skip TTS and publish).",
 )
-def fp_digest_command(date_str: str | None, dry_run: bool) -> None:
+@click.option(
+    "--lookback",
+    "lookback_days",
+    default=None,
+    type=int,
+    help="Override lookback days (default: adaptive based on last episode).",
+)
+def fp_digest_command(
+    date_str: str | None, dry_run: bool, lookback_days: int | None
+) -> None:
     """Create and process an FP Digest episode."""
     from datetime import UTC, datetime
 
@@ -109,12 +118,12 @@ def fp_digest_command(date_str: str | None, dry_run: bool) -> None:
         date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
 
     if dry_run:
-        _fp_digest_dry_run(date_str)
+        _fp_digest_dry_run(date_str, lookback_days)
     else:
-        _fp_digest_full_run(date_str)
+        _fp_digest_full_run(date_str, lookback_days)
 
 
-def _fp_digest_dry_run(date_str: str) -> None:
+def _fp_digest_dry_run(date_str: str, lookback_override: int | None = None) -> None:
     """Run collection + script generation without touching the DB."""
     import uuid
 
@@ -127,7 +136,14 @@ def _fp_digest_dry_run(date_str: str) -> None:
     click.echo(f"Dry run for {date_str} (no DB entry created)")
 
     click.echo("Collecting sources...")
-    collect_fp_artifacts(run_id, work_dir)
+    collect_fp_artifacts(
+        run_id,
+        work_dir,
+        homepage_cache_dir=Path("/persist/my-podcasts/antiwar-homepage-cache"),
+        antiwar_rss_cache_dir=Path("/persist/my-podcasts/antiwar-rss-cache"),
+        semafor_cache_dir=Path("/persist/my-podcasts/semafor-cache"),
+        lookback_days=lookback_override or 2,
+    )
 
     plan_path = work_dir / "plan.json"
     if not plan_path.exists():
@@ -170,10 +186,11 @@ def _fp_digest_dry_run(date_str: str) -> None:
     click.echo(f"Work directory: {work_dir}")
 
 
-def _fp_digest_full_run(date_str: str) -> None:
+def _fp_digest_full_run(date_str: str, lookback_override: int | None = None) -> None:
     """Run the full pipeline: collect, generate script, TTS, publish."""
     import shutil
 
+    from pipeline.consumer import _compute_lookback
     from pipeline.fp_collector import collect_fp_artifacts
     from pipeline.fp_editor import FPResearchPlan
     from pipeline.fp_processor import process_fp_digest_job
@@ -199,9 +216,17 @@ def _fp_digest_full_run(date_str: str) -> None:
                 click.echo("Error: job not found")
                 return
 
+        lookback = lookback_override or _compute_lookback(store, "fp-digest")
         work_dir = Path(f"/tmp/fp-digest-{job['id']}")
         click.echo("Collecting sources...")
-        collect_fp_artifacts(job["id"], work_dir)
+        collect_fp_artifacts(
+            job["id"],
+            work_dir,
+            homepage_cache_dir=Path("/persist/my-podcasts/antiwar-homepage-cache"),
+            antiwar_rss_cache_dir=Path("/persist/my-podcasts/antiwar-rss-cache"),
+            semafor_cache_dir=Path("/persist/my-podcasts/semafor-cache"),
+            lookback_days=lookback,
+        )
 
         plan_path = work_dir / "plan.json"
         if not plan_path.exists():
