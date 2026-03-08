@@ -7,11 +7,7 @@ from zoneinfo import ZoneInfo
 
 from pipeline.article_fetcher import fetch_all_articles
 from pipeline.exa_client import search_related
-from pipeline.rss_sources import (
-    SEMAFOR,
-    categorize_semafor_article,
-    fetch_feed,
-)
+from pipeline.rss_sources import categorize_semafor_article
 from pipeline.things_happen_editor import generate_research_plan
 from pipeline.things_happen_extractor import resolve_redirect_url
 from pipeline.xai_client import search_twitter
@@ -27,16 +23,6 @@ def _slugify(text: str) -> str:
     return safe.strip("-")[:50]
 
 
-def _fetch_semafor_articles() -> list:
-    """Fetch Semafor RSS and return parsed entries."""
-    try:
-        feed = fetch_feed(SEMAFOR.feed_url)
-        return list(feed.entries)
-    except Exception as e:
-        print(f"[collector] Failed to fetch Semafor RSS: {e}")
-        return []
-
-
 def collect_all_artifacts(
     job_id: str,
     links_raw: list[dict],
@@ -44,6 +30,8 @@ def collect_all_artifacts(
     scripts_source_dir: Path | None = None,
     fp_routed_dir: Path | None = None,
     zvi_cache_dir: Path | None = None,
+    semafor_cache_dir: Path | None = None,
+    lookback_days: int = 2,
 ) -> None:
     """
     Phase 1: Fetch articles and setup directories.
@@ -61,6 +49,12 @@ def collect_all_artifacts(
 
     for d in (articles_dir, exa_dir, xai_dir, rss_dir, context_dir):
         d.mkdir(parents=True, exist_ok=True)
+
+    _et = ZoneInfo("America/New_York")
+    lookback_dates = set()
+    for i in range(lookback_days):
+        d = (datetime.now(tz=_et) - timedelta(days=i)).strftime("%Y-%m-%d")
+        lookback_dates.add(d)
 
     # Phase 1: Base Collection
     for link in links_raw:
@@ -84,32 +78,30 @@ def collect_all_artifacts(
         snippet = f"Headline: {art.headline}\nContext: {truncated}{suffix}"
         headlines_with_snippets.append(snippet)
 
-    # Phase 1b: Semafor articles (Things Happen categories)
+    # Phase 1b: Semafor articles from cache (TH categories)
     semafor_dir = articles_dir / "semafor"
     semafor_dir.mkdir(parents=True, exist_ok=True)
-    semafor_entries = _fetch_semafor_articles()
-    for entry in semafor_entries:
-        category = ""
-        if entry.get("tags"):
-            category = entry["tags"][0].get("term", "")
-        routing = categorize_semafor_article(category)
-        if routing in ("th", "both"):
-            headline = (entry.get("title") or "").strip()
-            url = (entry.get("link") or "").strip()
-            summary = (entry.get("summary") or "").strip()
-            content_encoded = (
-                entry.get("content", [{}])[0].get("value", "")
-                if entry.get("content")
-                else ""
-            )
-            if headline:
-                slug = _slugify(headline)
-                text = content_encoded or summary
-                art_path = semafor_dir / f"{slug}.md"
-                art_path.write_text(
-                    f"# {headline}\n\nURL: {url}\nSource: semafor\nCategory: {category}\n\n{text}",
-                    encoding="utf-8",
-                )
+    _semafor_cache = semafor_cache_dir or Path("/persist/my-podcasts/semafor-cache")
+    if not _semafor_cache.exists():
+        print(f"[collector] WARNING: Semafor cache not found at {_semafor_cache}")
+    if _semafor_cache.exists():
+        for cached in sorted(_semafor_cache.glob("*.md")):
+            if not any(cached.name.startswith(d) for d in lookback_dates):
+                continue
+            text = cached.read_text(encoding="utf-8")
+            lines = text.split("\n")
+            headline = lines[0].lstrip("# ").strip()
+            category = ""
+            for line in lines[1:8]:
+                if line.startswith("Category: "):
+                    category = line[10:].strip()
+            routing = categorize_semafor_article(category)
+            if routing not in ("th", "both"):
+                continue
+            slug = _slugify(headline)
+            art_path = semafor_dir / f"{slug}.md"
+            if not art_path.exists():
+                art_path.write_text(text, encoding="utf-8")
 
     # Phase 1c: Zvi articles (day-of posts from persistent cache)
     zvi_cache = (
@@ -120,11 +112,8 @@ def collect_all_artifacts(
     sync_zvi_cache(zvi_cache)
     zvi_dir = articles_dir / "zvi"
     zvi_dir.mkdir(parents=True, exist_ok=True)
-    _et = ZoneInfo("America/New_York")
-    today = datetime.now(tz=_et).strftime("%Y-%m-%d")
-    yesterday = (datetime.now(tz=_et) - timedelta(days=1)).strftime("%Y-%m-%d")
     for cached_file in zvi_cache.glob("*.md"):
-        if cached_file.name.startswith(today) or cached_file.name.startswith(yesterday):
+        if any(cached_file.name.startswith(d) for d in lookback_dates):
             target = zvi_dir / cached_file.name
             if not target.exists():
                 target.write_text(
@@ -170,7 +159,6 @@ def collect_all_artifacts(
         )
     if fp_directives and fp_routed_dir is not None:
         fp_routed_dir.mkdir(parents=True, exist_ok=True)
-        _et = ZoneInfo("America/New_York")
         today = datetime.now(tz=_et).strftime("%Y-%m-%d")
         routed_path = fp_routed_dir / f"{today}-{job_id}.json"
         routed_data = []
