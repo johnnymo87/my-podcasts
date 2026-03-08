@@ -60,20 +60,22 @@ When a Levine email with a "Things Happen" section is processed, the consumer **
 **Sources:**
 - Matt Levine's "Things Happen" links (extracted from email)
 - Semafor RSS (`semafor.com/rss.xml`) — Business, Technology, Media, CEO, Energy categories + Politics (shared with FP Digest)
+- Zvi Mowshowitz / "Don't Worry About the Vase" (`thezvi.substack.com/feed`) — AI roundup sections split by topic, essays kept whole. Persistent cache at `/persist/my-podcasts/zvi-cache/` (180-day retention). Also used for AI enrichment via keyword search.
 
 **Flow:**
 1. Email parsed → links extracted by `things_happen_extractor.py`
-2. `things_happen_collector.py` fetches articles, collects Semafor business/tech articles, routes FP-flagged links to `/persist/my-podcasts/fp-routed-links/` for FP Digest
+2. `things_happen_collector.py` fetches articles, collects Semafor business/tech articles, syncs Zvi cache and copies day-of posts, routes FP-flagged links to `/persist/my-podcasts/fp-routed-links/` for FP Digest
 3. Consumer calls `things_happen_agent.py` which creates a session on the shared `opencode-serve` daemon (port 4096)
-4. Agent enriches headlines using **Exa** (full-text article search) and **xAI/Grok** for analysis
+4. Agent enriches headlines using **Exa** (full-text article search), **xAI/Grok** for analysis, and **Zvi cache** keyword search for AI perspectives
 5. Agent writes the briefing script to `<work_dir>/script.txt`
 6. Script handed off to existing TTS + publish pipeline (`ttsjoin` → R2 upload → feed update)
 
 **Key modules:**
 - `pipeline/opencode_client.py` — shared HTTP client for the opencode-serve API
 - `pipeline/things_happen_agent.py` — agent launcher; contains `build_agent_prompt()`
-- `pipeline/things_happen_collector.py` — article collection, Semafor integration, FP routing
+- `pipeline/things_happen_collector.py` — article collection, Semafor integration, Zvi integration, FP routing
 - `pipeline/things_happen_editor.py` — Gemini AI for research plan (classifies `is_foreign_policy`)
+- `pipeline/zvi_cache.py` — Zvi RSS fetch, roundup splitting, persistent cache, keyword search
 - `pipeline/exa_client.py` — Exa search API wrapper
 - `pipeline/xai_client.py` — xAI/Grok API wrapper
 - `pipeline/rss_sources.py` — RSS source definitions, `SEMAFOR`, `categorize_semafor_article()`
