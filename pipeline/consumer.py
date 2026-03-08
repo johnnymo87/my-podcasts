@@ -30,6 +30,16 @@ if TYPE_CHECKING:
     from pipeline.r2 import R2Client
 
 
+def _compute_lookback(
+    store: StateStore, feed_slug: str, default: int = 2, cap: int = 14
+) -> int:
+    """Compute adaptive lookback days based on last episode date."""
+    days = store.days_since_last_episode(feed_slug)
+    if days is None:
+        return default
+    return min(max(2, days + 1), cap)
+
+
 @dataclass(frozen=True)
 class QueueMessage:
     id: str
@@ -161,6 +171,22 @@ def _cleanup_old_work_dirs(max_age_days: int = 180) -> None:
                     print(f"Cleaned up old Zvi cache: {f.name}")
             except OSError:
                 pass
+
+    # Clean up old Semafor, Antiwar RSS, and Antiwar homepage caches (180-day retention)
+    for cache_name, cache_path in [
+        ("Semafor cache", Path("/persist/my-podcasts/semafor-cache")),
+        ("Antiwar RSS cache", Path("/persist/my-podcasts/antiwar-rss-cache")),
+        ("Antiwar homepage cache", Path("/persist/my-podcasts/antiwar-homepage-cache")),
+    ]:
+        if cache_path.exists():
+            for f in cache_path.glob("*.md"):
+                try:
+                    mtime = datetime.fromtimestamp(f.stat().st_mtime, tz=UTC)
+                    if mtime < cutoff:
+                        f.unlink()
+                        print(f"Cleaned up old {cache_name}: {f.name}")
+                except OSError:
+                    pass
 
 
 def _find_article_text(directive: Any, work_dir: Path) -> str:
@@ -299,12 +325,17 @@ def consume_forever(
                             f"{job['id']} ({job['date_str']})"
                         )
                         links_raw = json.loads(job["links_json"])
+                        lookback = _compute_lookback(store, "things-happen")
                         collect_all_artifacts(
                             job["id"],
                             links_raw,
                             work_dir,
                             fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
                             zvi_cache_dir=Path("/persist/my-podcasts/zvi-cache"),
+                            semafor_cache_dir=Path(
+                                "/persist/my-podcasts/semafor-cache"
+                            ),
+                            lookback_days=lookback,
                         )
 
                         print(
@@ -358,10 +389,21 @@ def consume_forever(
                             f"Running FP digest collection: "
                             f"{job['id']} ({job['date_str']})"
                         )
+                        fp_lookback = _compute_lookback(store, "fp-digest")
                         collect_fp_artifacts(
                             job["id"],
                             work_dir,
                             fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
+                            homepage_cache_dir=Path(
+                                "/persist/my-podcasts/antiwar-homepage-cache"
+                            ),
+                            antiwar_rss_cache_dir=Path(
+                                "/persist/my-podcasts/antiwar-rss-cache"
+                            ),
+                            semafor_cache_dir=Path(
+                                "/persist/my-podcasts/semafor-cache"
+                            ),
+                            lookback_days=fp_lookback,
                         )
 
                         plan_path = work_dir / "plan.json"

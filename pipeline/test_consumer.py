@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from pipeline.consumer import consume_forever
+from pipeline.consumer import _compute_lookback, consume_forever
 
 
 class _Done(BaseException):
@@ -63,6 +63,7 @@ def test_consume_forever_launches_agent_for_due_job(monkeypatch, tmp_path) -> No
     monkeypatch.setattr("pipeline.consumer.launch_things_happen_agent", fake_launch)
     monkeypatch.setattr("pipeline.consumer.is_agent_running", lambda session_id: False)
     store.get_things_happen_session_id.return_value = None
+    store.days_since_last_episode.return_value = None
 
     collect_calls = []
     monkeypatch.setattr(
@@ -235,3 +236,27 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
     assert work_dir.exists()
     # Deferred cleanup should have been invoked
     assert cleanup_calls == [1]
+
+
+def test_compute_lookback_none_returns_default():
+    store = MagicMock()
+    store.days_since_last_episode.return_value = None
+    assert _compute_lookback(store, "things-happen") == 2
+
+
+def test_compute_lookback_floors_at_2():
+    store = MagicMock()
+    store.days_since_last_episode.return_value = 0
+    assert _compute_lookback(store, "things-happen") == 2
+
+
+def test_compute_lookback_caps_at_14():
+    store = MagicMock()
+    store.days_since_last_episode.return_value = 20
+    assert _compute_lookback(store, "things-happen") == 14
+
+
+def test_compute_lookback_mid_range():
+    store = MagicMock()
+    store.days_since_last_episode.return_value = 5
+    assert _compute_lookback(store, "things-happen") == 6
