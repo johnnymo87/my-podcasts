@@ -4,6 +4,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING
 
 
@@ -238,6 +239,28 @@ class StateStore:
             "SELECT DISTINCT feed_slug FROM episodes ORDER BY feed_slug ASC"
         ).fetchall()
         return [str(row["feed_slug"]) for row in rows if row["feed_slug"]]
+
+    def days_since_last_episode(self, feed_slug: str) -> int | None:
+        """Return days since the last episode for a feed.
+
+        Returns None if no episodes exist or all dates are unparseable.
+        """
+        rows = self._conn.execute(
+            "SELECT pub_date FROM episodes WHERE feed_slug = ?",
+            (feed_slug,),
+        ).fetchall()
+        if not rows:
+            return None
+        dates: list[datetime] = []
+        for r in rows:
+            try:
+                dates.append(parsedate_to_datetime(r["pub_date"]).astimezone(UTC))
+            except Exception:
+                pass
+        if not dates:
+            return None
+        latest = max(dates)
+        return (datetime.now(tz=UTC) - latest).days
 
     def insert_pending_things_happen(
         self,
