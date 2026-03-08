@@ -3,7 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
-from pipeline.source_cache import sync_antiwar_rss_cache, sync_semafor_cache
+from pipeline.fp_homepage_scraper import HomepageLink
+from pipeline.source_cache import (
+    sync_antiwar_homepage_cache,
+    sync_antiwar_rss_cache,
+    sync_semafor_cache,
+)
 
 
 def _make_semafor_entry(
@@ -125,3 +130,58 @@ def test_sync_antiwar_rss_handles_partial_failure(tmp_path):
         result = sync_antiwar_rss_cache(tmp_path)
 
     assert len(result) == 1  # first source succeeded, others failed
+
+
+def test_sync_homepage_creates_files(tmp_path):
+    """Homepage links cached with region metadata."""
+    links = [
+        HomepageLink(
+            region="Middle East",
+            headline="Iran Tensions Rise",
+            url="https://example.com/iran",
+        ),
+        HomepageLink(
+            region="Europe", headline="NATO Expands", url="https://example.com/nato"
+        ),
+    ]
+
+    with (
+        patch("pipeline.source_cache.scrape_homepage", return_value=links),
+        patch(
+            "pipeline.source_cache._extract_homepage_text",
+            return_value="Article body text.",
+        ),
+    ):
+        new_files = sync_antiwar_homepage_cache(tmp_path)
+
+    assert len(new_files) == 2
+    content = new_files[0].read_text()
+    assert "Region:" in content
+    assert "Source: antiwar-homepage" in content
+    assert "Article body text." in content
+
+
+def test_sync_homepage_is_idempotent(tmp_path):
+    """Running sync twice does not create duplicates."""
+    links = [
+        HomepageLink(region="Africa", headline="Story One", url="https://example.com/1")
+    ]
+
+    with (
+        patch("pipeline.source_cache.scrape_homepage", return_value=links),
+        patch("pipeline.source_cache._extract_homepage_text", return_value="Text."),
+    ):
+        first = sync_antiwar_homepage_cache(tmp_path)
+        second = sync_antiwar_homepage_cache(tmp_path)
+
+    assert len(first) == 1
+    assert len(second) == 0
+
+
+def test_sync_homepage_handles_scrape_failure(tmp_path):
+    """If homepage scrape fails, return empty list."""
+    with patch(
+        "pipeline.source_cache.scrape_homepage", side_effect=Exception("timeout")
+    ):
+        result = sync_antiwar_homepage_cache(tmp_path)
+    assert result == []
