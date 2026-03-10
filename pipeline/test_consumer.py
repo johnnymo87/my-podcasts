@@ -4,7 +4,11 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from pipeline.consumer import _compute_lookback, consume_forever
+from pipeline.consumer import (
+    _AGENT_SESSION_TIMEOUT_SECONDS,
+    _compute_lookback,
+    consume_forever,
+)
 
 
 class _Done(BaseException):
@@ -264,13 +268,18 @@ def test_consume_forever_kills_stuck_agent(monkeypatch, tmp_path) -> None:
         "pipeline.consumer.stop_agent", lambda session_id: stopped.append(session_id)
     )
 
+    # Simulate time: first call (loop 1, line 319) stores the start time,
+    # second call (loop 2, line 320) returns a value past the timeout.
+    time_values = iter([100.0, 100.0 + _AGENT_SESSION_TIMEOUT_SECONDS + 1])
+    monkeypatch.setattr(time, "time", lambda: next(time_values))
+
     call_count = 0
 
     def flaky_pull(**kwargs):
         nonlocal call_count
         call_count += 1
-        if call_count == 1:
-            return []
+        if call_count <= 2:
+            return []  # First two loops: no messages, process Rundown jobs
         raise _Done("done")
 
     mock_consumer = MagicMock()
@@ -283,7 +292,8 @@ def test_consume_forever_kills_stuck_agent(monkeypatch, tmp_path) -> None:
         except _Done:
             pass
 
-    # Agent should be killed because no tracked start time (simulates restart)
+    # First loop: no tracked start time → starts tracking (not killed)
+    # Second loop: tracked time exceeded timeout → killed
     assert "ses_stuck123" in stopped
     store.clear_the_rundown_session_id.assert_called_with("job-stuck")
 

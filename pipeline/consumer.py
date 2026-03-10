@@ -313,17 +313,15 @@ def consume_forever(
                     elif session_id and is_agent_running(session_id):
                         # Agent is running — check for timeout.
                         start = session_start_times.get(session_id)
-                        if (
-                            start is None
-                            or (time.time() - start) > _AGENT_SESSION_TIMEOUT_SECONDS
-                        ):
-                            reason = (
-                                "no tracked start time (consumer restarted?)"
-                                if start is None
-                                else f"exceeded {_AGENT_SESSION_TIMEOUT_SECONDS}s timeout"
-                            )
+                        if start is None:
+                            # Session launched externally (by timer CLI) — start
+                            # tracking it now so the timeout counts from here.
+                            session_start_times[session_id] = time.time()
+                        elif (time.time() - start) > _AGENT_SESSION_TIMEOUT_SECONDS:
                             print(
-                                f"Rundown agent stuck for job {job['id']} ({job['date_str']}): {reason}. Killing session {session_id}."
+                                f"Rundown agent stuck for job {job['id']} ({job['date_str']}): "
+                                f"exceeded {_AGENT_SESSION_TIMEOUT_SECONDS}s timeout. "
+                                f"Killing session {session_id}."
                             )
                             stop_agent(session_id)
                             store.clear_the_rundown_session_id(job["id"])
