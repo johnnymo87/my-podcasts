@@ -16,19 +16,12 @@ from pipeline.fp_editor import FPResearchPlan
 from pipeline.fp_processor import process_fp_digest_job
 from pipeline.fp_writer import generate_fp_script
 from pipeline.processor import process_r2_email_key
-from pipeline.things_happen_agent import (
-    is_agent_running,
-    stop_agent,
-)
 from pipeline.things_happen_processor import process_things_happen_job
 
 
 if TYPE_CHECKING:
     from pipeline.db import StateStore
     from pipeline.r2 import R2Client
-
-
-_AGENT_SESSION_TIMEOUT_SECONDS = 30 * 60  # 30 minutes
 
 
 def _compute_lookback(
@@ -241,8 +234,6 @@ def consume_forever(
 ) -> None:
     consumer = CloudflareQueueConsumer()
 
-    session_start_times: dict[str, float] = {}
-
     while True:
         try:
             messages = consumer.pull(batch_size=5)
@@ -276,10 +267,9 @@ def consume_forever(
                 try:
                     work_dir = Path(f"/tmp/the-rundown-{job['id']}")
                     script_file = work_dir / "script.txt"
-                    session_id = store.get_the_rundown_session_id(job["id"])
 
                     if script_file.exists():
-                        # Agent finished — run TTS + publish.
+                        # Script already generated — run TTS + publish.
                         try:
                             dry_run = os.environ.get("THE_RUNDOWN_DRY_RUN", "").strip()
                             if dry_run:
@@ -289,7 +279,7 @@ def consume_forever(
                                 store.mark_the_rundown_completed(job["id"])
                             else:
                                 print(
-                                    f"Processing Rundown job with agent script: {job['id']} ({job['date_str']})"
+                                    f"Processing Rundown job with script: {job['id']} ({job['date_str']})"
                                 )
                                 process_things_happen_job(
                                     job, store, r2_client, script_path=script_file
@@ -305,31 +295,69 @@ def consume_forever(
                             shutil.copy(script_file, persist_path)
                         finally:
                             _cleanup_old_work_dirs()
-                            stop_agent(session_id)
-                            store.clear_the_rundown_session_id(job["id"])
-                            if session_id is not None:
-                                session_start_times.pop(session_id, None)
 
-                    elif session_id and is_agent_running(session_id):
-                        # Agent is running — check for timeout.
-                        start = session_start_times.get(session_id)
-                        if start is None:
-                            # Session launched externally (by timer CLI) — start
-                            # tracking it now so the timeout counts from here.
-                            session_start_times[session_id] = time.time()
-                        elif (time.time() - start) > _AGENT_SESSION_TIMEOUT_SECONDS:
+                    else:
+                        # No script yet — run the full synchronous pipeline.
+                        from pipeline.__main__ import _find_rundown_article_text
+                        from pipeline.rundown_writer import generate_rundown_script
+                        from pipeline.things_happen_collector import (
+                            collect_all_artifacts,
+                        )
+                        from pipeline.things_happen_editor import RundownResearchPlan
+
+                        print(
+                            f"Running Rundown collection: "
+                            f"{job['id']} ({job['date_str']})"
+                        )
+                        rundown_lookback = _compute_lookback(store, "the-rundown")
+                        collect_all_artifacts(
+                            job["id"],
+                            work_dir,
+                            levine_cache_dir=Path("/persist/my-podcasts/levine-cache"),
+                            semafor_cache_dir=Path(
+                                "/persist/my-podcasts/semafor-cache"
+                            ),
+                            zvi_cache_dir=Path("/persist/my-podcasts/zvi-cache"),
+                            fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
+                            lookback_days=rundown_lookback,
+                        )
+
+                        plan_path = work_dir / "plan.json"
+                        if not plan_path.exists():
                             print(
-                                f"Rundown agent stuck for job {job['id']} ({job['date_str']}): "
-                                f"exceeded {_AGENT_SESSION_TIMEOUT_SECONDS}s timeout. "
-                                f"Killing session {session_id}."
+                                f"No plan generated for Rundown {job['id']}, skipping"
                             )
-                            stop_agent(session_id)
-                            store.clear_the_rundown_session_id(job["id"])
-                            session_start_times.pop(session_id, None)
+                            continue
 
-                    elif session_id:
-                        # Agent died without producing script — clear stale session.
-                        store.clear_the_rundown_session_id(job["id"])
+                        plan = RundownResearchPlan.model_validate_json(
+                            plan_path.read_text()
+                        )
+
+                        rundown_articles_by_theme: dict[str, list[str]] = {}
+                        for directive in plan.directives:
+                            if not directive.include_in_episode:
+                                continue
+                            text = _find_rundown_article_text(directive, work_dir)
+                            if text:
+                                rundown_articles_by_theme.setdefault(
+                                    directive.theme, []
+                                ).append(text)
+
+                        context_scripts: list[str] = []
+                        context_dir = work_dir / "context"
+                        if context_dir.exists():
+                            for f in sorted(context_dir.glob("*.txt"), reverse=True):
+                                context_scripts.append(f.read_text(encoding="utf-8"))
+
+                        script = generate_rundown_script(
+                            themes=plan.themes,
+                            articles_by_theme=rundown_articles_by_theme,
+                            date_str=job["date_str"],
+                            context_scripts=context_scripts,
+                        )
+                        script_file.parent.mkdir(parents=True, exist_ok=True)
+                        script_file.write_text(script, encoding="utf-8")
+                        # Next loop will pick up the script and run TTS
 
                 except Exception as exc:
                     print(f"Failed Rundown job {job['id']}: {exc}")

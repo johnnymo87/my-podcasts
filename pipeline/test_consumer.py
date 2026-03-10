@@ -5,7 +5,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from pipeline.consumer import (
-    _AGENT_SESSION_TIMEOUT_SECONDS,
     _compute_lookback,
     consume_forever,
 )
@@ -69,13 +68,7 @@ def test_consume_forever_processes_rundown_script(monkeypatch, tmp_path) -> None
         lambda *a, **kw: process_calls.append(1),
     )
 
-    stopped = []
-    monkeypatch.setattr(
-        "pipeline.consumer.stop_agent", lambda session_id: stopped.append(session_id)
-    )
-
     store.list_due_the_rundown.return_value = [{"id": job_id, "date_str": "2026-03-02"}]
-    store.get_the_rundown_session_id.return_value = None
 
     call_count = 0
 
@@ -110,8 +103,6 @@ def test_consume_forever_processes_rundown_script(monkeypatch, tmp_path) -> None
 
     # TTS should have been called
     assert process_calls == [1]
-    # stop_agent should have been called
-    assert stopped == [None]
     # Script should have been copied to persist
     assert len(copy_calls) == 1
     assert copy_calls[0][0] == script
@@ -131,11 +122,6 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
     script = work_dir / "script.txt"
     script.write_text("test script content")
 
-    stopped = []
-    monkeypatch.setattr(
-        "pipeline.consumer.stop_agent", lambda session_id: stopped.append(1)
-    )
-
     process_calls = []
     monkeypatch.setattr(
         "pipeline.consumer.process_things_happen_job",
@@ -143,7 +129,6 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
     )
 
     store.list_due_the_rundown.return_value = [{"id": job_id, "date_str": "2026-03-02"}]
-    store.get_the_rundown_session_id.return_value = None
 
     call_count = 0
 
@@ -178,8 +163,6 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
     assert process_calls == []
     # Job should be marked completed so it doesn't re-launch
     store.mark_the_rundown_completed.assert_called_once_with(job_id)
-    # stop_agent should be called
-    assert stopped == [1]
     # Work dir should still exist (not immediately deleted)
     assert work_dir.exists()
     # Deferred cleanup should have been invoked
@@ -189,8 +172,8 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
     assert copy_calls[0][0] == script
 
 
-def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> None:
-    """If TTS crashes, stop_agent() and deferred cleanup still happen via finally."""
+def test_consume_forever_cleanup_on_tts_failure(monkeypatch, tmp_path) -> None:
+    """If TTS crashes, deferred cleanup still happens via finally."""
     store = MagicMock()
     r2_client = MagicMock()
 
@@ -201,18 +184,12 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
     script = work_dir / "script.txt"
     script.write_text("test script content")
 
-    stopped = []
-    monkeypatch.setattr(
-        "pipeline.consumer.stop_agent", lambda session_id: stopped.append(1)
-    )
-
     def boom(*a, **kw):
         raise RuntimeError("TTS exploded")
 
     monkeypatch.setattr("pipeline.consumer.process_things_happen_job", boom)
 
     store.list_due_the_rundown.return_value = [{"id": job_id, "date_str": "2026-03-02"}]
-    store.get_the_rundown_session_id.return_value = None
 
     call_count = 0
 
@@ -243,59 +220,10 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
         except _Done:
             pass
 
-    # Agent should be stopped even though TTS failed
-    assert stopped == [1]
     # Work dir should still exist (not immediately deleted)
     assert work_dir.exists()
     # Deferred cleanup should have been invoked
     assert cleanup_calls == [1]
-
-
-def test_consume_forever_kills_stuck_agent(monkeypatch, tmp_path) -> None:
-    """If a Rundown agent session exceeds the timeout, it should be killed."""
-    store = MagicMock()
-    r2_client = MagicMock()
-
-    store.list_due_the_rundown.return_value = [
-        {"id": "job-stuck", "date_str": "2026-03-09"}
-    ]
-    store.get_the_rundown_session_id.return_value = "ses_stuck123"
-
-    monkeypatch.setattr("pipeline.consumer.is_agent_running", lambda session_id: True)
-
-    stopped = []
-    monkeypatch.setattr(
-        "pipeline.consumer.stop_agent", lambda session_id: stopped.append(session_id)
-    )
-
-    # Simulate time: first call (loop 1, line 319) stores the start time,
-    # second call (loop 2, line 320) returns a value past the timeout.
-    time_values = iter([100.0, 100.0 + _AGENT_SESSION_TIMEOUT_SECONDS + 1])
-    monkeypatch.setattr(time, "time", lambda: next(time_values))
-
-    call_count = 0
-
-    def flaky_pull(**kwargs):
-        nonlocal call_count
-        call_count += 1
-        if call_count <= 2:
-            return []  # First two loops: no messages, process Rundown jobs
-        raise _Done("done")
-
-    mock_consumer = MagicMock()
-    mock_consumer.pull.side_effect = flaky_pull
-    monkeypatch.setattr(time, "sleep", lambda n: None)
-
-    with patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer):
-        try:
-            consume_forever(store, r2_client, poll_interval=5)
-        except _Done:
-            pass
-
-    # First loop: no tracked start time → starts tracking (not killed)
-    # Second loop: tracked time exceeded timeout → killed
-    assert "ses_stuck123" in stopped
-    store.clear_the_rundown_session_id.assert_called_with("job-stuck")
 
 
 def test_compute_lookback_none_returns_default():
