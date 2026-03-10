@@ -3,67 +3,112 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from pipeline.things_happen_editor import (
-    ResearchDirective,
-    ResearchPlan,
-    generate_research_plan,
+    RundownResearchPlan,
+    RundownStoryDirective,
+    generate_rundown_research_plan,
 )
 
 
-def test_generate_research_plan_returns_empty_if_no_key(monkeypatch) -> None:
+def test_generate_plan_returns_empty_if_no_key(monkeypatch) -> None:
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    assert generate_research_plan(["Some headline"]) == []
+    result = generate_rundown_research_plan(["Some headline"])
+    assert result.themes == []
+    assert result.directives == []
 
 
-def test_generate_research_plan_returns_empty_if_no_headlines(monkeypatch) -> None:
+def test_generate_plan_returns_empty_if_no_headlines(monkeypatch) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
-    assert generate_research_plan([]) == []
+    result = generate_rundown_research_plan([])
+    assert result.themes == []
+    assert result.directives == []
 
 
 @patch("pipeline.things_happen_editor.genai.Client")
-def test_generate_research_plan_success(mock_client_class, monkeypatch) -> None:
+def test_generate_plan_success(mock_client_class, monkeypatch) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
 
     mock_client = MagicMock()
     mock_client_class.return_value = mock_client
 
     mock_response = MagicMock()
-    mock_response.parsed = ResearchPlan(
+    mock_response.parsed = RundownResearchPlan(
+        themes=["Tech", "Finance"],
         directives=[
-            ResearchDirective(
-                headline="War in Middle East escalates",
+            RundownStoryDirective(
+                headline="Tech Company IPO",
+                source="semafor",
+                priority=1,
+                theme="Tech",
                 needs_exa=True,
-                exa_query="Middle East war escalation",
-                is_foreign_policy=True,
-                fp_query="Middle East war",
+                exa_query="tech company IPO 2026",
+                is_foreign_policy=False,
+                fp_query="",
                 is_ai=False,
                 ai_query="",
-            )
-        ]
+                include_in_episode=True,
+            ),
+            RundownStoryDirective(
+                headline="War Breaks Out",
+                source="levine",
+                priority=3,
+                theme="Geopolitics",
+                needs_exa=False,
+                exa_query="",
+                is_foreign_policy=True,
+                fp_query="war breaks out",
+                is_ai=False,
+                ai_query="",
+                include_in_episode=False,
+            ),
+        ],
     )
     mock_client.models.generate_content.return_value = mock_response
 
-    results = generate_research_plan(["War in Middle East escalates"])
+    result = generate_rundown_research_plan(["Tech Company IPO", "War Breaks Out"])
 
-    assert len(results) == 1
-    assert results[0].headline == "War in Middle East escalates"
-    assert results[0].is_foreign_policy is True
+    assert len(result.themes) == 2
+    assert "Tech" in result.themes
+    assert len(result.directives) == 2
+    assert result.directives[0].include_in_episode is True
+    assert result.directives[1].is_foreign_policy is True
+    assert result.directives[1].include_in_episode is False
 
-    # Verify the client was called correctly
     mock_client.models.generate_content.assert_called_once()
     kwargs = mock_client.models.generate_content.call_args[1]
     assert kwargs["model"] == "gemini-3.1-flash-lite-preview"
-    assert "War in Middle East escalates" in kwargs["contents"]
+    assert "Tech Company IPO" in kwargs["contents"]
+    assert "War Breaks Out" in kwargs["contents"]
 
 
 @patch("pipeline.things_happen_editor.genai.Client")
-def test_generate_research_plan_handles_exception(
-    mock_client_class, monkeypatch
-) -> None:
+def test_generate_plan_with_context_scripts(mock_client_class, monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+
+    mock_client = MagicMock()
+    mock_client_class.return_value = mock_client
+
+    mock_response = MagicMock()
+    mock_response.parsed = RundownResearchPlan(themes=[], directives=[])
+    mock_client.models.generate_content.return_value = mock_response
+
+    generate_rundown_research_plan(
+        ["Headline"],
+        context_scripts=["Prior episode script content"],
+    )
+
+    kwargs = mock_client.models.generate_content.call_args[1]
+    assert "Previous episodes" in kwargs["contents"]
+    assert "Prior episode script content" in kwargs["contents"]
+
+
+@patch("pipeline.things_happen_editor.genai.Client")
+def test_generate_plan_handles_exception(mock_client_class, monkeypatch) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
 
     mock_client = MagicMock()
     mock_client_class.return_value = mock_client
     mock_client.models.generate_content.side_effect = Exception("API error")
 
-    results = generate_research_plan(["Headline"])
-    assert results == []
+    result = generate_rundown_research_plan(["Headline"])
+    assert result.themes == []
+    assert result.directives == []
