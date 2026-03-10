@@ -71,16 +71,23 @@ def test_collect_all_artifacts(
     scripts_dir.mkdir(parents=True)
     (scripts_dir / "2026-03-01.txt").write_text("old script")
 
+    # Create Levine cache with today's date JSON file
+    _et = ZoneInfo("America/New_York")
+    today = datetime.now(tz=_et).strftime("%Y-%m-%d")
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+    links = [{"raw_url": "http://raw.com", "headline_context": "context"}]
+    (levine_cache / f"{today}.json").write_text(json.dumps(links))
+
     # Run collector with empty semafor cache dir
     semafor_cache = tmp_path / "semafor-cache"
     semafor_cache.mkdir()
-    links = [{"raw_url": "http://raw.com", "headline_context": "context"}]
     work_dir = tmp_path / "work"
 
     collect_all_artifacts(
         "job123",
-        links,
         work_dir,
+        levine_cache_dir=levine_cache,
         scripts_source_dir=scripts_dir,
         semafor_cache_dir=semafor_cache,
     )
@@ -174,15 +181,21 @@ def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
     semafor_cache = tmp_path / "semafor-cache"
     semafor_cache.mkdir()
 
+    # Write links to levine cache
+    _et = ZoneInfo("America/New_York")
+    today = datetime.now(tz=_et).strftime("%Y-%m-%d")
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
     links_raw = [
         {"raw_url": "https://example.com/iran", "headline": "Iran War Escalates"},
         {"raw_url": "https://example.com/btc", "headline": "Bitcoin Rises"},
     ]
+    (levine_cache / f"{today}.json").write_text(json.dumps(links_raw))
 
     collect_all_artifacts(
         "test-job",
-        links_raw,
         work_dir,
+        levine_cache_dir=levine_cache,
         scripts_source_dir=scripts_dir,
         fp_routed_dir=routed_dir,
         semafor_cache_dir=semafor_cache,
@@ -224,14 +237,18 @@ def test_semafor_articles_added_to_work_dir(tmp_path, monkeypatch):
         f"# Gulf Tensions Rise\n\nURL: https://semafor.com/gulf-tensions\nPublished: {today}\nSource: semafor\nCategory: Gulf\nType: article\n\nTensions in the Gulf"
     )
 
+    # Empty levine cache
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+
     work_dir = tmp_path / "work"
     scripts_dir = tmp_path / "scripts"
     scripts_dir.mkdir()
 
     collect_all_artifacts(
         "test-job",
-        [],
         work_dir,
+        levine_cache_dir=levine_cache,
         scripts_source_dir=scripts_dir,
         semafor_cache_dir=semafor_cache,
     )
@@ -273,6 +290,10 @@ def test_zvi_articles_added_to_work_dir(tmp_path, monkeypatch):
         "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
     )
 
+    # Empty levine cache
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+
     work_dir = tmp_path / "work"
     scripts_dir = tmp_path / "scripts"
     scripts_dir.mkdir()
@@ -281,8 +302,8 @@ def test_zvi_articles_added_to_work_dir(tmp_path, monkeypatch):
 
     collect_all_artifacts(
         "test-job",
-        [],
         work_dir,
+        levine_cache_dir=levine_cache,
         scripts_source_dir=scripts_dir,
         zvi_cache_dir=zvi_cache,
         semafor_cache_dir=semafor_cache,
@@ -340,6 +361,15 @@ def test_ai_enrichment_uses_zvi_cache(tmp_path, monkeypatch):
         "A new AI model was released this week, achieving state of the art results."
     )
 
+    # Write links to levine cache
+    _et = ZoneInfo("America/New_York")
+    today = datetime.now(tz=_et).strftime("%Y-%m-%d")
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+    (levine_cache / f"{today}.json").write_text(
+        json.dumps([{"raw_url": "https://example.com/ai", "headline": "New AI Model"}])
+    )
+
     work_dir = tmp_path / "work"
     scripts_dir = tmp_path / "scripts"
     scripts_dir.mkdir()
@@ -348,8 +378,8 @@ def test_ai_enrichment_uses_zvi_cache(tmp_path, monkeypatch):
 
     collect_all_artifacts(
         "test-job",
-        [{"raw_url": "https://example.com/ai", "headline": "New AI Model"}],
         work_dir,
+        levine_cache_dir=levine_cache,
         scripts_source_dir=scripts_dir,
         zvi_cache_dir=zvi_cache,
         semafor_cache_dir=semafor_cache,
@@ -407,14 +437,18 @@ def test_semafor_reads_from_cache(tmp_path, monkeypatch):
         f"# Old Tech Story\n\nURL: https://semafor.com/old-tech\nPublished: {old_date}\nSource: semafor\nCategory: Technology\nType: article\n\nAn old tech story"
     )
 
+    # Empty levine cache
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+
     work_dir = tmp_path / "work"
     scripts_dir = tmp_path / "scripts"
     scripts_dir.mkdir()
 
     collect_all_artifacts(
         "test-job",
-        [],
         work_dir,
+        levine_cache_dir=levine_cache,
         scripts_source_dir=scripts_dir,
         semafor_cache_dir=semafor_cache,
         lookback_days=2,
@@ -433,3 +467,32 @@ def test_semafor_reads_from_cache(tmp_path, monkeypatch):
     # Gulf (FP-only) and Old Tech Story (outside lookback) should NOT be present
     assert "Gulf Tensions Rise" not in headlines
     assert "Old Tech Story" not in headlines
+
+
+def test_collector_works_without_levine_links(tmp_path, monkeypatch):
+    """Collector proceeds with Semafor + Zvi when no Levine links exist."""
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_research_plan", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
+    )
+
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()  # empty
+    work_dir = tmp_path / "work"
+    collect_all_artifacts(
+        "job-no-levine",
+        work_dir,
+        levine_cache_dir=levine_cache,
+        semafor_cache_dir=tmp_path / "semafor",  # empty
+        zvi_cache_dir=tmp_path / "zvi",  # empty
+    )
+    assert work_dir.exists()
+    assert (work_dir / "articles").exists()

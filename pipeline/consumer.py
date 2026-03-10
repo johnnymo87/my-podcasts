@@ -331,12 +331,11 @@ def consume_forever(
                             f"Running collection phase for job: "
                             f"{job['id']} ({job['date_str']})"
                         )
-                        links_raw = json.loads(job["links_json"])
                         lookback = _compute_lookback(store, "things-happen")
                         collect_all_artifacts(
                             job["id"],
-                            links_raw,
                             work_dir,
+                            levine_cache_dir=Path("/persist/my-podcasts/levine-cache"),
                             fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
                             zvi_cache_dir=Path("/persist/my-podcasts/zvi-cache"),
                             semafor_cache_dir=Path(

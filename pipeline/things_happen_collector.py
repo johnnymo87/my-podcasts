@@ -24,8 +24,8 @@ def _slugify(text: str) -> str:
 
 def collect_all_artifacts(
     job_id: str,
-    links_raw: list[dict],
     work_dir: Path,
+    levine_cache_dir: Path | None = None,
     scripts_source_dir: Path | None = None,
     fp_routed_dir: Path | None = None,
     zvi_cache_dir: Path | None = None,
@@ -54,11 +54,27 @@ def collect_all_artifacts(
         d = (datetime.now(tz=_et) - timedelta(days=i)).strftime("%Y-%m-%d")
         lookback_dates.add(d)
 
-    # Phase 1: Base Collection
-    for link in links_raw:
-        link["resolved_url"] = resolve_redirect_url(link["raw_url"])
+    # Phase 1: Base Collection — read Levine links from cache
+    _levine_cache = levine_cache_dir or Path("/persist/my-podcasts/levine-cache")
+    links_raw: list[dict] = []
+    if _levine_cache.exists():
+        for cached in sorted(_levine_cache.glob("*.json")):
+            date_stem = cached.stem  # e.g. "2026-03-09"
+            if date_stem not in lookback_dates:
+                continue
+            try:
+                links_raw.extend(json.loads(cached.read_text(encoding="utf-8")))
+            except Exception as e:
+                print(f"[collector] WARNING: Failed to read Levine cache {cached}: {e}")
+    else:
+        print(f"[collector] WARNING: Levine cache not found at {_levine_cache}")
 
-    articles = fetch_all_articles(links_raw, delay_between=1.0)
+    if links_raw:
+        for link in links_raw:
+            link["resolved_url"] = resolve_redirect_url(link["raw_url"])
+        articles = fetch_all_articles(links_raw, delay_between=1.0)
+    else:
+        articles = []
 
     headlines_with_snippets = []
 
