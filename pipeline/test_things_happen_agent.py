@@ -52,15 +52,17 @@ def test_build_agent_prompt_contains_job_data() -> None:
     job = {
         "id": "123-abc",
         "date_str": "2026-03-02",
-        "links_json": '[{"link_text": "War", "raw_url": "http://bloomberg.com"}]',
     }
-    work_dir = Path("/tmp/things-happen-123-abc")
+    work_dir = Path("/tmp/the-rundown-123-abc")
     prompt = build_agent_prompt(job, work_dir)
 
     assert "123-abc" in prompt
     assert "2026-03-02" in prompt
-    assert "http://bloomberg.com" in prompt
-    assert "/tmp/things-happen-123-abc/articles/" in prompt
+    assert "The Rundown" in prompt
+    assert "/tmp/the-rundown-123-abc/articles/" in prompt
+    assert "foreign policy" in prompt.lower()
+    assert "Semafor" in prompt
+    assert "Zvi" in prompt
 
 
 @patch("pipeline.things_happen_agent.send_prompt_async")
@@ -72,9 +74,8 @@ def test_launch_returns_session_id(
     job = {
         "id": "job-1",
         "date_str": "2026-03-05",
-        "links_json": "[]",
     }
-    result = launch_things_happen_agent(job, Path("/tmp/things-happen-job-1"))
+    result = launch_things_happen_agent(job, Path("/tmp/the-rundown-job-1"))
     assert result == "sess-new"
     mock_create.assert_called_once()
     mock_prompt.assert_called_once()
@@ -87,7 +88,7 @@ def test_launch_returns_none_when_script_exists(
 ) -> None:
     script = tmp_path / "script.txt"
     script.write_text("already done")
-    job = {"id": "job-1", "date_str": "2026-03-05", "links_json": "[]"}
+    job = {"id": "job-1", "date_str": "2026-03-05"}
 
     with patch("pipeline.things_happen_agent.script_path_for_job", return_value=script):
         result = launch_things_happen_agent(job, tmp_path)
