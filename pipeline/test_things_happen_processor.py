@@ -93,9 +93,9 @@ def test_process_things_happen_job_end_to_end(tmp_path, monkeypatch) -> None:
     assert store.list_due_things_happen() == []
 
     # Episode should be inserted.
-    episodes = store.list_episodes(feed_slug="things-happen")
+    episodes = store.list_episodes(feed_slug="the-rundown")
     assert len(episodes) == 1
-    assert "Things Happen" in episodes[0].title
+    assert "The Rundown" in episodes[0].title
     assert "2026-02-26" in episodes[0].title
 
     # MP3 should be uploaded to R2.
@@ -103,7 +103,7 @@ def test_process_things_happen_job_end_to_end(tmp_path, monkeypatch) -> None:
     upload_args = r2_client.upload_file.call_args
     # upload_file(local_path, r2_key, content_type=...)
     upload_key = upload_args[0][1]
-    assert upload_key.startswith("episodes/things-happen/")
+    assert upload_key.startswith("episodes/the-rundown/")
 
     store.close()
 
@@ -207,16 +207,16 @@ def test_process_things_happen_job_with_script_file(tmp_path, monkeypatch) -> No
     assert store.list_due_things_happen() == []
 
     # Episode should be inserted.
-    episodes = store.list_episodes(feed_slug="things-happen")
+    episodes = store.list_episodes(feed_slug="the-rundown")
     assert len(episodes) == 1
-    assert "Things Happen" in episodes[0].title
+    assert "The Rundown" in episodes[0].title
     assert "2026-02-26" in episodes[0].title
 
     # R2 upload should have been called.
     r2_client.upload_file.assert_called_once()
     upload_args = r2_client.upload_file.call_args
     upload_key = upload_args[0][1]
-    assert upload_key.startswith("episodes/things-happen/")
+    assert upload_key.startswith("episodes/the-rundown/")
 
     store.close()
 

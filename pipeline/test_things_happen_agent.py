@@ -14,7 +14,7 @@ from pipeline.things_happen_agent import (
 
 def test_script_path_for_job():
     path = script_path_for_job("abc-123")
-    assert path == Path("/tmp/things-happen-abc-123.txt")
+    assert path == Path("/tmp/the-rundown-abc-123.txt")
 
 
 @patch("pipeline.things_happen_agent.is_session_active")

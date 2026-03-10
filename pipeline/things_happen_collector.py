@@ -149,7 +149,7 @@ def collect_all_artifacts(
     scripts_dir = (
         scripts_source_dir
         if scripts_source_dir is not None
-        else Path("/persist/my-podcasts/scripts/things-happen")
+        else Path("/persist/my-podcasts/scripts/the-rundown")
     )
     if scripts_dir.exists():
         scripts = sorted(scripts_dir.glob("*.txt"), reverse=True)[:3]

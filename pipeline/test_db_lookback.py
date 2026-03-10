@@ -20,7 +20,7 @@ def test_days_since_last_episode_with_episodes(tmp_path):
             "test",
             three_days_ago,
             "key",
-            "things-happen",
+            "the-rundown",
             "News",
             "General",
             1000,
@@ -28,14 +28,14 @@ def test_days_since_last_episode_with_episodes(tmp_path):
     )
     store._conn.commit()
 
-    result = store.days_since_last_episode("things-happen")
+    result = store.days_since_last_episode("the-rundown")
     assert result == 3
 
 
 def test_days_since_last_episode_no_episodes(tmp_path):
     """Returns None when no episodes exist for feed."""
     store = StateStore(tmp_path / "test.db")
-    result = store.days_since_last_episode("things-happen")
+    result = store.days_since_last_episode("the-rundown")
     assert result is None
 
 
@@ -60,8 +60,8 @@ def test_days_since_last_episode_different_feed(tmp_path):
     )
     store._conn.commit()
 
-    # things-happen has no episodes
-    assert store.days_since_last_episode("things-happen") is None
+    # the-rundown has no episodes
+    assert store.days_since_last_episode("the-rundown") is None
     # fp-digest has one from yesterday
     assert store.days_since_last_episode("fp-digest") == 1
 
@@ -78,7 +78,7 @@ def test_days_since_last_episode_unparseable_dates(tmp_path):
             "bad",
             "not-a-date",
             "key",
-            "things-happen",
+            "the-rundown",
             "News",
             "General",
             1000,
@@ -86,5 +86,5 @@ def test_days_since_last_episode_unparseable_dates(tmp_path):
     )
     store._conn.commit()
 
-    result = store.days_since_last_episode("things-happen")
+    result = store.days_since_last_episode("the-rundown")
     assert result is None

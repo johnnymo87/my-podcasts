@@ -23,8 +23,8 @@ if TYPE_CHECKING:
 
 TTS_MODEL = "tts-1-hd"
 TTS_VOICE = "nova"
-FEED_SLUG = "things-happen"
-CATEGORY = "Business"
+FEED_SLUG = "the-rundown"
+CATEGORY = "News"
 
 
 def _parse_duration_seconds(mp3_path: Path) -> int | None:
@@ -74,10 +74,10 @@ def process_things_happen_job(
         script = generate_briefing_script(articles, date_str=date_str)
 
     # Step 4: TTS.
-    episode_slug = f"{date_str}-things-happen"
+    episode_slug = f"{date_str}-the-rundown"
     episode_r2_key = f"episodes/{FEED_SLUG}/{episode_slug}.mp3"
 
-    with tempfile.TemporaryDirectory(prefix="things-happen-") as tmp_dir:
+    with tempfile.TemporaryDirectory(prefix="the-rundown-") as tmp_dir:
         tmp = Path(tmp_dir)
         input_txt = tmp / f"{episode_slug}.txt"
         output_mp3 = tmp / f"{episode_slug}.mp3"
@@ -101,7 +101,7 @@ def process_things_happen_job(
         duration_seconds = _parse_duration_seconds(output_mp3)
 
     # Step 5: Insert episode and mark job complete.
-    episode_title = f"{date_str} - Things Happen"
+    episode_title = f"{date_str} - The Rundown"
     episode = Episode(
         id=str(uuid.uuid4()),
         title=episode_title,
@@ -110,8 +110,8 @@ def process_things_happen_job(
         r2_key=episode_r2_key,
         feed_slug=FEED_SLUG,
         category=CATEGORY,
-        source_tag="things-happen",
-        preset_name="Things Happen - Money Stuff Links",
+        source_tag="the-rundown",
+        preset_name="The Rundown",
         source_url=None,
         size_bytes=size_bytes,
         duration_seconds=duration_seconds,

@@ -67,7 +67,7 @@ def test_collect_all_artifacts(
     ]
 
     # Setup fake context scripts
-    scripts_dir = tmp_path / "scripts" / "things-happen"
+    scripts_dir = tmp_path / "scripts" / "the-rundown"
     scripts_dir.mkdir(parents=True)
     (scripts_dir / "2026-03-01.txt").write_text("old script")
 

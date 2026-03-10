@@ -291,22 +291,22 @@ def test_consume_forever_kills_stuck_agent(monkeypatch, tmp_path) -> None:
 def test_compute_lookback_none_returns_default():
     store = MagicMock()
     store.days_since_last_episode.return_value = None
-    assert _compute_lookback(store, "things-happen") == 2
+    assert _compute_lookback(store, "the-rundown") == 2
 
 
 def test_compute_lookback_floors_at_2():
     store = MagicMock()
     store.days_since_last_episode.return_value = 0
-    assert _compute_lookback(store, "things-happen") == 2
+    assert _compute_lookback(store, "the-rundown") == 2
 
 
 def test_compute_lookback_caps_at_14():
     store = MagicMock()
     store.days_since_last_episode.return_value = 20
-    assert _compute_lookback(store, "things-happen") == 14
+    assert _compute_lookback(store, "the-rundown") == 14
 
 
 def test_compute_lookback_mid_range():
     store = MagicMock()
     store.days_since_last_episode.return_value = 5
-    assert _compute_lookback(store, "things-happen") == 6
+    assert _compute_lookback(store, "the-rundown") == 6

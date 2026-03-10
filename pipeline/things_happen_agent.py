@@ -12,7 +12,7 @@ from pipeline.opencode_client import (
 
 def script_path_for_job(job_id: str) -> Path:
     """Return the path to the script file for a given job ID."""
-    return Path(f"/tmp/things-happen-{job_id}.txt")
+    return Path(f"/tmp/the-rundown-{job_id}.txt")
 
 
 def is_agent_running(session_id: str | None) -> bool:
@@ -70,7 +70,7 @@ Do not use the `bash` tool to fetch articles or search the web. Everything you n
 
 
 def launch_things_happen_agent(job: dict, work_dir: Path) -> str | None:
-    """Launch a Things Happen agent session on the shared opencode server.
+    """Launch a The Rundown agent session on the shared opencode server.
 
     Returns the session ID on success, or None if the script already exists.
     """

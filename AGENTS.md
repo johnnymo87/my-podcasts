@@ -19,7 +19,7 @@ Quick start and navigation for humans and coding agents.
    - Levine: `https://podcast.mohrbacher.dev/feeds/levine.xml`
    - Yglesias: `https://podcast.mohrbacher.dev/feeds/yglesias.xml`
    - Silver Bulletin: `https://podcast.mohrbacher.dev/feeds/silver.xml`
-   - Things Happen: `https://podcast.mohrbacher.dev/feeds/things-happen.xml` (created on first episode)
+   - The Rundown: `https://podcast.mohrbacher.dev/feeds/the-rundown.xml` (created on first episode)
    - FP Digest: `https://podcast.mohrbacher.dev/feeds/fp-digest.xml`
 
 ## Docs TOC
@@ -53,16 +53,20 @@ Quick start and navigation for humans and coding agents.
 - Pipeline + feed generation: `pipeline/`
 - Email ingest worker: `workers/email-ingest/`
 - Podcast serving worker: `workers/podcast-serve/`
-- Things Happen AI agent: `pipeline/things_happen_agent.py` (launcher), `pipeline/exa_client.py` (Exa wrapper)
+- The Rundown AI agent: `pipeline/things_happen_agent.py` (launcher), `pipeline/exa_client.py` (Exa wrapper)
 
-## Things Happen Pipeline
+## The Rundown Pipeline
 
-When a Levine email with a "Things Happen" section is processed, the consumer **immediately** queues and launches an AI agent — there is no 24-hour delay. Focuses on finance, business, technology, and law.
+When a Levine email with a "Things Happen" section is processed, the consumer **immediately** queues and launches an AI agent — there is no 24-hour delay. Covers business, technology, AI, law, media, science, and culture (excluding foreign policy).
 
 **Sources:**
 - Matt Levine's "Things Happen" links (extracted from email)
 - Semafor RSS (`semafor.com/rss.xml`) — Business, Technology, Media, CEO, Energy categories + Politics (shared with FP Digest). Read from persistent cache with adaptive lookback.
 - Zvi Mowshowitz / "Don't Worry About the Vase" (`thezvi.substack.com/feed`) — AI roundup sections split by topic, essays kept whole. Persistent cache at `/persist/my-podcasts/zvi-cache/` (180-day retention). Also used for AI enrichment via keyword search.
+
+**Subscription:** `https://podcast.mohrbacher.dev/feeds/the-rundown.xml`
+
+**Category:** News
 
 **Flow:**
 1. Email parsed → links extracted by `things_happen_extractor.py`
@@ -74,7 +78,7 @@ When a Levine email with a "Things Happen" section is processed, the consumer **
 
 **Key modules:**
 - `pipeline/opencode_client.py` — shared HTTP client for the opencode-serve API
-- `pipeline/things_happen_agent.py` — agent launcher; contains `build_agent_prompt()`
+- `pipeline/things_happen_agent.py` — The Rundown agent launcher; contains `build_agent_prompt()`
 - `pipeline/things_happen_collector.py` — article collection, Semafor integration, Zvi integration, FP routing
 - `pipeline/things_happen_editor.py` — Gemini AI for research plan (classifies `is_foreign_policy`)
 - `pipeline/zvi_cache.py` — Zvi RSS fetch, roundup splitting, persistent cache, keyword search
@@ -89,8 +93,8 @@ Daily foreign policy podcast. Fully automated, no human-in-the-loop.
 **Sources (all read from persistent caches with adaptive lookback):**
 - antiwar.com homepage (~49 curated external links across 13 regions)
 - 3 antiwar.com RSS feeds + Caitlin Johnstone feed
-- Semafor RSS — Africa, Gulf, Security categories + Politics (shared with Things Happen)
-- Routed FP links from Things Happen (via `/persist/my-podcasts/fp-routed-links/`)
+- Semafor RSS — Africa, Gulf, Security categories + Politics (shared with The Rundown)
+- Routed FP links from The Rundown (via `/persist/my-podcasts/fp-routed-links/`)
 
 **Flow:**
 1. Systemd timer triggers daily at 6 PM EST (23:00 UTC)
@@ -113,12 +117,12 @@ Daily foreign policy podcast. Fully automated, no human-in-the-loop.
 
 ## Content Routing
 
-Foreign policy content is exclusively routed to FP Digest, not Things Happen:
+Foreign policy content is exclusively routed to FP Digest, not The Rundown:
 
-- **Things Happen editor** classifies each link with `is_foreign_policy: bool`
+- **The Rundown editor** classifies each link with `is_foreign_policy: bool`
 - FP-flagged links are written to `/persist/my-podcasts/fp-routed-links/{date}-{job_id}.json`
 - FP Digest collector reads routed files within the lookback window
-- **Semafor** articles are split by category: FP categories → FP Digest, business/tech → Things Happen, Politics → both
+- **Semafor** articles are split by category: FP categories → FP Digest, business/tech → The Rundown, Politics → both
 - Routed link files are cleaned up after 7 days
 
 ## Source Caching
@@ -126,7 +130,7 @@ Foreign policy content is exclusively routed to FP Digest, not Things Happen:
 All external sources are cached daily to persistent storage by the `sync-sources` timer (noon ET daily). Podcasts read from caches instead of fetching live, with an adaptive lookback window based on days since the last episode (min 2, max 14 days).
 
 **Caches:**
-- Zvi: `/persist/my-podcasts/zvi-cache/` (also synced on-demand by Things Happen collector)
+- Zvi: `/persist/my-podcasts/zvi-cache/` (also synced on-demand by The Rundown collector)
 - Semafor: `/persist/my-podcasts/semafor-cache/`
 - Antiwar RSS: `/persist/my-podcasts/antiwar-rss-cache/`
 - Antiwar Homepage: `/persist/my-podcasts/antiwar-homepage-cache/`
