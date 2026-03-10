@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from pipeline.article_fetcher import fetch_all_articles
 from pipeline.exa_client import search_related
 from pipeline.rss_sources import categorize_semafor_article
-from pipeline.things_happen_editor import generate_research_plan
+from pipeline.things_happen_editor import generate_rundown_research_plan
 from pipeline.things_happen_extractor import resolve_redirect_url
 from pipeline.zvi_cache import search_zvi_cache, sync_zvi_cache
 
@@ -160,11 +160,15 @@ def collect_all_artifacts(
                 target.write_text(script.read_text(encoding="utf-8"))
 
     # Phase 2: Editor AI
-    directives = generate_research_plan(headlines_with_snippets)
+    plan = generate_rundown_research_plan(headlines_with_snippets)
+
+    # Write plan.json
+    plan_path = work_dir / "plan.json"
+    plan_path.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
 
     # Partition directives: FP links go to staging, non-FP get enriched
-    fp_directives = [d for d in directives if d.is_foreign_policy]
-    non_fp_directives = [d for d in directives if not d.is_foreign_policy]
+    fp_directives = [d for d in plan.directives if d.is_foreign_policy]
+    non_fp_directives = [d for d in plan.directives if not d.is_foreign_policy]
 
     # Write FP directives to the staging directory
     if fp_directives and fp_routed_dir is None:

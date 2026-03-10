@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from pipeline.article_fetcher import Article
 from pipeline.exa_client import ExaResult
 from pipeline.things_happen_collector import _slugify, collect_all_artifacts
-from pipeline.things_happen_editor import ResearchDirective
+from pipeline.things_happen_editor import RundownResearchPlan, RundownStoryDirective
 
 
 def test_slugify() -> None:
@@ -22,7 +22,7 @@ def test_slugify() -> None:
 
 @patch("pipeline.things_happen_collector.fetch_all_articles")
 @patch("pipeline.things_happen_collector.resolve_redirect_url")
-@patch("pipeline.things_happen_collector.generate_research_plan")
+@patch("pipeline.things_happen_collector.generate_rundown_research_plan")
 @patch("pipeline.things_happen_collector.search_related")
 @patch("pipeline.things_happen_collector.search_zvi_cache")
 @patch("pipeline.things_happen_collector.sync_zvi_cache")
@@ -44,17 +44,24 @@ def test_collect_all_artifacts(
         )
     ]
 
-    mock_plan.return_value = [
-        ResearchDirective(
-            headline="Test Article",
-            needs_exa=True,
-            exa_query="exa test",
-            is_foreign_policy=False,
-            fp_query="",
-            is_ai=True,
-            ai_query="ai test",
-        )
-    ]
+    mock_plan.return_value = RundownResearchPlan(
+        themes=["Tech"],
+        directives=[
+            RundownStoryDirective(
+                headline="Test Article",
+                source="levine",
+                priority=1,
+                theme="Tech",
+                needs_exa=True,
+                exa_query="exa test",
+                is_foreign_policy=False,
+                fp_query="",
+                is_ai=True,
+                ai_query="ai test",
+                include_in_episode=True,
+            )
+        ],
+    )
 
     mock_exa.return_value = [ExaResult(title="Exa", url="http://exa", text="Exa text")]
     mock_zvi_search.return_value = [
@@ -117,6 +124,15 @@ def test_collect_all_artifacts(
     assert "Zvi AI text" in rss_ai_files[0].read_text()
     assert "Zvi Perspectives" in rss_ai_files[0].read_text()
 
+    # Verify plan.json written
+    plan_path = work_dir / "plan.json"
+    assert plan_path.exists()
+    import json as _json
+
+    plan_data = _json.loads(plan_path.read_text())
+    assert "themes" in plan_data
+    assert "directives" in plan_data
+
 
 def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
     """FP-flagged links are written to fp-routed-links dir, not enriched."""
@@ -151,27 +167,38 @@ def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
 
     # Editor returns one FP link and one non-FP link
     monkeypatch.setattr(
-        "pipeline.things_happen_collector.generate_research_plan",
-        lambda *a, **kw: [
-            ResearchDirective(
-                headline="Iran War Escalates",
-                needs_exa=False,
-                exa_query="",
-                is_foreign_policy=True,
-                fp_query="iran war",
-                is_ai=False,
-                ai_query="",
-            ),
-            ResearchDirective(
-                headline="Bitcoin Rises",
-                needs_exa=False,
-                exa_query="",
-                is_foreign_policy=False,
-                fp_query="",
-                is_ai=False,
-                ai_query="",
-            ),
-        ],
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(
+            themes=["FP", "Crypto"],
+            directives=[
+                RundownStoryDirective(
+                    headline="Iran War Escalates",
+                    source="levine",
+                    priority=1,
+                    theme="FP",
+                    needs_exa=False,
+                    exa_query="",
+                    is_foreign_policy=True,
+                    fp_query="iran war",
+                    is_ai=False,
+                    ai_query="",
+                    include_in_episode=False,
+                ),
+                RundownStoryDirective(
+                    headline="Bitcoin Rises",
+                    source="levine",
+                    priority=2,
+                    theme="Crypto",
+                    needs_exa=False,
+                    exa_query="",
+                    is_foreign_policy=False,
+                    fp_query="",
+                    is_ai=False,
+                    ai_query="",
+                    include_in_episode=True,
+                ),
+            ],
+        ),
     )
 
     routed_dir = tmp_path / "fp-routed"
@@ -219,7 +246,8 @@ def test_semafor_articles_added_to_work_dir(tmp_path, monkeypatch):
         "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
     )
     monkeypatch.setattr(
-        "pipeline.things_happen_collector.generate_research_plan", lambda *a, **kw: []
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(themes=[], directives=[]),
     )
     monkeypatch.setattr(
         "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
@@ -271,7 +299,8 @@ def test_zvi_articles_added_to_work_dir(tmp_path, monkeypatch):
         "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
     )
     monkeypatch.setattr(
-        "pipeline.things_happen_collector.generate_research_plan", lambda *a, **kw: []
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(themes=[], directives=[]),
     )
 
     zvi_cache = tmp_path / "zvi-cache"
@@ -339,18 +368,25 @@ def test_ai_enrichment_uses_zvi_cache(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(
-        "pipeline.things_happen_collector.generate_research_plan",
-        lambda *a, **kw: [
-            ResearchDirective(
-                headline="New AI Model",
-                needs_exa=False,
-                exa_query="",
-                is_foreign_policy=False,
-                fp_query="",
-                is_ai=True,
-                ai_query="new AI model release",
-            ),
-        ],
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(
+            themes=["AI"],
+            directives=[
+                RundownStoryDirective(
+                    headline="New AI Model",
+                    source="levine",
+                    priority=1,
+                    theme="AI",
+                    needs_exa=False,
+                    exa_query="",
+                    is_foreign_policy=False,
+                    fp_query="",
+                    is_ai=True,
+                    ai_query="new AI model release",
+                    include_in_episode=True,
+                ),
+            ],
+        ),
     )
 
     # Create a Zvi cache with a matching article
@@ -403,7 +439,8 @@ def test_semafor_reads_from_cache(tmp_path, monkeypatch):
         "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
     )
     monkeypatch.setattr(
-        "pipeline.things_happen_collector.generate_research_plan", lambda *a, **kw: []
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(themes=[], directives=[]),
     )
     monkeypatch.setattr(
         "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
@@ -478,7 +515,8 @@ def test_collector_works_without_levine_links(tmp_path, monkeypatch):
         "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
     )
     monkeypatch.setattr(
-        "pipeline.things_happen_collector.generate_research_plan", lambda *a, **kw: []
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(themes=[], directives=[]),
     )
     monkeypatch.setattr(
         "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
