@@ -56,7 +56,7 @@ No source is more important than another. Build the episode from whatever is mos
 
 Additional context:
 - `{work_dir}/enrichment/` — Exa web search results and alternative perspectives on key stories.
-- `{work_dir}/context/` — Scripts from recent episodes. If a story was covered recently and has no new developments, skip it. Don't repeat yourself.
+- `{work_dir}/context/` — Scripts from recent episodes. Your listeners already heard these. Only cover a story again if there is a material new development since the last episode (new facts, new numbers, a concrete event — not just continued coverage of the same situation). When you do revisit a running story, do not re-explain the background; a single sentence to orient the listener is enough before delivering the update. If a slow news day means fewer stories worth covering, make a shorter episode. A tight 8-minute show is better than a padded 15-minute one.
 
 ## Process
 
