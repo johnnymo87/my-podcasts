@@ -53,15 +53,15 @@ Quick start and navigation for humans and coding agents.
 - Pipeline + feed generation: `pipeline/`
 - Email ingest worker: `workers/email-ingest/`
 - Podcast serving worker: `workers/podcast-serve/`
-- The Rundown AI agent: `pipeline/things_happen_agent.py` (launcher), `pipeline/exa_client.py` (Exa wrapper)
+- The Rundown pipeline: `pipeline/rundown_writer.py` (script generator), `pipeline/exa_client.py` (Exa wrapper)
 
 ## The Rundown Pipeline
 
-When a Levine email with a "Things Happen" section is processed, the consumer **immediately** queues and launches an AI agent — there is no 24-hour delay. Covers business, technology, AI, law, media, science, and culture (excluding foreign policy).
+Daily current-affairs digest covering business, technology, AI, law, media, science, and culture (excluding foreign policy). Fully automated, no human-in-the-loop. Triggered by systemd timer Mon-Fri at 5 PM ET.
 
-**Sources:**
-- Matt Levine's "Things Happen" links (extracted from email)
-- Semafor RSS (`semafor.com/rss.xml`) — Business, Technology, Media, CEO, Energy categories + Politics (shared with FP Digest). Read from persistent cache with adaptive lookback.
+**Sources (all co-equal, read from persistent caches with adaptive lookback):**
+- Matt Levine's "Things Happen" links (extracted from email, cached to `/persist/my-podcasts/levine-cache/`)
+- Semafor RSS (`semafor.com/rss.xml`) — Business, Technology, Media, CEO, Energy categories + Politics (shared with FP Digest)
 - Zvi Mowshowitz / "Don't Worry About the Vase" (`thezvi.substack.com/feed`) — AI roundup sections split by topic, essays kept whole. Persistent cache at `/persist/my-podcasts/zvi-cache/` (180-day retention). Also used for AI enrichment via keyword search.
 
 **Subscription:** `https://podcast.mohrbacher.dev/feeds/the-rundown.xml`
@@ -69,18 +69,18 @@ When a Levine email with a "Things Happen" section is processed, the consumer **
 **Category:** News
 
 **Flow:**
-1. Email parsed → links extracted by `things_happen_extractor.py`
-2. `things_happen_collector.py` fetches articles, reads Semafor from cache (with adaptive lookback window), syncs Zvi cache and copies lookback-window posts, routes FP-flagged links to `/persist/my-podcasts/fp-routed-links/` for FP Digest
-3. Consumer calls `things_happen_agent.py` which creates a session on the shared `opencode-serve` daemon (port 4096)
-4. Agent enriches headlines using **Exa** (full-text article search) and **Zvi cache** keyword search for AI perspectives
-5. Agent writes the briefing script to `<work_dir>/script.txt`
-6. Script handed off to existing TTS + publish pipeline (`ttsjoin` → R2 upload → feed update)
+1. Systemd timer triggers, or CLI: `uv run python -m pipeline the-rundown [--date YYYY-MM-DD] [--lookback N] [--dry-run]`
+2. `things_happen_collector.py` reads Levine links from cache, Semafor from cache, syncs Zvi cache — all within adaptive lookback window. Routes FP-flagged links to `/persist/my-podcasts/fp-routed-links/` for FP Digest.
+3. `things_happen_editor.py` (Gemini Flash-Lite) triages into 3-5 themes, selects 8-12 stories, writes `plan.json`
+4. Exa enrichment for paywalled articles + Zvi cache keyword search for AI perspectives
+5. `rundown_writer.py` generates script via opencode-serve (synchronous, no agent session)
+6. `things_happen_processor.py` runs TTS (`ttsjoin`) + publishes to R2 + updates feed
 
 **Key modules:**
 - `pipeline/opencode_client.py` — shared HTTP client for the opencode-serve API
-- `pipeline/things_happen_agent.py` — The Rundown agent launcher; contains `build_agent_prompt()`
+- `pipeline/rundown_writer.py` — synchronous script generator via opencode-serve
 - `pipeline/things_happen_collector.py` — article collection, Semafor integration, Zvi integration, FP routing
-- `pipeline/things_happen_editor.py` — Gemini AI for research plan (classifies `is_foreign_policy`)
+- `pipeline/things_happen_editor.py` — Gemini AI for themed research plan (story selection, priority, FP flagging)
 - `pipeline/zvi_cache.py` — Zvi RSS fetch, roundup splitting, persistent cache, keyword search
 - `pipeline/exa_client.py` — Exa search API wrapper
 - `pipeline/rss_sources.py` — RSS source definitions, `SEMAFOR`, `categorize_semafor_article()`
