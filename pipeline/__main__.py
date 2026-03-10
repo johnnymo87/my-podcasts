@@ -277,6 +277,119 @@ def _fp_digest_full_run(date_str: str, lookback_override: int | None = None) -> 
         store.close()
 
 
+@cli.command("the-rundown")
+@click.option(
+    "--date",
+    "date_str",
+    default=None,
+    type=str,
+    help="Date (YYYY-MM-DD). Defaults to today ET.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Run collection only, skip DB and agent launch.",
+)
+@click.option(
+    "--lookback",
+    "lookback_days",
+    default=None,
+    type=int,
+    help="Override lookback days.",
+)
+def the_rundown_command(
+    date_str: str | None, dry_run: bool, lookback_days: int | None
+) -> None:
+    """Create and launch a Rundown episode."""
+    from zoneinfo import ZoneInfo
+    from datetime import datetime
+
+    if date_str is None:
+        date_str = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+
+    if dry_run:
+        _the_rundown_dry_run(date_str, lookback_days)
+    else:
+        _the_rundown_full_run(date_str, lookback_days)
+
+
+def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) -> None:
+    """Run collection only without touching the DB or launching the agent."""
+    import uuid
+
+    from pipeline.things_happen_collector import collect_all_artifacts
+
+    run_id = str(uuid.uuid4())
+    work_dir = Path(f"/tmp/the-rundown-{run_id}")
+    click.echo(f"Dry run for {date_str} (no DB entry created)")
+
+    click.echo("Collecting sources...")
+    collect_all_artifacts(
+        run_id,
+        work_dir,
+        levine_cache_dir=Path("/persist/my-podcasts/levine-cache"),
+        semafor_cache_dir=Path("/persist/my-podcasts/semafor-cache"),
+        zvi_cache_dir=Path("/persist/my-podcasts/zvi-cache"),
+        fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
+        lookback_days=lookback_override or 2,
+    )
+
+    click.echo(f"Dry run complete. Work directory: {work_dir}")
+
+
+def _the_rundown_full_run(date_str: str, lookback_override: int | None = None) -> None:
+    """Run the full pipeline: collect, launch agent, exit."""
+    from pipeline.consumer import _compute_lookback
+    from pipeline.things_happen_agent import launch_things_happen_agent
+    from pipeline.things_happen_collector import collect_all_artifacts
+
+    store = StateStore(_default_state_db_path())
+    try:
+        job_id = store.insert_pending_the_rundown(date_str)
+        if job_id is None:
+            click.echo(f"The Rundown job already exists for {date_str}")
+            due = store.list_due_the_rundown()
+            job = next((j for j in due if j["date_str"] == date_str), None)
+            if job is None:
+                click.echo("Job exists but is not pending.")
+                return
+        else:
+            click.echo(f"Created The Rundown job {job_id} for {date_str}")
+            due = store.list_due_the_rundown()
+            job = next((j for j in due if j["id"] == job_id), None)
+            if job is None:
+                click.echo("Error: job not found")
+                return
+
+        lookback = lookback_override or _compute_lookback(store, "the-rundown")
+        work_dir = Path(f"/tmp/the-rundown-{job['id']}")
+        click.echo("Collecting sources...")
+        collect_all_artifacts(
+            job["id"],
+            work_dir,
+            levine_cache_dir=Path("/persist/my-podcasts/levine-cache"),
+            semafor_cache_dir=Path("/persist/my-podcasts/semafor-cache"),
+            zvi_cache_dir=Path("/persist/my-podcasts/zvi-cache"),
+            fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
+            lookback_days=lookback,
+        )
+
+        click.echo("Launching agent...")
+        session_id = launch_things_happen_agent(job, work_dir)
+        if session_id:
+            store.set_the_rundown_session_id(job["id"], session_id)
+            click.echo(f"Agent launched (session: {session_id})")
+        else:
+            click.echo("Agent not launched (script already exists)")
+
+        click.echo(
+            f"The Rundown job {job['id']} for {date_str} is running. Consumer will pick up from here."
+        )
+    finally:
+        store.close()
+
+
 @cli.command("sync-sources")
 def sync_sources_command() -> None:
     """Sync all source caches (Zvi, Semafor, Antiwar RSS, Antiwar homepage)."""
