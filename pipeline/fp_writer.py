@@ -17,10 +17,18 @@ Your job is to produce a natural, conversational podcast script covering the mos
 important foreign policy stories of the day, grouped by theme. The script will be
 read aloud by a TTS engine.
 
-Write naturally and conversationally, as though you're a knowledgeable friend catching someone up on the day's foreign policy news. This will be read aloud by a TTS engine, so use plain spoken English -- no markdown, bullet points, or special characters.
+Write naturally and conversationally, as though you're a knowledgeable friend
+catching someone up on the day's foreign policy news. This will be read aloud by
+a TTS engine, so use plain spoken English -- no markdown, bullet points, or
+special characters.
 
-Aim for 1500-2200 words (approximately 10-15 minutes of spoken content). Introduce each theme section clearly, start with a brief welcome and overview, and end with a brief sign-off.
+LENGTH: Aim for 800-2200 words depending on how much genuinely new material
+there is. A tight 5-8 minute episode that covers three or four real developments
+is far better than a 15-minute episode that rehashes yesterday. Do not pad.
 {context_block}
+Introduce each theme section clearly, start with a brief welcome and overview,
+and end with a brief sign-off.
+
 ---
 
 TODAY'S THEMES:
@@ -44,10 +52,22 @@ def build_fp_prompt(
     # Build context block if prior episode scripts are provided
     if context_scripts:
         context_lines = [
-            "\nPRIOR EPISODE CONTEXT:",
-            "Below are scripts from recent prior episodes. Build on these — avoid",
-            "repeating the same framing, and reference relevant prior coverage where",
-            "appropriate.\n",
+            "\nPRIOR EPISODES (your listeners already heard these):",
+            "Treat the content below as what your audience already knows. Your job",
+            "today is to tell them what is NEW.",
+            "",
+            "Rules for handling prior coverage:",
+            "- If a running story has a material new development, cover the new",
+            "  development. Do not re-explain the background — listeners already",
+            "  have it. A single sentence like 'as we discussed yesterday' is enough",
+            "  to orient them before delivering the update.",
+            "- If a running story has NO material new development since the last",
+            "  episode, skip it entirely or give it at most one sentence.",
+            "- Never restate facts, figures, or analysis that appeared in a prior",
+            "  episode. If you covered the school strike death toll yesterday, do not",
+            "  repeat it today unless the number has changed.",
+            "- A shorter episode built from genuinely new material is always better",
+            "  than a longer episode that recycles prior coverage.\n",
         ]
         for i, script in enumerate(context_scripts, 1):
             context_lines.append(f"[Prior Episode {i}]:\n{script}\n")

@@ -69,7 +69,11 @@ def generate_fp_research_plan(
 
     if context_scripts:
         prompt += (
-            "\n\nContext from previous episodes (avoid repeating these stories):\n"
+            "\n\nPrevious episodes (listeners already heard these):\n"
+            "Deprioritize stories that were covered in depth unless there is a\n"
+            "significant new development (new facts, new numbers, a policy change,\n"
+            "a concrete event — not just continued coverage of the same situation).\n"
+            "When in doubt, prefer fresh stories over continuing threads.\n"
         )
         for script in context_scripts:
             prompt += f"\n---\n{script}\n"
