@@ -238,6 +238,48 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
     assert cleanup_calls == [1]
 
 
+def test_consume_forever_kills_stuck_agent(monkeypatch, tmp_path) -> None:
+    """If an agent session exceeds the timeout, it should be killed."""
+    store = MagicMock()
+    r2_client = MagicMock()
+
+    store.list_due_things_happen.return_value = [
+        {"id": "job-stuck", "date_str": "2026-03-09", "links_json": "[]"}
+    ]
+    store.get_things_happen_session_id.return_value = "ses_stuck123"
+    store.days_since_last_episode.return_value = None
+
+    monkeypatch.setattr("pipeline.consumer.is_agent_running", lambda session_id: True)
+
+    stopped = []
+    monkeypatch.setattr(
+        "pipeline.consumer.stop_agent", lambda session_id: stopped.append(session_id)
+    )
+
+    call_count = 0
+
+    def flaky_pull(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return []
+        raise _Done("done")
+
+    mock_consumer = MagicMock()
+    mock_consumer.pull.side_effect = flaky_pull
+    monkeypatch.setattr(time, "sleep", lambda n: None)
+
+    with patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer):
+        try:
+            consume_forever(store, r2_client, poll_interval=5)
+        except _Done:
+            pass
+
+    # Agent should be killed because no tracked start time (simulates restart)
+    assert "ses_stuck123" in stopped
+    store.clear_things_happen_session_id.assert_called_with("job-stuck")
+
+
 def test_compute_lookback_none_returns_default():
     store = MagicMock()
     store.days_since_last_episode.return_value = None

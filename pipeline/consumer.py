@@ -30,6 +30,9 @@ if TYPE_CHECKING:
     from pipeline.r2 import R2Client
 
 
+_AGENT_SESSION_TIMEOUT_SECONDS = 30 * 60  # 30 minutes
+
+
 def _compute_lookback(
     store: StateStore, feed_slug: str, default: int = 2, cap: int = 14
 ) -> int:
@@ -240,6 +243,8 @@ def consume_forever(
 ) -> None:
     consumer = CloudflareQueueConsumer()
 
+    session_start_times: dict[str, float] = {}
+
     while True:
         try:
             messages = consumer.pull(batch_size=5)
@@ -315,6 +320,8 @@ def consume_forever(
                             _cleanup_old_work_dirs()
                             stop_agent(session_id)
                             store.clear_things_happen_session_id(job["id"])
+                            if session_id is not None:
+                                session_start_times.pop(session_id, None)
                     elif not is_agent_running(session_id):
                         # No script, no agent — run collection then launch.
                         if session_id:
@@ -347,7 +354,27 @@ def consume_forever(
                             store.set_things_happen_session_id(
                                 job["id"], new_session_id
                             )
-                    # else: agent is running, wait for it to finish.
+                            session_start_times[new_session_id] = time.time()
+                    elif session_id:
+                        # Agent is running — check for timeout.
+                        start = session_start_times.get(session_id)
+                        if (
+                            start is None
+                            or (time.time() - start) > _AGENT_SESSION_TIMEOUT_SECONDS
+                        ):
+                            reason = (
+                                "no tracked start time (consumer restarted?)"
+                                if start is None
+                                else f"exceeded {_AGENT_SESSION_TIMEOUT_SECONDS}s timeout"
+                            )
+                            print(
+                                f"Things Happen agent stuck for job "
+                                f"{job['id']} ({job['date_str']}): {reason}. "
+                                f"Killing session {session_id}."
+                            )
+                            stop_agent(session_id)
+                            store.clear_things_happen_session_id(job["id"])
+                            session_start_times.pop(session_id, None)
                 except Exception as exc:
                     print(f"Failed Things Happen job {job['id']}: {exc}")
         except Exception as exc:
