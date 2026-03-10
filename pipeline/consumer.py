@@ -18,10 +18,8 @@ from pipeline.fp_writer import generate_fp_script
 from pipeline.processor import process_r2_email_key
 from pipeline.things_happen_agent import (
     is_agent_running,
-    launch_things_happen_agent,
     stop_agent,
 )
-from pipeline.things_happen_collector import collect_all_artifacts
 from pipeline.things_happen_processor import process_things_happen_job
 
 
@@ -138,7 +136,7 @@ def _cleanup_old_work_dirs(max_age_days: int = 180) -> None:
     """Remove things-happen and fp-digest work directories older than max_age_days."""
     cutoff = datetime.now(tz=UTC) - timedelta(days=max_age_days)
     tmp = Path("/tmp")
-    for pattern in ("things-happen-*", "fp-digest-*"):
+    for pattern in ("things-happen-*", "the-rundown-*", "fp-digest-*"):
         for d in tmp.glob(pattern):
             if not d.is_dir():
                 continue
@@ -271,90 +269,48 @@ def consume_forever(
 
             consumer.ack(ack_messages)
 
-        # Process any due Things Happen jobs.
+        # Process any due Rundown jobs.
         try:
-            due_jobs = store.list_due_things_happen()
+            due_jobs = store.list_due_the_rundown()
             for job in due_jobs:
                 try:
-                    work_dir = Path(f"/tmp/things-happen-{job['id']}")
+                    work_dir = Path(f"/tmp/the-rundown-{job['id']}")
                     script_file = work_dir / "script.txt"
-
-                    session_id = store.get_things_happen_session_id(job["id"])
+                    session_id = store.get_the_rundown_session_id(job["id"])
 
                     if script_file.exists():
-                        # Agent finished — run TTS + publish with the script.
+                        # Agent finished — run TTS + publish.
                         try:
-                            dry_run = os.environ.get(
-                                "THINGS_HAPPEN_DRY_RUN", ""
-                            ).strip()
+                            dry_run = os.environ.get("THE_RUNDOWN_DRY_RUN", "").strip()
                             if dry_run:
                                 print(
-                                    f"DRY RUN: skipping TTS for "
-                                    f"{job['id']} ({job['date_str']}). "
-                                    f"Script at: {script_file}"
+                                    f"DRY RUN: skipping TTS for {job['id']} ({job['date_str']}). Script at: {script_file}"
                                 )
-                                store.mark_things_happen_completed(job["id"])
+                                store.mark_the_rundown_completed(job["id"])
                             else:
                                 print(
-                                    f"Processing Things Happen job with "
-                                    f"agent script: "
-                                    f"{job['id']} ({job['date_str']})"
+                                    f"Processing Rundown job with agent script: {job['id']} ({job['date_str']})"
                                 )
                                 process_things_happen_job(
-                                    job,
-                                    store,
-                                    r2_client,
-                                    script_path=script_file,
+                                    job, store, r2_client, script_path=script_file
                                 )
-                                print(f"Completed Things Happen job: {job['id']}")
+                                print(f"Completed Rundown job: {job['id']}")
 
-                            # Copy to persistent storage for future context
+                            # Copy to persistent storage
                             persist_dir = Path(
-                                "/persist/my-podcasts/scripts/things-happen"
+                                "/persist/my-podcasts/scripts/the-rundown"
                             )
                             persist_dir.mkdir(parents=True, exist_ok=True)
                             persist_path = persist_dir / f"{job['date_str']}.txt"
                             shutil.copy(script_file, persist_path)
-
                         finally:
                             _cleanup_old_work_dirs()
                             stop_agent(session_id)
-                            store.clear_things_happen_session_id(job["id"])
+                            store.clear_the_rundown_session_id(job["id"])
                             if session_id is not None:
                                 session_start_times.pop(session_id, None)
-                    elif not is_agent_running(session_id):
-                        # No script, no agent — run collection then launch.
-                        if session_id:
-                            store.clear_things_happen_session_id(job["id"])
 
-                        print(
-                            f"Running collection phase for job: "
-                            f"{job['id']} ({job['date_str']})"
-                        )
-                        lookback = _compute_lookback(store, "things-happen")
-                        collect_all_artifacts(
-                            job["id"],
-                            work_dir,
-                            levine_cache_dir=Path("/persist/my-podcasts/levine-cache"),
-                            fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
-                            zvi_cache_dir=Path("/persist/my-podcasts/zvi-cache"),
-                            semafor_cache_dir=Path(
-                                "/persist/my-podcasts/semafor-cache"
-                            ),
-                            lookback_days=lookback,
-                        )
-
-                        print(
-                            f"Launching Things Happen agent for job: "
-                            f"{job['id']} ({job['date_str']})"
-                        )
-                        new_session_id = launch_things_happen_agent(job, work_dir)
-                        if new_session_id:
-                            store.set_things_happen_session_id(
-                                job["id"], new_session_id
-                            )
-                            session_start_times[new_session_id] = time.time()
-                    elif session_id:
+                    elif session_id and is_agent_running(session_id):
                         # Agent is running — check for timeout.
                         start = session_start_times.get(session_id)
                         if (
@@ -367,17 +323,20 @@ def consume_forever(
                                 else f"exceeded {_AGENT_SESSION_TIMEOUT_SECONDS}s timeout"
                             )
                             print(
-                                f"Things Happen agent stuck for job "
-                                f"{job['id']} ({job['date_str']}): {reason}. "
-                                f"Killing session {session_id}."
+                                f"Rundown agent stuck for job {job['id']} ({job['date_str']}): {reason}. Killing session {session_id}."
                             )
                             stop_agent(session_id)
-                            store.clear_things_happen_session_id(job["id"])
+                            store.clear_the_rundown_session_id(job["id"])
                             session_start_times.pop(session_id, None)
+
+                    elif session_id:
+                        # Agent died without producing script — clear stale session.
+                        store.clear_the_rundown_session_id(job["id"])
+
                 except Exception as exc:
-                    print(f"Failed Things Happen job {job['id']}: {exc}")
+                    print(f"Failed Rundown job {job['id']}: {exc}")
         except Exception as exc:
-            print(f"Error checking Things Happen jobs: {exc}")
+            print(f"Error checking Rundown jobs: {exc}")
 
         # Process any due FP Digest jobs.
         try:

@@ -16,7 +16,7 @@ def test_consume_forever_retries_on_pull_exception(monkeypatch) -> None:
     """Verify that a transient error from consumer.pull() triggers sleep-and-retry
     instead of crashing consume_forever()."""
     store = MagicMock()
-    store.list_due_things_happen.return_value = []
+    store.list_due_the_rundown.return_value = []
     r2_client = MagicMock()
 
     call_count = 0
@@ -48,32 +48,30 @@ def test_consume_forever_retries_on_pull_exception(monkeypatch) -> None:
     assert 5 in slept, f"Expected sleep(5) after failure, got slept={slept}"
 
 
-def test_consume_forever_launches_agent_for_due_job(monkeypatch, tmp_path) -> None:
-    """When a due Things Happen job exists with no script file and no agent running,
-    consumer runs collection phase then launches agent."""
+def test_consume_forever_processes_rundown_script(monkeypatch, tmp_path) -> None:
+    """When a due Rundown job exists with a script file, consumer runs TTS + publish."""
     store = MagicMock()
     r2_client = MagicMock()
 
-    launched = []
+    job_id = "job-rundown-tts-test-11111"
+    work_dir = Path(f"/tmp/the-rundown-{job_id}")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    script = work_dir / "script.txt"
+    script.write_text("rundown script content")
 
-    def fake_launch(job, work_dir):
-        launched.append(job["id"])
-        return True
-
-    monkeypatch.setattr("pipeline.consumer.launch_things_happen_agent", fake_launch)
-    monkeypatch.setattr("pipeline.consumer.is_agent_running", lambda session_id: False)
-    store.get_things_happen_session_id.return_value = None
-    store.days_since_last_episode.return_value = None
-
-    collect_calls = []
+    process_calls = []
     monkeypatch.setattr(
-        "pipeline.consumer.collect_all_artifacts",
-        lambda job_id, work_dir, **kw: collect_calls.append(job_id),
+        "pipeline.consumer.process_things_happen_job",
+        lambda *a, **kw: process_calls.append(1),
     )
 
-    store.list_due_things_happen.return_value = [
-        {"id": "job-1", "date_str": "2026-03-02", "links_json": "[]"}
-    ]
+    stopped = []
+    monkeypatch.setattr(
+        "pipeline.consumer.stop_agent", lambda session_id: stopped.append(session_id)
+    )
+
+    store.list_due_the_rundown.return_value = [{"id": job_id, "date_str": "2026-03-02"}]
+    store.get_the_rundown_session_id.return_value = None
 
     call_count = 0
 
@@ -87,29 +85,44 @@ def test_consume_forever_launches_agent_for_due_job(monkeypatch, tmp_path) -> No
     mock_consumer = MagicMock()
     mock_consumer.pull.side_effect = flaky_pull
 
-    slept = []
-    monkeypatch.setattr(time, "sleep", lambda n: slept.append(n))
+    monkeypatch.setattr(time, "sleep", lambda n: None)
+    monkeypatch.delenv("THE_RUNDOWN_DRY_RUN", raising=False)
 
-    with patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer):
+    copy_calls: list[tuple] = []
+    cleanup_calls: list[int] = []
+
+    with (
+        patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
+        patch("shutil.copy", lambda src, dst: copy_calls.append((src, dst))),
+        patch(
+            "pipeline.consumer._cleanup_old_work_dirs",
+            lambda **kw: cleanup_calls.append(1),
+        ),
+    ):
         try:
             consume_forever(store, r2_client, poll_interval=5)
         except _Done:
             pass
 
-    assert launched == ["job-1"]
-    assert collect_calls == ["job-1"]
+    # TTS should have been called
+    assert process_calls == [1]
+    # stop_agent should have been called
+    assert stopped == [None]
+    # Script should have been copied to persist
+    assert len(copy_calls) == 1
+    assert copy_calls[0][0] == script
 
 
 def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
-    """When THINGS_HAPPEN_DRY_RUN is set, skip TTS but keep work dir for inspection."""
-    monkeypatch.setenv("THINGS_HAPPEN_DRY_RUN", "1")
+    """When THE_RUNDOWN_DRY_RUN is set, skip TTS but keep work dir for inspection."""
+    monkeypatch.setenv("THE_RUNDOWN_DRY_RUN", "1")
 
     store = MagicMock()
     r2_client = MagicMock()
 
-    # Use a unique job ID, create the work dir and script at /tmp/things-happen-<id>
+    # Use a unique job ID, create the work dir and script at /tmp/the-rundown-<id>
     job_id = "job-dry-test-unique-12345"
-    work_dir = Path(f"/tmp/things-happen-{job_id}")
+    work_dir = Path(f"/tmp/the-rundown-{job_id}")
     work_dir.mkdir(parents=True, exist_ok=True)
     script = work_dir / "script.txt"
     script.write_text("test script content")
@@ -125,10 +138,8 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
         lambda *a, **kw: process_calls.append(1),
     )
 
-    store.list_due_things_happen.return_value = [
-        {"id": job_id, "date_str": "2026-03-02", "links_json": "[]"}
-    ]
-    store.get_things_happen_session_id.return_value = None
+    store.list_due_the_rundown.return_value = [{"id": job_id, "date_str": "2026-03-02"}]
+    store.get_the_rundown_session_id.return_value = None
 
     call_count = 0
 
@@ -162,7 +173,7 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
     # TTS should NOT have been called
     assert process_calls == []
     # Job should be marked completed so it doesn't re-launch
-    store.mark_things_happen_completed.assert_called_once_with(job_id)
+    store.mark_the_rundown_completed.assert_called_once_with(job_id)
     # stop_agent should be called
     assert stopped == [1]
     # Work dir should still exist (not immediately deleted)
@@ -179,9 +190,9 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
     store = MagicMock()
     r2_client = MagicMock()
 
-    # Use a unique job ID, create the work dir and script at /tmp/things-happen-<id>
+    # Use a unique job ID, create the work dir and script at /tmp/the-rundown-<id>
     job_id = "job-fail-test-unique-67890"
-    work_dir = Path(f"/tmp/things-happen-{job_id}")
+    work_dir = Path(f"/tmp/the-rundown-{job_id}")
     work_dir.mkdir(parents=True, exist_ok=True)
     script = work_dir / "script.txt"
     script.write_text("test script content")
@@ -196,10 +207,8 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
 
     monkeypatch.setattr("pipeline.consumer.process_things_happen_job", boom)
 
-    store.list_due_things_happen.return_value = [
-        {"id": job_id, "date_str": "2026-03-02", "links_json": "[]"}
-    ]
-    store.get_things_happen_session_id.return_value = None
+    store.list_due_the_rundown.return_value = [{"id": job_id, "date_str": "2026-03-02"}]
+    store.get_the_rundown_session_id.return_value = None
 
     call_count = 0
 
@@ -213,7 +222,7 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
     mock_consumer = MagicMock()
     mock_consumer.pull.side_effect = flaky_pull
     monkeypatch.setattr(time, "sleep", lambda n: None)
-    monkeypatch.delenv("THINGS_HAPPEN_DRY_RUN", raising=False)
+    monkeypatch.delenv("THE_RUNDOWN_DRY_RUN", raising=False)
 
     cleanup_calls: list[int] = []
 
@@ -239,15 +248,14 @@ def test_consume_forever_stops_agent_on_tts_failure(monkeypatch, tmp_path) -> No
 
 
 def test_consume_forever_kills_stuck_agent(monkeypatch, tmp_path) -> None:
-    """If an agent session exceeds the timeout, it should be killed."""
+    """If a Rundown agent session exceeds the timeout, it should be killed."""
     store = MagicMock()
     r2_client = MagicMock()
 
-    store.list_due_things_happen.return_value = [
-        {"id": "job-stuck", "date_str": "2026-03-09", "links_json": "[]"}
+    store.list_due_the_rundown.return_value = [
+        {"id": "job-stuck", "date_str": "2026-03-09"}
     ]
-    store.get_things_happen_session_id.return_value = "ses_stuck123"
-    store.days_since_last_episode.return_value = None
+    store.get_the_rundown_session_id.return_value = "ses_stuck123"
 
     monkeypatch.setattr("pipeline.consumer.is_agent_running", lambda session_id: True)
 
@@ -277,7 +285,7 @@ def test_consume_forever_kills_stuck_agent(monkeypatch, tmp_path) -> None:
 
     # Agent should be killed because no tracked start time (simulates restart)
     assert "ses_stuck123" in stopped
-    store.clear_things_happen_session_id.assert_called_with("job-stuck")
+    store.clear_the_rundown_session_id.assert_called_with("job-stuck")
 
 
 def test_compute_lookback_none_returns_default():
