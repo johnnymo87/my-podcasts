@@ -9,7 +9,6 @@ from pipeline.article_fetcher import Article
 from pipeline.exa_client import ExaResult
 from pipeline.things_happen_collector import _slugify, collect_all_artifacts
 from pipeline.things_happen_editor import ResearchDirective
-from pipeline.xai_client import XaiResult
 
 
 def test_slugify() -> None:
@@ -25,13 +24,11 @@ def test_slugify() -> None:
 @patch("pipeline.things_happen_collector.resolve_redirect_url")
 @patch("pipeline.things_happen_collector.generate_research_plan")
 @patch("pipeline.things_happen_collector.search_related")
-@patch("pipeline.things_happen_collector.search_twitter")
 @patch("pipeline.things_happen_collector.search_zvi_cache")
 @patch("pipeline.things_happen_collector.sync_zvi_cache")
 def test_collect_all_artifacts(
     mock_zvi,
     mock_zvi_search,
-    mock_xai,
     mock_exa,
     mock_plan,
     mock_resolve,
@@ -52,8 +49,6 @@ def test_collect_all_artifacts(
             headline="Test Article",
             needs_exa=True,
             exa_query="exa test",
-            needs_xai=True,
-            xai_query="xai test",
             is_foreign_policy=False,
             fp_query="",
             is_ai=True,
@@ -62,7 +57,6 @@ def test_collect_all_artifacts(
     ]
 
     mock_exa.return_value = [ExaResult(title="Exa", url="http://exa", text="Exa text")]
-    mock_xai.return_value = XaiResult(summary="Xai summary")
     mock_zvi_search.return_value = [
         {
             "headline": "Zvi AI Take",
@@ -94,7 +88,6 @@ def test_collect_all_artifacts(
     # Verify directories created
     assert (work_dir / "articles").exists()
     assert (work_dir / "enrichment" / "exa").exists()
-    assert (work_dir / "enrichment" / "xai").exists()
     assert (work_dir / "enrichment" / "rss").exists()
     assert (work_dir / "context").exists()
 
@@ -111,9 +104,6 @@ def test_collect_all_artifacts(
     # Verify enrichment written
     exa_file = list((work_dir / "enrichment" / "exa").glob("*.md"))[0]
     assert "Exa text" in exa_file.read_text()
-
-    xai_file = list((work_dir / "enrichment" / "xai").glob("*.md"))[0]
-    assert "Xai summary" in xai_file.read_text()
 
     rss_ai_files = list((work_dir / "enrichment" / "rss").glob("*-ai.md"))
     assert len(rss_ai_files) == 1
@@ -149,9 +139,6 @@ def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
         "pipeline.things_happen_collector.search_related", lambda *a, **kw: []
     )
     monkeypatch.setattr(
-        "pipeline.things_happen_collector.search_twitter", lambda *a, **kw: None
-    )
-    monkeypatch.setattr(
         "pipeline.things_happen_collector.search_zvi_cache", lambda *a, **kw: []
     )
 
@@ -163,8 +150,6 @@ def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
                 headline="Iran War Escalates",
                 needs_exa=False,
                 exa_query="",
-                needs_xai=False,
-                xai_query="",
                 is_foreign_policy=True,
                 fp_query="iran war",
                 is_ai=False,
@@ -174,8 +159,6 @@ def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
                 headline="Bitcoin Rises",
                 needs_exa=False,
                 exa_query="",
-                needs_xai=False,
-                xai_query="",
                 is_foreign_policy=False,
                 fp_query="",
                 is_ai=False,
@@ -331,9 +314,6 @@ def test_ai_enrichment_uses_zvi_cache(tmp_path, monkeypatch):
         "pipeline.things_happen_collector.search_related", lambda *a, **kw: []
     )
     monkeypatch.setattr(
-        "pipeline.things_happen_collector.search_twitter", lambda *a, **kw: None
-    )
-    monkeypatch.setattr(
         "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
     )
 
@@ -344,8 +324,6 @@ def test_ai_enrichment_uses_zvi_cache(tmp_path, monkeypatch):
                 headline="New AI Model",
                 needs_exa=False,
                 exa_query="",
-                needs_xai=False,
-                xai_query="",
                 is_foreign_policy=False,
                 fp_query="",
                 is_ai=True,

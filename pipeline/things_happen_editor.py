@@ -15,12 +15,6 @@ class ResearchDirective(BaseModel):
     exa_query: str = Field(
         description="A specific search query for Exa to find similar open-access reporting (3-6 keywords). Empty string if needs_exa is false."  # noqa: E501
     )
-    needs_xai: bool = Field(
-        description="True if understanding public sentiment, expert commentary, or Twitter discussion adds value to this story"  # noqa: E501
-    )
-    xai_query: str = Field(
-        description="A concise query for Twitter/X search to find commentary (3-5 keywords). Empty string if needs_xai is false."  # noqa: E501
-    )
     is_foreign_policy: bool = Field(
         description="True if the story relates to war, geopolitics, international relations, or military conflicts"  # noqa: E501
     )

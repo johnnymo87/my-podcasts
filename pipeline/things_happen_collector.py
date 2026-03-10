@@ -10,7 +10,6 @@ from pipeline.exa_client import search_related
 from pipeline.rss_sources import categorize_semafor_article
 from pipeline.things_happen_editor import generate_research_plan
 from pipeline.things_happen_extractor import resolve_redirect_url
-from pipeline.xai_client import search_twitter
 from pipeline.zvi_cache import search_zvi_cache, sync_zvi_cache
 
 
@@ -43,11 +42,10 @@ def collect_all_artifacts(
     articles_dir = work_dir / "articles"
     enrichment_dir = work_dir / "enrichment"
     exa_dir = enrichment_dir / "exa"
-    xai_dir = enrichment_dir / "xai"
     rss_dir = enrichment_dir / "rss"
     context_dir = work_dir / "context"
 
-    for d in (articles_dir, exa_dir, xai_dir, rss_dir, context_dir):
+    for d in (articles_dir, exa_dir, rss_dir, context_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     _et = ZoneInfo("America/New_York")
@@ -189,16 +187,6 @@ def collect_all_artifacts(
                     (exa_dir / f"{slug}.md").write_text(out, encoding="utf-8")
             except Exception as e:
                 print(f"[collector] Exa search failed for '{directive.exa_query}': {e}")
-
-        # xAI search
-        if directive.needs_xai and directive.xai_query:
-            try:
-                xai_result = search_twitter(directive.xai_query)
-                if xai_result:
-                    out = f"# Twitter Summary for: {directive.headline}\nQuery: {directive.xai_query}\n\n{xai_result.summary}"
-                    (xai_dir / f"{slug}.md").write_text(out, encoding="utf-8")
-            except Exception as e:
-                print(f"[collector] xAI search failed for '{directive.xai_query}': {e}")
 
         # Zvi cache search (AI)
         if directive.is_ai and directive.ai_query:

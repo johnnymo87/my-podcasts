@@ -33,8 +33,6 @@ def test_generate_research_plan_success(mock_client_class, monkeypatch) -> None:
                 headline="War in Middle East escalates",
                 needs_exa=True,
                 exa_query="Middle East war escalation",
-                needs_xai=True,
-                xai_query="Middle East war",
                 is_foreign_policy=True,
                 fp_query="Middle East war",
                 is_ai=False,

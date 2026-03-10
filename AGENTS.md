@@ -53,7 +53,7 @@ Quick start and navigation for humans and coding agents.
 - Pipeline + feed generation: `pipeline/`
 - Email ingest worker: `workers/email-ingest/`
 - Podcast serving worker: `workers/podcast-serve/`
-- Things Happen AI agent: `pipeline/things_happen_agent.py` (launcher), `pipeline/exa_client.py` (Exa wrapper), `pipeline/xai_client.py` (xAI/Grok wrapper)
+- Things Happen AI agent: `pipeline/things_happen_agent.py` (launcher), `pipeline/exa_client.py` (Exa wrapper)
 
 ## Things Happen Pipeline
 
@@ -68,7 +68,7 @@ When a Levine email with a "Things Happen" section is processed, the consumer **
 1. Email parsed → links extracted by `things_happen_extractor.py`
 2. `things_happen_collector.py` fetches articles, reads Semafor from cache (with adaptive lookback window), syncs Zvi cache and copies lookback-window posts, routes FP-flagged links to `/persist/my-podcasts/fp-routed-links/` for FP Digest
 3. Consumer calls `things_happen_agent.py` which creates a session on the shared `opencode-serve` daemon (port 4096)
-4. Agent enriches headlines using **Exa** (full-text article search), **xAI/Grok** for analysis, and **Zvi cache** keyword search for AI perspectives
+4. Agent enriches headlines using **Exa** (full-text article search) and **Zvi cache** keyword search for AI perspectives
 5. Agent writes the briefing script to `<work_dir>/script.txt`
 6. Script handed off to existing TTS + publish pipeline (`ttsjoin` → R2 upload → feed update)
 
@@ -79,7 +79,6 @@ When a Levine email with a "Things Happen" section is processed, the consumer **
 - `pipeline/things_happen_editor.py` — Gemini AI for research plan (classifies `is_foreign_policy`)
 - `pipeline/zvi_cache.py` — Zvi RSS fetch, roundup splitting, persistent cache, keyword search
 - `pipeline/exa_client.py` — Exa search API wrapper
-- `pipeline/xai_client.py` — xAI/Grok API wrapper
 - `pipeline/rss_sources.py` — RSS source definitions, `SEMAFOR`, `categorize_semafor_article()`
 - `pipeline/source_cache.py` — Persistent cache sync for Semafor, Antiwar RSS, and Antiwar homepage
 
