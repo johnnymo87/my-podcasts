@@ -67,6 +67,15 @@ CREATE TABLE IF NOT EXISTS pending_fp_digest (
     process_after TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS pending_the_rundown (
+    id TEXT PRIMARY KEY,
+    date_str TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    process_after TEXT NOT NULL,
+    opencode_session_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -358,6 +367,68 @@ class StateStore:
         """Set fp_digest job status to 'completed'."""
         self._conn.execute(
             "UPDATE pending_fp_digest SET status = 'completed' WHERE id = ?",
+            (job_id,),
+        )
+        self._conn.commit()
+
+    def insert_pending_the_rundown(self, date_str: str) -> str | None:
+        """Insert a pending the_rundown job.
+
+        Return job_id or None if date already exists.
+        """
+        job_id = str(uuid.uuid4())
+        process_after = datetime.now(tz=UTC).isoformat()
+        try:
+            self._conn.execute(
+                """INSERT INTO pending_the_rundown
+                   (id, date_str, status, process_after)
+                   VALUES (?, ?, ?, ?)""",
+                (job_id, date_str, "pending", process_after),
+            )
+            self._conn.commit()
+        except sqlite3.IntegrityError:
+            return None
+        return job_id
+
+    def list_due_the_rundown(self) -> list[dict]:
+        """Return pending the_rundown jobs where process_after <= now."""
+        now = datetime.now(tz=UTC).isoformat()
+        rows = self._conn.execute(
+            """SELECT id, date_str, status, process_after
+               FROM pending_the_rundown
+               WHERE status = 'pending' AND process_after <= ?
+               ORDER BY process_after ASC""",
+            (now,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_the_rundown_completed(self, job_id: str) -> None:
+        """Set the_rundown job status to 'completed'."""
+        self._conn.execute(
+            "UPDATE pending_the_rundown SET status = 'completed' WHERE id = ?",
+            (job_id,),
+        )
+        self._conn.commit()
+
+    def set_the_rundown_session_id(self, job_id: str, session_id: str) -> None:
+        self._conn.execute(
+            "UPDATE pending_the_rundown SET opencode_session_id = ? WHERE id = ?",
+            (session_id, job_id),
+        )
+        self._conn.commit()
+
+    def get_the_rundown_session_id(self, job_id: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT opencode_session_id FROM pending_the_rundown WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["opencode_session_id"]
+
+    def clear_the_rundown_session_id(self, job_id: str) -> None:
+        self._conn.execute(
+            "UPDATE pending_the_rundown SET opencode_session_id = NULL WHERE id = ?",
             (job_id,),
         )
         self._conn.commit()

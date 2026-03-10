@@ -69,3 +69,39 @@ def test_mark_things_happen_completed(tmp_path) -> None:
     due = store.list_due_things_happen()
     assert len(due) == 0
     store.close()
+
+
+def test_insert_and_list_due_the_rundown(tmp_path):
+    store = StateStore(tmp_path / "test.db")
+    job_id = store.insert_pending_the_rundown("2026-03-09")
+    assert job_id is not None
+    due = store.list_due_the_rundown()
+    assert len(due) == 1
+    assert due[0]["date_str"] == "2026-03-09"
+    store.close()
+
+
+def test_no_duplicate_the_rundown(tmp_path):
+    store = StateStore(tmp_path / "test.db")
+    store.insert_pending_the_rundown("2026-03-09")
+    assert store.insert_pending_the_rundown("2026-03-09") is None
+    store.close()
+
+
+def test_mark_the_rundown_completed(tmp_path):
+    store = StateStore(tmp_path / "test.db")
+    job_id = store.insert_pending_the_rundown("2026-03-09")
+    store.mark_the_rundown_completed(job_id)
+    assert store.list_due_the_rundown() == []
+    store.close()
+
+
+def test_the_rundown_session_id(tmp_path):
+    store = StateStore(tmp_path / "test.db")
+    job_id = store.insert_pending_the_rundown("2026-03-09")
+    assert store.get_the_rundown_session_id(job_id) is None
+    store.set_the_rundown_session_id(job_id, "ses_123")
+    assert store.get_the_rundown_session_id(job_id) == "ses_123"
+    store.clear_the_rundown_session_id(job_id)
+    assert store.get_the_rundown_session_id(job_id) is None
+    store.close()
