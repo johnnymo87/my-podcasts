@@ -108,14 +108,13 @@ def test_process_things_happen_job_end_to_end(tmp_path, monkeypatch) -> None:
     store.close()
 
 
-def test_levine_email_creates_pending_things_happen_job(tmp_path) -> None:
-    """Processing a Levine email with Things Happen should create a pending job."""
+def test_levine_email_caches_links(tmp_path) -> None:
+    """Processing a Levine email with Things Happen should cache links to disk."""
     import json
 
-    from pipeline.db import StateStore
-    from pipeline.processor import _maybe_queue_things_happen
+    from pipeline.processor import _cache_levine_links
 
-    store = StateStore(tmp_path / "test.sqlite3")
+    levine_cache = tmp_path / "levine-cache"
 
     raw_html = """\
 <html><body>
@@ -124,23 +123,19 @@ def test_levine_email_creates_pending_things_happen_job(tmp_path) -> None:
 </body></html>
 """
 
-    _maybe_queue_things_happen(
+    _cache_levine_links(
         raw_email_html=raw_html,
-        source_r2_key="inbox/raw/test.eml",
         date_str="2026-02-26",
         feed_slug="levine",
-        store=store,
+        levine_cache_dir=levine_cache,
     )
 
-    # A pending job should exist (not yet due).
-    rows = store._conn.execute(
-        "SELECT * FROM pending_things_happen WHERE status = 'pending'"
-    ).fetchall()
-    assert len(rows) == 1
-    links = json.loads(rows[0]["links_json"])
+    # A JSON file should be written to the cache dir.
+    cache_file = levine_cache / "2026-02-26.json"
+    assert cache_file.exists(), f"Expected cache file at {cache_file}"
+    links = json.loads(cache_file.read_text())
     assert len(links) == 2
     assert links[0]["link_text"] == "Blue Owl"
-    store.close()
 
 
 def test_process_things_happen_job_with_script_file(tmp_path, monkeypatch) -> None:

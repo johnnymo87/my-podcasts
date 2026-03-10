@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -55,37 +56,30 @@ def _parse_duration_seconds(mp3_path: Path) -> int | None:
         return None
 
 
-def _maybe_queue_things_happen(
+def _cache_levine_links(
     *,
     raw_email_html: str,
-    source_r2_key: str,
     date_str: str,
     feed_slug: str,
-    store: StateStore,
+    levine_cache_dir: Path,
 ) -> None:
-    """If this is a Levine email, extract Things Happen links and queue a job."""
+    """If this is a Levine email, extract Things Happen links and cache to disk."""
     if feed_slug != "levine":
         return
     links = extract_things_happen(raw_email_html)
     if not links:
         return
-    import json
-
-    links_json = json.dumps(
-        [
-            {
-                "link_text": link.link_text,
-                "raw_url": link.raw_url,
-                "headline_context": link.headline_context,
-            }
-            for link in links
-        ]
-    )
-    store.insert_pending_things_happen(
-        email_r2_key=source_r2_key,
-        date_str=date_str,
-        links_json=links_json,
-    )
+    links_data = [
+        {
+            "link_text": link.link_text,
+            "raw_url": link.raw_url,
+            "headline_context": link.headline_context,
+        }
+        for link in links
+    ]
+    levine_cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = levine_cache_dir / f"{date_str}.json"
+    cache_file.write_text(json.dumps(links_data), encoding="utf-8")
 
 
 def process_email_bytes(
@@ -95,6 +89,7 @@ def process_email_bytes(
     route_tag: str | None,
     store: StateStore,
     r2_client: R2Client,
+    levine_cache_dir: Path = Path("/persist/my-podcasts/levine-cache"),
 ) -> ProcessResult:
     parsed = EmailProcessor(raw_email).parse()
     date_str = parsed["date"]
@@ -159,15 +154,14 @@ def process_email_bytes(
         duration_seconds=duration_seconds,
     )
     store.insert_episode(episode)
-    # Queue Things Happen job if this is a Levine email.
+    # Cache Things Happen links if this is a Levine email.
     try:
         raw_html = EmailProcessor(raw_email)._extract_html_part()
-        _maybe_queue_things_happen(
+        _cache_levine_links(
             raw_email_html=raw_html,
-            source_r2_key=source_r2_key,
             date_str=date_str,
             feed_slug=preset.feed_slug,
-            store=store,
+            levine_cache_dir=levine_cache_dir,
         )
     except Exception:
         pass  # Don't let Things Happen extraction failure block the main pipeline.
@@ -192,6 +186,7 @@ def process_r2_email_key(
     route_tag: str | None,
     store: StateStore,
     r2_client: R2Client,
+    levine_cache_dir: Path = Path("/persist/my-podcasts/levine-cache"),
 ) -> ProcessResult:
     raw = r2_client.get_object_bytes(key)
     return process_email_bytes(
@@ -200,6 +195,7 @@ def process_r2_email_key(
         route_tag=route_tag,
         store=store,
         r2_client=r2_client,
+        levine_cache_dir=levine_cache_dir,
     )
 
 
