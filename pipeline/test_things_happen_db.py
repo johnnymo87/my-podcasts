@@ -94,14 +94,3 @@ def test_mark_the_rundown_completed(tmp_path):
     store.mark_the_rundown_completed(job_id)
     assert store.list_due_the_rundown() == []
     store.close()
-
-
-def test_the_rundown_session_id(tmp_path):
-    store = StateStore(tmp_path / "test.db")
-    job_id = store.insert_pending_the_rundown("2026-03-09")
-    assert store.get_the_rundown_session_id(job_id) is None
-    store.set_the_rundown_session_id(job_id, "ses_123")
-    assert store.get_the_rundown_session_id(job_id) == "ses_123"
-    store.clear_the_rundown_session_id(job_id)
-    assert store.get_the_rundown_session_id(job_id) is None
-    store.close()

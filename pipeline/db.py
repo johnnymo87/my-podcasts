@@ -73,7 +73,6 @@ CREATE TABLE IF NOT EXISTS pending_the_rundown (
     date_str TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL DEFAULT 'pending',
     process_after TEXT NOT NULL,
-    opencode_session_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
@@ -115,18 +114,6 @@ class StateStore:
         for column, ddl in migrations.items():
             if column not in existing_cols:
                 self._conn.execute(ddl)
-
-        # pending_things_happen migrations
-        th_cols = {
-            row["name"]
-            for row in self._conn.execute(
-                "PRAGMA table_info(pending_things_happen)"
-            ).fetchall()
-        }
-        if "opencode_session_id" not in th_cols:
-            self._conn.execute(
-                "ALTER TABLE pending_things_happen ADD COLUMN opencode_session_id TEXT"
-            )
 
     def close(self) -> None:
         self._conn.close()
@@ -309,29 +296,6 @@ class StateStore:
         )
         self._conn.commit()
 
-    def set_things_happen_session_id(self, job_id: str, session_id: str) -> None:
-        self._conn.execute(
-            "UPDATE pending_things_happen SET opencode_session_id = ? WHERE id = ?",
-            (session_id, job_id),
-        )
-        self._conn.commit()
-
-    def get_things_happen_session_id(self, job_id: str) -> str | None:
-        row = self._conn.execute(
-            "SELECT opencode_session_id FROM pending_things_happen WHERE id = ?",
-            (job_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        return row["opencode_session_id"]
-
-    def clear_things_happen_session_id(self, job_id: str) -> None:
-        self._conn.execute(
-            "UPDATE pending_things_happen SET opencode_session_id = NULL WHERE id = ?",
-            (job_id,),
-        )
-        self._conn.commit()
-
     def insert_pending_fp_digest(self, date_str: str) -> str | None:
         """Insert a pending fp_digest job.
 
@@ -406,29 +370,6 @@ class StateStore:
         """Set the_rundown job status to 'completed'."""
         self._conn.execute(
             "UPDATE pending_the_rundown SET status = 'completed' WHERE id = ?",
-            (job_id,),
-        )
-        self._conn.commit()
-
-    def set_the_rundown_session_id(self, job_id: str, session_id: str) -> None:
-        self._conn.execute(
-            "UPDATE pending_the_rundown SET opencode_session_id = ? WHERE id = ?",
-            (session_id, job_id),
-        )
-        self._conn.commit()
-
-    def get_the_rundown_session_id(self, job_id: str) -> str | None:
-        row = self._conn.execute(
-            "SELECT opencode_session_id FROM pending_the_rundown WHERE id = ?",
-            (job_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        return row["opencode_session_id"]
-
-    def clear_the_rundown_session_id(self, job_id: str) -> None:
-        self._conn.execute(
-            "UPDATE pending_the_rundown SET opencode_session_id = NULL WHERE id = ?",
             (job_id,),
         )
         self._conn.commit()
