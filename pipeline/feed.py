@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from typing import TYPE_CHECKING
 from xml.etree import ElementTree as ET
@@ -10,6 +11,51 @@ if TYPE_CHECKING:
 
     from pipeline.db import StateStore
     from pipeline.r2 import R2Client
+
+
+ET.register_namespace("content", "http://purl.org/rss/1.0/modules/content/")
+ET.register_namespace("itunes", "http://www.itunes.com/dtds/podcast-1.0.dtd")
+
+
+def _build_show_notes_html(
+    summary: str | None, articles_json: str | None
+) -> str | None:
+    """Build HTML show notes from summary and articles list."""
+    if not summary and not articles_json:
+        return None
+
+    parts: list[str] = []
+    if summary:
+        parts.append(f"<p>{summary}</p>")
+
+    if articles_json:
+        try:
+            articles = json.loads(articles_json)
+        except (json.JSONDecodeError, TypeError):
+            articles = []
+
+        if articles:
+            current_theme = None
+            for article in articles:
+                theme = article.get("theme", "")
+                if theme != current_theme:
+                    if current_theme is not None:
+                        parts.append("</ul>")
+                    parts.append(f"<h3>{theme}</h3>")
+                    parts.append("<ul>")
+                    current_theme = theme
+
+                title = article.get("title", "")
+                url = article.get("url")
+                if url:
+                    parts.append(f'<li><a href="{url}">{title}</a></li>')
+                else:
+                    parts.append(f"<li>{title}</li>")
+
+            if current_theme is not None:
+                parts.append("</ul>")
+
+    return "\n".join(parts)
 
 
 def _duration_to_hms(seconds: int | None) -> str:
@@ -68,6 +114,15 @@ def generate_feed_xml(store: StateStore, feed_slug: str | None = None) -> bytes:
         if episode.source_url:
             ET.SubElement(item, "link").text = episode.source_url
             ET.SubElement(item, "description").text = episode.source_url
+        elif episode.summary:
+            ET.SubElement(item, "description").text = episode.summary
+
+        show_notes_html = _build_show_notes_html(episode.summary, episode.articles_json)
+        if show_notes_html:
+            ET.SubElement(
+                item, "{http://purl.org/rss/1.0/modules/content/}encoded"
+            ).text = show_notes_html
+
         ET.SubElement(
             item,
             "enclosure",
