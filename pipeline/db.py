@@ -26,6 +26,8 @@ class Episode:
     source_url: str | None
     size_bytes: int
     duration_seconds: int | None
+    summary: str | None = None
+    articles_json: str | None = None
 
 
 SCHEMA = """
@@ -110,6 +112,8 @@ class StateStore:
             "source_tag": "ALTER TABLE episodes ADD COLUMN source_tag TEXT",
             "preset_name": preset_name_ddl,
             "source_url": "ALTER TABLE episodes ADD COLUMN source_url TEXT",
+            "summary": "ALTER TABLE episodes ADD COLUMN summary TEXT",
+            "articles_json": "ALTER TABLE episodes ADD COLUMN articles_json TEXT",
         }
         for column, ddl in migrations.items():
             if column not in existing_cols:
@@ -148,9 +152,11 @@ class StateStore:
                     preset_name,
                     source_url,
                     size_bytes,
-                    duration_seconds
+                    duration_seconds,
+                    summary,
+                    articles_json
                 )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 episode.id,
@@ -165,6 +171,8 @@ class StateStore:
                 episode.source_url,
                 episode.size_bytes,
                 episode.duration_seconds,
+                episode.summary,
+                episode.articles_json,
             ),
         )
         self._conn.commit()
@@ -185,7 +193,9 @@ class StateStore:
                     preset_name,
                     source_url,
                     size_bytes,
-                    duration_seconds
+                    duration_seconds,
+                    summary,
+                    articles_json
                 FROM episodes
                 WHERE feed_slug = ?
                 ORDER BY created_at DESC
@@ -207,7 +217,9 @@ class StateStore:
                     preset_name,
                     source_url,
                     size_bytes,
-                    duration_seconds
+                    duration_seconds,
+                    summary,
+                    articles_json
                 FROM episodes
                 ORDER BY created_at DESC
                 """
@@ -226,6 +238,8 @@ class StateStore:
                 source_url=row["source_url"],
                 size_bytes=row["size_bytes"],
                 duration_seconds=row["duration_seconds"],
+                summary=row["summary"],
+                articles_json=row["articles_json"],
             )
             for row in rows
         ]
