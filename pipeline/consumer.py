@@ -284,6 +284,7 @@ def consume_forever(
                                 process_things_happen_job(
                                     job, store, r2_client, script_path=script_file
                                 )
+                                store.mark_the_rundown_completed(job["id"])
                                 print(f"Completed Rundown job: {job['id']}")
 
                             # Copy to persistent storage

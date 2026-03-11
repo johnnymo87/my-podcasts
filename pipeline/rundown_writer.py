@@ -103,6 +103,23 @@ def build_rundown_prompt(
     )
 
 
+def _strip_preamble(text: str) -> str:
+    """Remove LLM preamble before the actual script.
+
+    The model sometimes prepends meta-commentary like
+    "Now I have enough context. Let me write the script.\n\n---\n\n"
+    before the actual episode text.  Strip everything up to and including
+    the first ``---`` line if one appears within the first 10 lines.
+    """
+    lines = text.split("\n")
+    for i, line in enumerate(lines[:10]):
+        if line.strip() == "---":
+            remainder = "\n".join(lines[i + 1 :]).strip()
+            if remainder:
+                return remainder
+    return text
+
+
 def generate_rundown_script(
     themes: list[str],
     articles_by_theme: dict[str, list[str]],
@@ -125,6 +142,6 @@ def generate_rundown_script(
             raise RuntimeError("opencode session did not complete within 120 seconds")
 
         messages = get_messages(session_id)
-        return get_last_assistant_text(messages).strip()
+        return _strip_preamble(get_last_assistant_text(messages).strip())
     finally:
         delete_session(session_id)

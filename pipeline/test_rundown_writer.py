@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from pipeline.rundown_writer import build_rundown_prompt, generate_rundown_script
+from pipeline.rundown_writer import (
+    _strip_preamble,
+    build_rundown_prompt,
+    generate_rundown_script,
+)
 
 
 def test_build_prompt_basic():
@@ -89,3 +93,47 @@ def test_generate_script_timeout_raises(mock_create, mock_send, mock_wait, mock_
         assert "120 seconds" in str(e)
 
     mock_delete.assert_called_once_with("ses_timeout")
+
+
+@patch("pipeline.rundown_writer.delete_session")
+@patch("pipeline.rundown_writer.get_last_assistant_text")
+@patch("pipeline.rundown_writer.get_messages")
+@patch("pipeline.rundown_writer.wait_for_idle")
+@patch("pipeline.rundown_writer.send_prompt_async")
+@patch("pipeline.rundown_writer.create_session")
+def test_generate_script_strips_preamble(
+    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete
+):
+    mock_create.return_value = "ses_456"
+    mock_wait.return_value = True
+    mock_messages.return_value = [{"role": "assistant", "parts": []}]
+    mock_text.return_value = (
+        "Let me write the script.\n\n---\n\nHey, welcome to The Rundown."
+    )
+
+    result = generate_rundown_script(
+        themes=["Tech"],
+        articles_by_theme={"Tech": ["Article"]},
+        date_str="2026-03-10",
+    )
+
+    assert result == "Hey, welcome to The Rundown."
+
+
+def test_strip_preamble_removes_meta_text():
+    raw = "Now I have enough context.\n\n---\n\nHey, welcome to The Rundown."
+    assert _strip_preamble(raw) == "Hey, welcome to The Rundown."
+
+
+def test_strip_preamble_preserves_clean_script():
+    raw = "Hey, welcome to The Rundown for Monday."
+    assert _strip_preamble(raw) == raw
+
+
+def test_strip_preamble_ignores_late_separator():
+    """--- appearing after line 10 is part of the script, not preamble."""
+    lines = ["Line " + str(i) for i in range(12)]
+    lines.append("---")
+    lines.append("After separator")
+    raw = "\n".join(lines)
+    assert _strip_preamble(raw) == raw

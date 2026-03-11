@@ -503,6 +503,7 @@ def _the_rundown_full_run(date_str: str, lookback_override: int | None = None) -
 
         click.echo("Running TTS...")
         process_things_happen_job(job, store, r2_client, script_path=script_file)
+        store.mark_the_rundown_completed(job["id"])
 
         persist_dir = Path("/persist/my-podcasts/scripts/the-rundown")
         persist_dir.mkdir(parents=True, exist_ok=True)
