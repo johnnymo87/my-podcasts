@@ -162,3 +162,28 @@ def test_parse_summary_multiline():
     result = parse_summary(text)
     assert result.summary == "Line one.\nLine two."
     assert result.script == "The script."
+
+
+@patch("pipeline.rundown_writer.delete_session")
+@patch("pipeline.rundown_writer.get_last_assistant_text")
+@patch("pipeline.rundown_writer.get_messages")
+@patch("pipeline.rundown_writer.wait_for_idle")
+@patch("pipeline.rundown_writer.send_prompt_async")
+@patch("pipeline.rundown_writer.create_session")
+def test_generate_rundown_returns_writer_output_with_summary(
+    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete
+):
+    """generate_rundown_script returns WriterOutput with summary when tags present."""
+    mock_create.return_value = "ses_wout"
+    mock_wait.return_value = True
+    mock_messages.return_value = [{"role": "assistant", "parts": []}]
+    mock_text.return_value = "<summary>Today's summary.</summary>\n\nThe script text."
+
+    result = generate_rundown_script(
+        themes=["Tech"],
+        articles_by_theme={"Tech": ["Article"]},
+        date_str="2026-03-10",
+    )
+    assert isinstance(result, WriterOutput)
+    assert result.summary == "Today's summary."
+    assert result.script == "The script text."

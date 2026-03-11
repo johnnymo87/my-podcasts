@@ -88,6 +88,43 @@ def test_generate_fp_script(monkeypatch) -> None:
     assert result.summary == ""
 
 
+def test_generate_fp_returns_writer_output_with_summary(monkeypatch) -> None:
+    """generate_fp_script returns WriterOutput with summary when tags present."""
+    from pipeline.rundown_writer import WriterOutput
+
+    monkeypatch.setattr(
+        "pipeline.fp_writer.create_session", lambda directory=None: "sess-fp-sum"
+    )
+    monkeypatch.setattr("pipeline.fp_writer.send_prompt_async", lambda sid, text: None)
+    monkeypatch.setattr(
+        "pipeline.fp_writer.wait_for_idle", lambda sid, timeout=120: True
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_writer.get_messages",
+        lambda sid: [
+            {
+                "role": "assistant",
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "<summary>FP summary.</summary>\n\nThe FP script.",
+                    }
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr("pipeline.fp_writer.delete_session", lambda sid: None)
+
+    result = generate_fp_script(
+        themes=["Iran"],
+        articles_by_theme={"Iran": ["Article"]},
+        date_str="2026-03-06",
+    )
+    assert isinstance(result, WriterOutput)
+    assert result.summary == "FP summary."
+    assert result.script == "The FP script."
+
+
 def test_generate_fp_script_timeout(monkeypatch) -> None:
     monkeypatch.setattr(
         "pipeline.fp_writer.create_session",
