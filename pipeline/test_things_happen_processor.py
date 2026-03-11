@@ -219,3 +219,88 @@ def test_process_things_happen_job_with_script_file(tmp_path, monkeypatch) -> No
     assert upload_key.startswith("episodes/the-rundown/")
 
     store.close()
+
+
+def test_process_things_happen_with_show_notes(tmp_path, monkeypatch) -> None:
+    """When work_dir has plan.json and articles, show notes are stored."""
+    from pipeline.db import StateStore
+    from pipeline.things_happen_processor import process_things_happen_job
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+
+    # Insert pending job
+    past = (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()
+    store._conn.execute(
+        """INSERT INTO pending_things_happen
+           (id, email_r2_key, date_str, links_json, process_after, status)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        ("job-sn", "inbox/raw/abc.eml", "2026-03-10", "[]", past, "pending"),
+    )
+    store._conn.commit()
+
+    # Set up work_dir with plan.json and article files
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    plan = {
+        "themes": ["Markets"],
+        "directives": [
+            {
+                "headline": "Oil Prices Spike",
+                "source": "levine",
+                "priority": 1,
+                "theme": "Markets",
+                "needs_exa": False,
+                "exa_query": "",
+                "is_foreign_policy": False,
+                "fp_query": "",
+                "is_ai": False,
+                "ai_query": "",
+                "include_in_episode": True,
+            }
+        ],
+    }
+    (work_dir / "plan.json").write_text(json.dumps(plan))
+    articles_dir = work_dir / "articles"
+    articles_dir.mkdir()
+    (articles_dir / "00-oil-prices-spike.md").write_text(
+        "# Oil Prices Spike\n\nURL: https://example.com/oil\n\nText."
+    )
+
+    script_file = work_dir / "script.txt"
+    script_file.write_text("The briefing script.", encoding="utf-8")
+
+    # Mock subprocess and feed regen
+    def fake_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "ttsjoin":
+            output_file = cmd[cmd.index("--output-file") + 1]
+            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
+            return subprocess.CompletedProcess(cmd, 0)
+        if cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(cmd, 0, stdout="60.0\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(
+        "pipeline.things_happen_processor.regenerate_and_upload_feed",
+        lambda store, r2_client: None,
+    )
+
+    job = store.list_due_things_happen()[0]
+    process_things_happen_job(
+        job,
+        store,
+        r2_client,
+        script_path=script_file,
+        work_dir=work_dir,
+        summary="Today's summary.",
+    )
+
+    episodes = store.list_episodes(feed_slug="the-rundown")
+    assert len(episodes) == 1
+    assert episodes[0].summary == "Today's summary."
+    articles = json.loads(episodes[0].articles_json)
+    assert len(articles) == 1
+    assert articles[0]["url"] == "https://example.com/oil"
+
+    store.close()

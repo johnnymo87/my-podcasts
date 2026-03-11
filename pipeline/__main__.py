@@ -219,7 +219,7 @@ def _fp_digest_dry_run(date_str: str, lookback_override: int | None = None) -> N
             context_scripts.append(f.read_text(encoding="utf-8"))
 
     click.echo("Generating script...")
-    script = generate_fp_script(
+    writer_output = generate_fp_script(
         themes=plan.themes,
         articles_by_theme=articles_by_theme,
         date_str=date_str,
@@ -227,7 +227,9 @@ def _fp_digest_dry_run(date_str: str, lookback_override: int | None = None) -> N
     )
 
     script_file = work_dir / "script.txt"
-    script_file.write_text(script, encoding="utf-8")
+    script_file.write_text(writer_output.script, encoding="utf-8")
+    summary_file = work_dir / "summary.txt"
+    summary_file.write_text(writer_output.summary, encoding="utf-8")
 
     click.echo(f"Dry run complete. Script saved to: {script_file}")
     click.echo(f"Work directory: {work_dir}")
@@ -302,7 +304,7 @@ def _fp_digest_full_run(date_str: str, lookback_override: int | None = None) -> 
                 context_scripts.append(f.read_text(encoding="utf-8"))
 
         click.echo("Generating script...")
-        script = generate_fp_script(
+        writer_output = generate_fp_script(
             themes=plan.themes,
             articles_by_theme=articles_by_theme,
             date_str=date_str,
@@ -310,10 +312,19 @@ def _fp_digest_full_run(date_str: str, lookback_override: int | None = None) -> 
         )
 
         script_file = work_dir / "script.txt"
-        script_file.write_text(script, encoding="utf-8")
+        script_file.write_text(writer_output.script, encoding="utf-8")
+        summary_file = work_dir / "summary.txt"
+        summary_file.write_text(writer_output.summary, encoding="utf-8")
 
         click.echo("Running TTS...")
-        process_fp_digest_job(job, store, r2_client, script_path=script_file)
+        process_fp_digest_job(
+            job,
+            store,
+            r2_client,
+            script_path=script_file,
+            work_dir=work_dir,
+            summary=writer_output.summary,
+        )
 
         persist_dir = Path("/persist/my-podcasts/scripts/fp-digest")
         persist_dir.mkdir(parents=True, exist_ok=True)
@@ -409,7 +420,7 @@ def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) ->
             context_scripts.append(f.read_text(encoding="utf-8"))
 
     click.echo("Generating script...")
-    script = generate_rundown_script(
+    writer_output = generate_rundown_script(
         themes=plan.themes,
         articles_by_theme=articles_by_theme,
         date_str=date_str,
@@ -417,7 +428,9 @@ def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) ->
     )
 
     script_file = work_dir / "script.txt"
-    script_file.write_text(script, encoding="utf-8")
+    script_file.write_text(writer_output.script, encoding="utf-8")
+    summary_file = work_dir / "summary.txt"
+    summary_file.write_text(writer_output.summary, encoding="utf-8")
 
     click.echo(f"Dry run complete. Script saved to: {script_file}")
     click.echo(f"Work directory: {work_dir}")
@@ -491,7 +504,7 @@ def _the_rundown_full_run(date_str: str, lookback_override: int | None = None) -
                 context_scripts.append(f.read_text(encoding="utf-8"))
 
         click.echo("Generating script...")
-        script = generate_rundown_script(
+        writer_output = generate_rundown_script(
             themes=plan.themes,
             articles_by_theme=articles_by_theme,
             date_str=date_str,
@@ -499,10 +512,19 @@ def _the_rundown_full_run(date_str: str, lookback_override: int | None = None) -
         )
 
         script_file = work_dir / "script.txt"
-        script_file.write_text(script, encoding="utf-8")
+        script_file.write_text(writer_output.script, encoding="utf-8")
+        summary_file = work_dir / "summary.txt"
+        summary_file.write_text(writer_output.summary, encoding="utf-8")
 
         click.echo("Running TTS...")
-        process_things_happen_job(job, store, r2_client, script_path=script_file)
+        process_things_happen_job(
+            job,
+            store,
+            r2_client,
+            script_path=script_file,
+            work_dir=work_dir,
+            summary=writer_output.summary,
+        )
         store.mark_the_rundown_completed(job["id"])
 
         persist_dir = Path("/persist/my-podcasts/scripts/the-rundown")

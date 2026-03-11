@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import uuid
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from pipeline.db import Episode
 from pipeline.feed import regenerate_and_upload_feed
+from pipeline.show_notes import extract_show_notes_articles
 
 
 if TYPE_CHECKING:
@@ -48,6 +50,8 @@ def process_fp_digest_job(
     store: StateStore,
     r2_client: R2Client,
     script_path: Path,
+    work_dir: Path | None = None,
+    summary: str | None = None,
 ) -> None:
     """Process a single pending Foreign Policy Digest job."""
     job_id = job["id"]
@@ -87,6 +91,12 @@ def process_fp_digest_job(
         duration_seconds = _parse_duration_seconds(output_mp3)
 
     # Step 5: Insert episode.
+    articles_json_str: str | None = None
+    if work_dir is not None:
+        articles = extract_show_notes_articles(work_dir)
+        if articles:
+            articles_json_str = json.dumps(articles)
+
     episode_title = f"{date_str} - Foreign Policy Digest"
     episode = Episode(
         id=str(uuid.uuid4()),
@@ -101,6 +111,8 @@ def process_fp_digest_job(
         source_url=None,
         size_bytes=size_bytes,
         duration_seconds=duration_seconds,
+        summary=summary,
+        articles_json=articles_json_str,
     )
     store.insert_episode(episode)
 

@@ -281,8 +281,19 @@ def consume_forever(
                                 print(
                                     f"Processing Rundown job with script: {job['id']} ({job['date_str']})"
                                 )
+                                summary_text = None
+                                summary_path = work_dir / "summary.txt"
+                                if summary_path.exists():
+                                    summary_text = summary_path.read_text(
+                                        encoding="utf-8"
+                                    )
                                 process_things_happen_job(
-                                    job, store, r2_client, script_path=script_file
+                                    job,
+                                    store,
+                                    r2_client,
+                                    script_path=script_file,
+                                    work_dir=work_dir,
+                                    summary=summary_text,
                                 )
                                 store.mark_the_rundown_completed(job["id"])
                                 print(f"Completed Rundown job: {job['id']}")
@@ -350,14 +361,17 @@ def consume_forever(
                             for f in sorted(context_dir.glob("*.txt"), reverse=True):
                                 context_scripts.append(f.read_text(encoding="utf-8"))
 
-                        script = generate_rundown_script(
+                        writer_output = generate_rundown_script(
                             themes=plan.themes,
                             articles_by_theme=rundown_articles_by_theme,
                             date_str=job["date_str"],
                             context_scripts=context_scripts,
                         )
                         script_file.parent.mkdir(parents=True, exist_ok=True)
-                        script_file.write_text(script, encoding="utf-8")
+                        script_file.write_text(writer_output.script, encoding="utf-8")
+                        # Save summary for the processor
+                        summary_file = work_dir / "summary.txt"
+                        summary_file.write_text(writer_output.summary, encoding="utf-8")
                         # Next loop will pick up the script and run TTS
 
                 except Exception as exc:
@@ -387,8 +401,17 @@ def consume_forever(
                                 f"Processing FP digest with script: "
                                 f"{job['id']} ({job['date_str']})"
                             )
+                            summary_text = None
+                            summary_path = work_dir / "summary.txt"
+                            if summary_path.exists():
+                                summary_text = summary_path.read_text(encoding="utf-8")
                             process_fp_digest_job(
-                                job, store, r2_client, script_path=script_file
+                                job,
+                                store,
+                                r2_client,
+                                script_path=script_file,
+                                work_dir=work_dir,
+                                summary=summary_text,
                             )
                             print(f"Completed FP digest: {job['id']}")
                         # Copy to persistent storage
@@ -445,14 +468,17 @@ def consume_forever(
                             for f in sorted(context_dir.glob("*.txt"), reverse=True):
                                 context_scripts.append(f.read_text(encoding="utf-8"))
 
-                        script = generate_fp_script(
+                        writer_output = generate_fp_script(
                             themes=plan.themes,
                             articles_by_theme=articles_by_theme,
                             date_str=job["date_str"],
                             context_scripts=context_scripts,
                         )
                         script_file.parent.mkdir(parents=True, exist_ok=True)
-                        script_file.write_text(script, encoding="utf-8")
+                        script_file.write_text(writer_output.script, encoding="utf-8")
+                        # Save summary for the processor
+                        summary_file = work_dir / "summary.txt"
+                        summary_file.write_text(writer_output.summary, encoding="utf-8")
                         # Next loop will pick up the script and run TTS
                 except Exception as exc:
                     print(f"Failed FP digest job {job['id']}: {exc}")

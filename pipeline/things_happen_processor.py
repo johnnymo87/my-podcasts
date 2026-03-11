@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from pipeline.article_fetcher import fetch_all_articles
 from pipeline.db import Episode
 from pipeline.feed import regenerate_and_upload_feed
+from pipeline.show_notes import extract_show_notes_articles
 from pipeline.summarizer import generate_briefing_script
 from pipeline.things_happen_extractor import resolve_redirect_url
 
@@ -52,6 +53,8 @@ def process_things_happen_job(
     store: StateStore,
     r2_client: R2Client,
     script_path: Path | None = None,
+    work_dir: Path | None = None,
+    summary: str | None = None,
 ) -> None:
     """Process a single pending Things Happen job."""
     job_id = job["id"]
@@ -101,6 +104,12 @@ def process_things_happen_job(
         duration_seconds = _parse_duration_seconds(output_mp3)
 
     # Step 5: Insert episode and mark job complete.
+    articles_json_str: str | None = None
+    if work_dir is not None:
+        articles = extract_show_notes_articles(work_dir)
+        if articles:
+            articles_json_str = json.dumps(articles)
+
     episode_title = f"{date_str} - The Rundown"
     episode = Episode(
         id=str(uuid.uuid4()),
@@ -115,6 +124,8 @@ def process_things_happen_job(
         source_url=None,
         size_bytes=size_bytes,
         duration_seconds=duration_seconds,
+        summary=summary,
+        articles_json=articles_json_str,
     )
     store.insert_episode(episode)
     store.mark_things_happen_completed(job_id)
