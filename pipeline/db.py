@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS episodes (
     source_url TEXT,
     size_bytes INTEGER NOT NULL,
     duration_seconds INTEGER,
+    summary TEXT,
+    articles_json TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
