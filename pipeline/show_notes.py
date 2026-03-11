@@ -77,6 +77,12 @@ def _find_article_file(headline: str, source: str, work_dir: Path) -> Path | Non
     if exa_file.exists():
         return exa_file
 
+    # RSS enrichment (Zvi AI perspectives)
+    rss_enrich_dir = work_dir / "enrichment" / "rss"
+    if rss_enrich_dir.exists():
+        for match in rss_enrich_dir.glob(f"*{slug}*.md"):
+            return match
+
     return None
 
 
