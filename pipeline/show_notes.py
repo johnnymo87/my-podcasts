@@ -36,6 +36,8 @@ def _find_article_file(headline: str, source: str, work_dir: Path) -> Path | Non
     __main__._find_rundown_article_text functions.
     """
     slug = _slugify(headline)
+    if not slug:
+        return None
 
     # Flat Levine-style articles (e.g. "00-headline.md")
     articles_dir = work_dir / "articles"
