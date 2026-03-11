@@ -3,9 +3,11 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from pipeline.rundown_writer import (
+    WriterOutput,
     _strip_preamble,
     build_rundown_prompt,
     generate_rundown_script,
+    parse_summary,
 )
 
 
@@ -67,7 +69,8 @@ def test_generate_script(
         date_str="2026-03-10",
     )
 
-    assert result == "Generated podcast script here"
+    assert result.script == "Generated podcast script here"
+    assert result.summary == ""
     mock_create.assert_called_once()
     mock_send.assert_called_once()
     mock_wait.assert_called_once_with("ses_123", timeout=120)
@@ -117,7 +120,8 @@ def test_generate_script_strips_preamble(
         date_str="2026-03-10",
     )
 
-    assert result == "Hey, welcome to The Rundown."
+    assert result.script == "Hey, welcome to The Rundown."
+    assert result.summary == ""
 
 
 def test_strip_preamble_removes_meta_text():
@@ -137,3 +141,24 @@ def test_strip_preamble_ignores_late_separator():
     lines.append("After separator")
     raw = "\n".join(lines)
     assert _strip_preamble(raw) == raw
+
+
+def test_parse_summary_extracts_tags():
+    text = "<summary>A brief summary.</summary>\n\nHey, welcome to The Rundown."
+    result = parse_summary(text)
+    assert result.summary == "A brief summary."
+    assert result.script == "Hey, welcome to The Rundown."
+
+
+def test_parse_summary_no_tags():
+    text = "Hey, welcome to The Rundown."
+    result = parse_summary(text)
+    assert result.summary == ""
+    assert result.script == "Hey, welcome to The Rundown."
+
+
+def test_parse_summary_multiline():
+    text = "<summary>\nLine one.\nLine two.\n</summary>\n\nThe script."
+    result = parse_summary(text)
+    assert result.summary == "Line one.\nLine two."
+    assert result.script == "The script."

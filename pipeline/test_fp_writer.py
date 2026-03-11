@@ -84,7 +84,8 @@ def test_generate_fp_script(monkeypatch) -> None:
     articles_by_theme = {"Iran Nuclear Deal": ["Iran talks resumed in Vienna."]}
     result = generate_fp_script(themes, articles_by_theme, date_str="2026-03-06")
 
-    assert "foreign policy briefing" in result
+    assert "foreign policy briefing" in result.script
+    assert result.summary == ""
 
 
 def test_generate_fp_script_timeout(monkeypatch) -> None:

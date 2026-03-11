@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pipeline.rundown_writer import WriterOutput, parse_summary
+
 from pipeline.opencode_client import (
     create_session,
     delete_session,
@@ -102,13 +104,14 @@ def generate_fp_script(
     articles_by_theme: dict[str, list[str]],
     date_str: str,
     context_scripts: list[str] | None = None,
-) -> str:
+) -> WriterOutput:
     """Generate a FP podcast script via the shared opencode server."""
     prompt = build_fp_prompt(themes, articles_by_theme, date_str, context_scripts)
 
     instruction = (
         "Read the following prompt and generate the podcast briefing script. "
-        "Output ONLY the script text, nothing else.\n\n" + prompt
+        "First, write a 2-3 sentence summary of today's episode wrapped in "
+        "<summary>...</summary> tags. Then write the full script text.\n\n" + prompt
     )
 
     session_id = create_session()
@@ -119,6 +122,7 @@ def generate_fp_script(
             raise RuntimeError("opencode session did not complete within 120 seconds")
 
         messages = get_messages(session_id)
-        return get_last_assistant_text(messages).strip()
+        raw = get_last_assistant_text(messages).strip()
+        return parse_summary(raw)
     finally:
         delete_session(session_id)

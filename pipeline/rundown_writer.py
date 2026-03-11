@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
+
 from pipeline.opencode_client import (
     create_session,
     delete_session,
@@ -103,6 +106,27 @@ def build_rundown_prompt(
     )
 
 
+@dataclass(frozen=True)
+class WriterOutput:
+    script: str
+    summary: str
+
+
+def parse_summary(text: str) -> WriterOutput:
+    """Extract <summary>...</summary> block from writer output.
+
+    Returns WriterOutput with summary and the remaining script text.
+    If no summary tags found, summary is empty string.
+    """
+    match = re.search(r"<summary>\s*(.*?)\s*</summary>", text, re.DOTALL)
+    if match:
+        summary = match.group(1).strip()
+        script = text[: match.start()] + text[match.end() :]
+        script = script.strip()
+        return WriterOutput(script=script, summary=summary)
+    return WriterOutput(script=text, summary="")
+
+
 def _strip_preamble(text: str) -> str:
     """Remove LLM preamble before the actual script.
 
@@ -125,13 +149,14 @@ def generate_rundown_script(
     articles_by_theme: dict[str, list[str]],
     date_str: str,
     context_scripts: list[str] | None = None,
-) -> str:
+) -> WriterOutput:
     """Generate a Rundown podcast script via the shared opencode server."""
     prompt = build_rundown_prompt(themes, articles_by_theme, date_str, context_scripts)
 
     instruction = (
         "Read the following prompt and generate the podcast briefing script. "
-        "Output ONLY the script text, nothing else.\n\n" + prompt
+        "First, write a 2-3 sentence summary of today's episode wrapped in "
+        "<summary>...</summary> tags. Then write the full script text.\n\n" + prompt
     )
 
     session_id = create_session()
@@ -142,6 +167,7 @@ def generate_rundown_script(
             raise RuntimeError("opencode session did not complete within 120 seconds")
 
         messages = get_messages(session_id)
-        return _strip_preamble(get_last_assistant_text(messages).strip())
+        raw = _strip_preamble(get_last_assistant_text(messages).strip())
+        return parse_summary(raw)
     finally:
         delete_session(session_id)
