@@ -470,6 +470,7 @@ def _the_rundown_full_run(date_str: str, lookback_override: int | None = None) -
 
         lookback = lookback_override or _compute_lookback(store, "the-rundown")
         work_dir = Path(f"/tmp/the-rundown-{job['id']}")
+        rundown_coverage = store.recent_coverage_summary("the-rundown", days=3)
         click.echo("Collecting sources...")
         collect_all_artifacts(
             job["id"],
@@ -479,6 +480,7 @@ def _the_rundown_full_run(date_str: str, lookback_override: int | None = None) -
             zvi_cache_dir=Path("/persist/my-podcasts/zvi-cache"),
             fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
             lookback_days=lookback,
+            coverage_summary=rundown_coverage,
         )
 
         plan_path = work_dir / "plan.json"

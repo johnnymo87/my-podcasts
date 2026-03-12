@@ -7,6 +7,11 @@ from zoneinfo import ZoneInfo
 
 from pipeline.article_fetcher import fetch_all_articles
 from pipeline.exa_client import search_related
+from pipeline.freshness import (
+    annotate_headlines,
+    classify_headlines,
+    format_coverage_ledger,
+)
 from pipeline.rss_sources import categorize_semafor_article
 from pipeline.things_happen_editor import generate_rundown_research_plan
 from pipeline.things_happen_extractor import resolve_redirect_url
@@ -31,6 +36,7 @@ def collect_all_artifacts(
     zvi_cache_dir: Path | None = None,
     semafor_cache_dir: Path | None = None,
     lookback_days: int = 2,
+    coverage_summary: list[dict] | None = None,
 ) -> None:
     """
     Phase 1: Fetch articles and setup directories.
@@ -159,8 +165,20 @@ def collect_all_artifacts(
                 # Read and write instead of symlink to avoid cross-device link issues
                 target.write_text(script.read_text(encoding="utf-8"))
 
+    # Freshness annotation
+    coverage_ledger: str | None = None
+    if coverage_summary:
+        classifications = classify_headlines(headlines_with_snippets, coverage_summary)
+        headlines_with_snippets = annotate_headlines(
+            headlines_with_snippets, classifications, coverage_summary
+        )
+        coverage_ledger = format_coverage_ledger(coverage_summary)
+
     # Phase 2: Editor AI
-    plan = generate_rundown_research_plan(headlines_with_snippets)
+    plan = generate_rundown_research_plan(
+        headlines_with_snippets,
+        coverage_ledger=coverage_ledger,
+    )
 
     # Write plan.json
     plan_path = work_dir / "plan.json"

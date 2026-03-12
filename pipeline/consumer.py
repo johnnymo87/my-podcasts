@@ -322,6 +322,9 @@ def consume_forever(
                             f"{job['id']} ({job['date_str']})"
                         )
                         rundown_lookback = _compute_lookback(store, "the-rundown")
+                        rundown_coverage = store.recent_coverage_summary(
+                            "the-rundown", days=3
+                        )
                         collect_all_artifacts(
                             job["id"],
                             work_dir,
@@ -332,6 +335,7 @@ def consume_forever(
                             zvi_cache_dir=Path("/persist/my-podcasts/zvi-cache"),
                             fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
                             lookback_days=rundown_lookback,
+                            coverage_summary=rundown_coverage,
                         )
 
                         plan_path = work_dir / "plan.json"
