@@ -11,7 +11,10 @@ from typing import TYPE_CHECKING
 
 from pipeline.db import Episode
 from pipeline.feed import regenerate_and_upload_feed
-from pipeline.show_notes import extract_show_notes_articles
+from pipeline.show_notes import (
+    extract_show_notes_articles,
+    filter_show_notes_by_coverage,
+)
 
 
 if TYPE_CHECKING:
@@ -94,6 +97,14 @@ def process_fp_digest_job(
     articles_json_str: str | None = None
     if work_dir is not None:
         articles = extract_show_notes_articles(work_dir)
+        # Filter by covered headlines if the writer declared what it covered
+        covered_path = work_dir / "covered.json"
+        if covered_path.exists():
+            try:
+                covered = json.loads(covered_path.read_text(encoding="utf-8"))
+                articles = filter_show_notes_by_coverage(articles, covered)
+            except (json.JSONDecodeError, OSError):
+                pass
         if articles:
             articles_json_str = json.dumps(articles)
 

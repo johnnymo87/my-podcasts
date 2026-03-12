@@ -380,6 +380,15 @@ def consume_forever(
                         # Save summary for the processor
                         summary_file = work_dir / "summary.txt"
                         summary_file.write_text(writer_output.summary, encoding="utf-8")
+                        # Save covered headlines for show notes filtering
+                        if writer_output.covered_headlines:
+                            import json as _json
+
+                            covered_file = work_dir / "covered.json"
+                            covered_file.write_text(
+                                _json.dumps(writer_output.covered_headlines),
+                                encoding="utf-8",
+                            )
                         # Next loop will pick up the script and run TTS
 
                 except Exception as exc:
@@ -491,6 +500,15 @@ def consume_forever(
                         # Save summary for the processor
                         summary_file = work_dir / "summary.txt"
                         summary_file.write_text(writer_output.summary, encoding="utf-8")
+                        # Save covered headlines for show notes filtering
+                        if writer_output.covered_headlines:
+                            import json as _json
+
+                            covered_file = work_dir / "covered.json"
+                            covered_file.write_text(
+                                _json.dumps(writer_output.covered_headlines),
+                                encoding="utf-8",
+                            )
                         # Next loop will pick up the script and run TTS
                 except Exception as exc:
                     print(f"Failed FP digest job {job['id']}: {exc}")

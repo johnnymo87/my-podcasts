@@ -153,3 +153,97 @@ def test_process_fp_digest_with_show_notes(tmp_path, monkeypatch) -> None:
     assert articles[0]["url"] == "https://example.com/gaza"
 
     store.close()
+
+
+def test_process_fp_filters_by_covered_headlines(tmp_path, monkeypatch) -> None:
+    """When covered.json exists, FP show notes only include covered stories."""
+    from pipeline.db import StateStore
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+
+    past = (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()
+    store._conn.execute(
+        """INSERT INTO pending_fp_digest
+           (id, date_str, process_after, status)
+           VALUES (?, ?, ?, ?)""",
+        ("fp-cov", "2026-03-10", past, "pending"),
+    )
+    store._conn.commit()
+
+    work_dir = tmp_path / "fp_work"
+    work_dir.mkdir()
+    plan = {
+        "themes": ["Middle East", "Africa"],
+        "directives": [
+            {
+                "headline": "Gaza Ceasefire Talks",
+                "source": "semafor",
+                "priority": 1,
+                "theme": "Middle East",
+                "needs_exa": False,
+                "exa_query": "",
+                "include_in_episode": True,
+            },
+            {
+                "headline": "Mali Conflict Escalates",
+                "source": "homepage/africa",
+                "priority": 1,
+                "theme": "Africa",
+                "needs_exa": False,
+                "exa_query": "",
+                "include_in_episode": True,
+            },
+        ],
+    }
+    (work_dir / "plan.json").write_text(json.dumps(plan))
+    semafor_dir = work_dir / "articles" / "semafor"
+    semafor_dir.mkdir(parents=True)
+    (semafor_dir / "gaza-ceasefire-talks.md").write_text(
+        "# Gaza Ceasefire Talks\n\nURL: https://example.com/gaza\n\nText."
+    )
+    homepage_dir = work_dir / "articles" / "homepage" / "africa"
+    homepage_dir.mkdir(parents=True)
+    (homepage_dir / "mali-conflict-escalates.md").write_text(
+        "# Mali Conflict Escalates\n\nURL: https://example.com/mali\n\nText."
+    )
+
+    # Writer only covered Gaza
+    (work_dir / "covered.json").write_text(json.dumps(["Gaza Ceasefire Talks"]))
+
+    script_file = tmp_path / "fp_cov_script.txt"
+    script_file.write_text("The FP briefing.", encoding="utf-8")
+
+    def fake_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "ttsjoin":
+            output_file = cmd[cmd.index("--output-file") + 1]
+            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
+            return subprocess.CompletedProcess(cmd, 0)
+        if cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(cmd, 0, stdout="120.0\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(
+        "pipeline.fp_processor.regenerate_and_upload_feed",
+        lambda store, r2_client: None,
+    )
+
+    job = store.list_due_fp_digest()[0]
+    process_fp_digest_job(
+        job,
+        store,
+        r2_client,
+        script_path=script_file,
+        work_dir=work_dir,
+        summary="FP summary.",
+    )
+
+    episodes = store.list_episodes(feed_slug="fp-digest")
+    assert len(episodes) == 1
+    articles = json.loads(episodes[0].articles_json)
+    # Only Gaza should appear, not Mali
+    assert len(articles) == 1
+    assert articles[0]["title"] == "Gaza Ceasefire Talks"
+
+    store.close()

@@ -12,7 +12,10 @@ from typing import TYPE_CHECKING
 from pipeline.article_fetcher import fetch_all_articles
 from pipeline.db import Episode
 from pipeline.feed import regenerate_and_upload_feed
-from pipeline.show_notes import extract_show_notes_articles
+from pipeline.show_notes import (
+    extract_show_notes_articles,
+    filter_show_notes_by_coverage,
+)
 from pipeline.summarizer import generate_briefing_script
 from pipeline.things_happen_extractor import resolve_redirect_url
 
@@ -107,6 +110,14 @@ def process_things_happen_job(
     articles_json_str: str | None = None
     if work_dir is not None:
         articles = extract_show_notes_articles(work_dir)
+        # Filter by covered headlines if the writer declared what it covered
+        covered_path = work_dir / "covered.json"
+        if covered_path.exists():
+            try:
+                covered = json.loads(covered_path.read_text(encoding="utf-8"))
+                articles = filter_show_notes_by_coverage(articles, covered)
+            except (json.JSONDecodeError, OSError):
+                pass
         if articles:
             articles_json_str = json.dumps(articles)
 

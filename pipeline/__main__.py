@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -230,6 +231,11 @@ def _fp_digest_dry_run(date_str: str, lookback_override: int | None = None) -> N
     script_file.write_text(writer_output.script, encoding="utf-8")
     summary_file = work_dir / "summary.txt"
     summary_file.write_text(writer_output.summary, encoding="utf-8")
+    if writer_output.covered_headlines:
+        covered_file = work_dir / "covered.json"
+        covered_file.write_text(
+            json.dumps(writer_output.covered_headlines), encoding="utf-8"
+        )
 
     click.echo(f"Dry run complete. Script saved to: {script_file}")
     click.echo(f"Work directory: {work_dir}")
@@ -319,6 +325,11 @@ def _fp_digest_full_run(date_str: str, lookback_override: int | None = None) -> 
         script_file.write_text(writer_output.script, encoding="utf-8")
         summary_file = work_dir / "summary.txt"
         summary_file.write_text(writer_output.summary, encoding="utf-8")
+        if writer_output.covered_headlines:
+            covered_file = work_dir / "covered.json"
+            covered_file.write_text(
+                json.dumps(writer_output.covered_headlines), encoding="utf-8"
+            )
 
         click.echo("Running TTS...")
         process_fp_digest_job(
@@ -435,6 +446,11 @@ def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) ->
     script_file.write_text(writer_output.script, encoding="utf-8")
     summary_file = work_dir / "summary.txt"
     summary_file.write_text(writer_output.summary, encoding="utf-8")
+    if writer_output.covered_headlines:
+        covered_file = work_dir / "covered.json"
+        covered_file.write_text(
+            json.dumps(writer_output.covered_headlines), encoding="utf-8"
+        )
 
     click.echo(f"Dry run complete. Script saved to: {script_file}")
     click.echo(f"Work directory: {work_dir}")
@@ -523,6 +539,11 @@ def _the_rundown_full_run(date_str: str, lookback_override: int | None = None) -
         script_file.write_text(writer_output.script, encoding="utf-8")
         summary_file = work_dir / "summary.txt"
         summary_file.write_text(writer_output.summary, encoding="utf-8")
+        if writer_output.covered_headlines:
+            covered_file = work_dir / "covered.json"
+            covered_file.write_text(
+                json.dumps(writer_output.covered_headlines), encoding="utf-8"
+            )
 
         click.echo("Running TTS...")
         process_things_happen_job(

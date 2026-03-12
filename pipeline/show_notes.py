@@ -88,6 +88,65 @@ def _find_article_file(headline: str, source: str, work_dir: Path) -> Path | Non
     return None
 
 
+def _tokenize(text: str) -> set[str]:
+    """Lowercase words of 3+ chars, for fuzzy headline matching."""
+    return {w for w in text.lower().split() if len(w) >= 3}
+
+
+def _headlines_match(article_title: str, covered_headline: str) -> bool:
+    """Check if a covered headline matches an article title.
+
+    Uses case-insensitive exact match first, then falls back to
+    word-overlap: if >=50% of the shorter headline's significant words
+    appear in the longer one, it's a match.
+    """
+    a_lower = article_title.lower()
+    c_lower = covered_headline.lower()
+
+    # Exact match
+    if a_lower == c_lower:
+        return True
+
+    # Substring containment (either direction)
+    if a_lower in c_lower or c_lower in a_lower:
+        return True
+
+    # Word overlap: require >=50% of the shorter headline's words AND
+    # at least 2 shared words to avoid false positives on short headlines.
+    a_words = _tokenize(article_title)
+    c_words = _tokenize(covered_headline)
+    if not a_words or not c_words:
+        return False
+    shorter, longer = (
+        (a_words, c_words) if len(a_words) <= len(c_words) else (c_words, a_words)
+    )
+    overlap = len(shorter & longer)
+    return overlap >= 2 and overlap >= len(shorter) * 0.5
+
+
+def filter_show_notes_by_coverage(
+    articles: list[dict],
+    covered_headlines: list[str],
+) -> list[dict]:
+    """Filter show notes articles to only those the writer actually covered.
+
+    If covered_headlines is empty, returns all articles (no filtering).
+    Matching is fuzzy: case-insensitive, with substring and word-overlap
+    fallbacks.
+    """
+    if not covered_headlines:
+        return articles
+
+    return [
+        article
+        for article in articles
+        if any(
+            _headlines_match(article["title"], headline)
+            for headline in covered_headlines
+        )
+    ]
+
+
 def extract_show_notes_articles(work_dir: Path) -> list[dict]:
     """Extract article titles, URLs, and themes from a work directory.
 

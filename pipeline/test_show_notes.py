@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 
-from pipeline.show_notes import extract_show_notes_articles
+from pipeline.show_notes import (
+    extract_show_notes_articles,
+    filter_show_notes_by_coverage,
+)
 
 
 def test_extract_rundown_articles(tmp_path) -> None:
@@ -206,3 +209,77 @@ def test_extract_orders_by_theme_then_priority(tmp_path) -> None:
     # B Theme comes first (index 0 in themes), then A Theme
     # Within B Theme, priority 1 (B1) before priority 2 (B2)
     assert titles == ["B1", "B2", "A1"]
+
+
+# --- filter_show_notes_by_coverage tests ---
+
+
+def test_filter_exact_match() -> None:
+    """Exact headline matches are kept."""
+    articles = [
+        {"title": "Deutsche Bank Exposure", "url": "https://a.com", "theme": "Finance"},
+        {"title": "Sunday Robotics", "url": "https://b.com", "theme": "Tech"},
+        {"title": "Chen Zhi Scam", "url": "https://c.com", "theme": "Crime"},
+    ]
+    covered = ["Deutsche Bank Exposure", "Sunday Robotics"]
+    result = filter_show_notes_by_coverage(articles, covered)
+    assert [r["title"] for r in result] == ["Deutsche Bank Exposure", "Sunday Robotics"]
+
+
+def test_filter_case_insensitive() -> None:
+    """Matching is case-insensitive."""
+    articles = [
+        {"title": "Oil Markets Wild Ride", "url": "https://a.com", "theme": "Energy"},
+    ]
+    covered = ["oil markets wild ride"]
+    result = filter_show_notes_by_coverage(articles, covered)
+    assert len(result) == 1
+    assert result[0]["title"] == "Oil Markets Wild Ride"
+
+
+def test_filter_empty_covered_returns_all() -> None:
+    """When covered_headlines is empty, all articles are returned (no filtering)."""
+    articles = [
+        {"title": "Story A", "url": "https://a.com", "theme": "T1"},
+        {"title": "Story B", "url": "https://b.com", "theme": "T2"},
+    ]
+    result = filter_show_notes_by_coverage(articles, [])
+    assert len(result) == 2
+
+
+def test_filter_no_match_returns_empty() -> None:
+    """When nothing matches, nothing is returned."""
+    articles = [
+        {"title": "Completely Different", "url": "https://a.com", "theme": "T1"},
+    ]
+    covered = ["Some Other Story"]
+    result = filter_show_notes_by_coverage(articles, covered)
+    assert result == []
+
+
+def test_filter_substring_match() -> None:
+    """Covered headline that is a substring of the article title matches."""
+    articles = [
+        {
+            "title": "Gene-Tweaked Banana Startup Tropic Secures $105 Million",
+            "url": "https://a.com",
+            "theme": "Tech",
+        },
+    ]
+    covered = ["Tropic gene-edited banana startup"]
+    result = filter_show_notes_by_coverage(articles, covered)
+    # Substring match: "tropic" appears in the article title
+    assert len(result) == 1
+
+
+def test_filter_preserves_order() -> None:
+    """Filtered list preserves the original article order."""
+    articles = [
+        {"title": "First Story", "url": "https://a.com", "theme": "T1"},
+        {"title": "Second Story", "url": "https://b.com", "theme": "T2"},
+        {"title": "Third Story", "url": "https://c.com", "theme": "T3"},
+    ]
+    covered = ["Third Story", "First Story"]
+    result = filter_show_notes_by_coverage(articles, covered)
+    # Original order preserved, not covered order
+    assert [r["title"] for r in result] == ["First Story", "Third Story"]

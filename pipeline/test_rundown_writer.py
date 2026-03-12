@@ -7,6 +7,7 @@ from pipeline.rundown_writer import (
     _extract_script,
     build_rundown_prompt,
     generate_rundown_script,
+    parse_covered,
     parse_summary,
 )
 
@@ -197,6 +198,109 @@ def test_generate_rundown_returns_writer_output_with_summary(
     assert isinstance(result, WriterOutput)
     assert result.summary == "Today's summary."
     assert result.script == "The script text."
+
+
+def test_parse_covered_extracts_headlines():
+    """<covered> tags extract a list of headlines."""
+    text = (
+        "<covered>\n"
+        "- Deutsche Bank Flags $30 Billion Exposure to Private Credit\n"
+        "- Sunday Robotics Dishwashing Robot\n"
+        "- ChatGPT Practiced Law Badly\n"
+        "</covered>"
+    )
+    result = parse_covered(text)
+    assert result == [
+        "Deutsche Bank Flags $30 Billion Exposure to Private Credit",
+        "Sunday Robotics Dishwashing Robot",
+        "ChatGPT Practiced Law Badly",
+    ]
+
+
+def test_parse_covered_no_tags_returns_empty():
+    """Without <covered> tags, returns empty list."""
+    text = "Hey, welcome to The Rundown."
+    result = parse_covered(text)
+    assert result == []
+
+
+def test_parse_covered_strips_whitespace():
+    """Headlines are stripped of leading/trailing whitespace and dashes."""
+    text = "<covered>\n  - Some Headline  \n  Another Headline\n- Third One\n</covered>"
+    result = parse_covered(text)
+    assert result == ["Some Headline", "Another Headline", "Third One"]
+
+
+def test_parse_covered_skips_empty_lines():
+    """Empty lines inside <covered> are ignored."""
+    text = "<covered>\n- Headline One\n\n- Headline Two\n\n</covered>"
+    result = parse_covered(text)
+    assert result == ["Headline One", "Headline Two"]
+
+
+def test_writer_output_has_covered_headlines():
+    """WriterOutput includes covered_headlines field."""
+    wo = WriterOutput(
+        script="The script.",
+        summary="A summary.",
+        covered_headlines=["Story A", "Story B"],
+    )
+    assert wo.covered_headlines == ["Story A", "Story B"]
+
+
+def test_writer_output_covered_defaults_empty():
+    """WriterOutput.covered_headlines defaults to empty list."""
+    wo = WriterOutput(script="The script.", summary="A summary.")
+    assert wo.covered_headlines == []
+
+
+@patch("pipeline.rundown_writer.delete_session")
+@patch("pipeline.rundown_writer.get_last_assistant_text")
+@patch("pipeline.rundown_writer.get_messages")
+@patch("pipeline.rundown_writer.wait_for_idle")
+@patch("pipeline.rundown_writer.send_prompt_async")
+@patch("pipeline.rundown_writer.create_session")
+def test_generate_script_parses_covered_tags(
+    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete
+):
+    """generate_rundown_script populates covered_headlines from <covered> tags."""
+    mock_create.return_value = "ses_cov"
+    mock_wait.return_value = True
+    mock_messages.return_value = [{"role": "assistant", "parts": []}]
+    mock_text.return_value = (
+        "<summary>Markets and AI today.</summary>\n\n"
+        "<covered>\n"
+        "- Deutsche Bank Exposure\n"
+        "- ChatGPT Lawsuit\n"
+        "</covered>\n\n"
+        "<script>Hey, welcome to The Rundown.</script>"
+    )
+
+    result = generate_rundown_script(
+        themes=["Finance"],
+        articles_by_theme={"Finance": ["Article"]},
+        date_str="2026-03-12",
+    )
+
+    assert result.script == "Hey, welcome to The Rundown."
+    assert result.summary == "Markets and AI today."
+    assert result.covered_headlines == ["Deutsche Bank Exposure", "ChatGPT Lawsuit"]
+
+
+def test_generate_script_prompt_asks_for_covered_tags():
+    """The Rundown prompt instructs the writer to emit <covered> tags."""
+    prompt = build_rundown_prompt(
+        themes=["Tech"],
+        articles_by_theme={"Tech": ["Article"]},
+        date_str="2026-03-12",
+    )
+    # The instruction is prepended in generate_rundown_script, not in the prompt
+    # itself. Check the instruction text instead.
+    from pipeline.rundown_writer import generate_rundown_script
+    import inspect
+
+    source = inspect.getsource(generate_rundown_script)
+    assert "<covered>" in source
 
 
 def test_rundown_editor_uses_coverage_ledger_over_scripts(monkeypatch):

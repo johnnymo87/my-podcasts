@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pipeline.opencode_client import (
     create_session,
@@ -110,6 +110,7 @@ def build_rundown_prompt(
 class WriterOutput:
     script: str
     summary: str
+    covered_headlines: list[str] = field(default_factory=list)
 
 
 def parse_summary(text: str) -> WriterOutput:
@@ -125,6 +126,23 @@ def parse_summary(text: str) -> WriterOutput:
         script = script.strip()
         return WriterOutput(script=script, summary=summary)
     return WriterOutput(script=text, summary="")
+
+
+def parse_covered(text: str) -> list[str]:
+    """Extract covered headlines from ``<covered>...</covered>`` tags.
+
+    Returns a list of headline strings.  Lines are stripped of leading
+    dashes and whitespace.  Empty lines are skipped.
+    """
+    m = re.search(r"<covered>\s*(.*?)\s*</covered>", text, re.DOTALL)
+    if not m:
+        return []
+    headlines: list[str] = []
+    for line in m.group(1).splitlines():
+        cleaned = line.strip().lstrip("-").strip()
+        if cleaned:
+            headlines.append(cleaned)
+    return headlines
 
 
 def _extract_script(text: str) -> str:
@@ -149,10 +167,14 @@ def generate_rundown_script(
     instruction = (
         "Read the following prompt and generate the podcast briefing script. "
         "First, write a 2-3 sentence summary of today's episode wrapped in "
-        "<summary>...</summary> tags. Then write the full spoken script wrapped in "
+        "<summary>...</summary> tags. "
+        "Then list the headlines of the stories you actually cover in the script, "
+        "wrapped in <covered>...</covered> tags, one headline per line prefixed "
+        "with a dash. Use the exact headlines from the source material. "
+        "Then write the full spoken script wrapped in "
         "<script>...</script> tags. Do NOT include any analysis, reasoning, or "
-        "meta-commentary outside these tags — only the summary and the script "
-        "that will be read aloud.\n\n" + prompt
+        "meta-commentary outside these tags — only the summary, covered list, "
+        "and the script that will be read aloud.\n\n" + prompt
     )
 
     session_id = create_session()
@@ -163,7 +185,14 @@ def generate_rundown_script(
             raise RuntimeError("opencode session did not complete within 120 seconds")
 
         messages = get_messages(session_id)
-        raw = _extract_script(get_last_assistant_text(messages).strip())
-        return parse_summary(raw)
+        full_text = get_last_assistant_text(messages).strip()
+        covered = parse_covered(full_text)
+        summary_result = parse_summary(full_text)
+        script = _extract_script(summary_result.script)
+        return WriterOutput(
+            script=script,
+            summary=summary_result.summary,
+            covered_headlines=covered,
+        )
     finally:
         delete_session(session_id)
