@@ -104,14 +104,14 @@ def test_generate_script_timeout_raises(mock_create, mock_send, mock_wait, mock_
 @patch("pipeline.rundown_writer.wait_for_idle")
 @patch("pipeline.rundown_writer.send_prompt_async")
 @patch("pipeline.rundown_writer.create_session")
-def test_generate_script_strips_preamble(
+def test_generate_script_extracts_script_tags(
     mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete
 ):
     mock_create.return_value = "ses_456"
     mock_wait.return_value = True
     mock_messages.return_value = [{"role": "assistant", "parts": []}]
     mock_text.return_value = (
-        "Let me write the script.\n\n---\n\nHey, welcome to The Rundown."
+        "Let me think.\n\n<script>Hey, welcome to The Rundown.</script>"
     )
 
     result = generate_rundown_script(
@@ -125,7 +125,7 @@ def test_generate_script_strips_preamble(
 
 
 def test_extract_script_with_tags():
-    """<script> tags are the primary extraction method."""
+    """<script> tags extract the spoken script."""
     raw = (
         "Let me analyze what's new.\n\n"
         "<summary>Today covers markets and AI.</summary>\n\n"
@@ -147,51 +147,9 @@ def test_extract_script_tags_with_reasoning():
     )
 
 
-def test_extract_script_removes_meta_text():
-    """Fallback: --- separator still works."""
-    raw = "Now I have enough context.\n\n---\n\nHey, welcome to The Rundown."
-    assert _extract_script(raw) == "Hey, welcome to The Rundown."
-
-
-def test_extract_script_preserves_clean_script():
+def test_extract_script_no_tags_returns_raw():
+    """Without <script> tags, the full text is returned as-is."""
     raw = "Hey, welcome to The Rundown for Monday."
-    assert _extract_script(raw) == raw
-
-
-def test_extract_script_ignores_late_separator():
-    """--- appearing after line 30 is part of the script, not preamble."""
-    lines = ["Line " + str(i) for i in range(32)]
-    lines.append("---")
-    lines.append("After separator")
-    raw = "\n".join(lines)
-    assert _extract_script(raw) == raw
-
-
-def test_extract_script_blank_line_then_greeting():
-    """Preamble without --- is stripped when followed by a spoken greeting."""
-    raw = (
-        "Good, I now have enough context. Let me synthesize.\n"
-        "Here are the new stories.\n"
-        "\n"
-        "Hey, welcome to The Rundown for Thursday."
-    )
-    assert _extract_script(raw) == "Hey, welcome to The Rundown for Thursday."
-
-
-def test_extract_script_blank_line_then_good_morning():
-    """FP-style preamble with 'Good morning' opener."""
-    raw = (
-        "Now I have a comprehensive picture. Let me compose the briefing.\n"
-        "\n"
-        "\n"
-        "Good morning. It's Thursday, March 12th."
-    )
-    assert _extract_script(raw) == "Good morning. It's Thursday, March 12th."
-
-
-def test_extract_script_no_blank_gap_preserved():
-    """Without a blank line gap, no stripping occurs."""
-    raw = "Today we cover markets.\nHey, welcome to the show."
     assert _extract_script(raw) == raw
 
 

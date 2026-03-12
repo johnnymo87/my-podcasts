@@ -128,50 +128,12 @@ def parse_summary(text: str) -> WriterOutput:
 
 
 def _extract_script(text: str) -> str:
-    """Extract the podcast script from LLM output.
-
-    The model is instructed to wrap the spoken script in
-    ``<script>...</script>`` tags.  If those tags are present we extract
-    deterministically.  Otherwise we fall back to heuristics so that
-    older model behaviour (no tags) still works.
-
-    Fallback strategies (tried in order):
-    1. A ``---`` separator in the first 30 lines.
-    2. A blank-line gap followed by a paragraph that looks like spoken
-       script (starts with a greeting or conversational opener).
-    """
+    """Extract the podcast script from ``<script>...</script>`` tags."""
     import re
 
-    # Primary: <script> tags
     m = re.search(r"<script>\s*(.*?)\s*</script>", text, re.DOTALL)
     if m:
         return m.group(1).strip()
-
-    # Fallback 1: explicit --- separator
-    lines = text.split("\n")
-    for i, line in enumerate(lines[:30]):
-        if line.strip() == "---":
-            remainder = "\n".join(lines[i + 1 :]).strip()
-            if remainder:
-                return remainder
-
-    # Fallback 2: blank-line gap then spoken opener
-    script_openers = re.compile(
-        r"^(Hey[,.]?\s|Hi[,.]?\s|Good\s+(morning|evening|afternoon)|"
-        r"Welcome\s|Hello[,.]?\s|It'?s\s+\w+day|Today\s|"
-        r"Happy\s+\w+day|All\s+right|Alright)",
-        re.IGNORECASE,
-    )
-
-    saw_blank = False
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if not stripped:
-            saw_blank = True
-            continue
-        if saw_blank and script_openers.match(stripped):
-            return "\n".join(lines[i:]).strip()
-
     return text
 
 
