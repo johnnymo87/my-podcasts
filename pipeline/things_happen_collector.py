@@ -37,6 +37,7 @@ def collect_all_artifacts(
     semafor_cache_dir: Path | None = None,
     lookback_days: int = 2,
     coverage_summary: list[dict] | None = None,
+    prior_urls: set[str] | None = None,
 ) -> None:
     """
     Phase 1: Fetch articles and setup directories.
@@ -75,6 +76,8 @@ def collect_all_artifacts(
     else:
         print(f"[collector] WARNING: Levine cache not found at {_levine_cache}")
 
+    _prior = prior_urls or set()
+
     if links_raw:
         for link in links_raw:
             link["resolved_url"] = resolve_redirect_url(link["raw_url"])
@@ -85,6 +88,10 @@ def collect_all_artifacts(
     headlines_with_snippets = []
 
     for i, art in enumerate(articles):
+        # Skip articles already used in prior episodes
+        if art.url and art.url in _prior:
+            continue
+
         slug = f"{i:02d}-{_slugify(art.headline)}"
         art_path = articles_dir / f"{slug}.md"
 
@@ -112,11 +119,16 @@ def collect_all_artifacts(
             lines = text.split("\n")
             headline = lines[0].lstrip("# ").strip()
             category = ""
+            url = ""
             for line in lines[1:8]:
                 if line.startswith("Category: "):
                     category = line[10:].strip()
+                elif line.startswith("URL: "):
+                    url = line[5:].strip()
             routing = categorize_semafor_article(category)
             if routing not in ("th", "both"):
+                continue
+            if url and url in _prior:
                 continue
             slug = _slugify(headline)
             art_path = semafor_dir / f"{slug}.md"
@@ -133,12 +145,21 @@ def collect_all_artifacts(
     zvi_dir = articles_dir / "zvi"
     zvi_dir.mkdir(parents=True, exist_ok=True)
     for cached_file in zvi_cache.glob("*.md"):
-        if any(cached_file.name.startswith(d) for d in lookback_dates):
-            target = zvi_dir / cached_file.name
-            if not target.exists():
-                target.write_text(
-                    cached_file.read_text(encoding="utf-8"), encoding="utf-8"
-                )
+        if not any(cached_file.name.startswith(d) for d in lookback_dates):
+            continue
+        # Extract URL and skip if already used in prior episodes
+        if _prior:
+            zvi_text = cached_file.read_text(encoding="utf-8")
+            zvi_url = ""
+            for line in zvi_text.split("\n")[1:8]:
+                if line.startswith("URL: "):
+                    zvi_url = line[5:].strip()
+                    break
+            if zvi_url and zvi_url in _prior:
+                continue
+        target = zvi_dir / cached_file.name
+        if not target.exists():
+            target.write_text(cached_file.read_text(encoding="utf-8"), encoding="utf-8")
 
     # Zvi headlines
     for zvi_path in zvi_dir.glob("*.md"):

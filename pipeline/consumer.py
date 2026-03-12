@@ -325,6 +325,9 @@ def consume_forever(
                         rundown_coverage = store.recent_coverage_summary(
                             "the-rundown", days=3
                         )
+                        rundown_prior_urls = store.recent_article_urls(
+                            "the-rundown", days=3
+                        )
                         collect_all_artifacts(
                             job["id"],
                             work_dir,
@@ -336,6 +339,7 @@ def consume_forever(
                             fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
                             lookback_days=rundown_lookback,
                             coverage_summary=rundown_coverage,
+                            prior_urls=rundown_prior_urls,
                         )
 
                         plan_path = work_dir / "plan.json"
