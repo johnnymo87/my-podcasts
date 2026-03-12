@@ -35,6 +35,7 @@ class FPResearchPlan(BaseModel):
         description="The 3-5 dominant themes or story arcs identified across all sources today"  # noqa: E501
     )
     directives: list[FPStoryDirective]
+    rotation_override: str | None = None  # Explanation if freshness budget unmet
 
 
 _EMPTY_PLAN = FPResearchPlan(themes=[], directives=[])
@@ -42,7 +43,8 @@ _EMPTY_PLAN = FPResearchPlan(themes=[], directives=[])
 
 def generate_fp_research_plan(
     headlines_with_snippets: list[str],
-    context_scripts: list[str] | None = None,
+    context_scripts: list[str] | None = None,  # Keep for backward compat
+    coverage_ledger: str | None = None,  # New: structured coverage data
 ) -> FPResearchPlan:
     """Ask Gemini Flash-Lite to triage FP stories into themes and select which to include."""  # noqa: E501
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -67,7 +69,11 @@ def generate_fp_research_plan(
     for item in headlines_with_snippets:
         prompt += f"- {item}\n"
 
-    if context_scripts:
+    # Prefer coverage_ledger over context_scripts
+    if coverage_ledger:
+        prompt += f"\n\n{coverage_ledger}\n"
+    elif context_scripts:
+        # Fallback for transition period
         prompt += (
             "\n\nPrevious episodes (listeners already heard these):\n"
             "Deprioritize stories that were covered in depth unless there is a\n"
