@@ -130,17 +130,45 @@ def parse_summary(text: str) -> WriterOutput:
 def _strip_preamble(text: str) -> str:
     """Remove LLM preamble before the actual script.
 
-    The model sometimes prepends meta-commentary like
-    "Now I have enough context. Let me write the script.\n\n---\n\n"
-    before the actual episode text.  Strip everything up to and including
-    the first ``---`` line if one appears within the first 10 lines.
+    The model sometimes prepends meta-commentary (reasoning about what to
+    cover, analysis of prior episodes, etc.) before the actual spoken
+    script.  This function detects the boundary and strips the preamble.
+
+    Strategies (tried in order):
+    1. A ``---`` separator in the first 30 lines.
+    2. A blank-line gap followed by a paragraph that looks like spoken
+       script (starts with a greeting, time reference, or conversational
+       opener).
     """
     lines = text.split("\n")
-    for i, line in enumerate(lines[:10]):
+
+    # Strategy 1: explicit --- separator
+    for i, line in enumerate(lines[:30]):
         if line.strip() == "---":
             remainder = "\n".join(lines[i + 1 :]).strip()
             if remainder:
                 return remainder
+
+    # Strategy 2: find first paragraph that reads like a spoken script
+    # after a blank line gap.  We look for common script openers.
+    import re
+
+    script_openers = re.compile(
+        r"^(Hey[,.]?\s|Hi[,.]?\s|Good\s+(morning|evening|afternoon)|"
+        r"Welcome\s|Hello[,.]?\s|It'?s\s+\w+day|Today\s|"
+        r"Happy\s+\w+day|All\s+right|Alright)",
+        re.IGNORECASE,
+    )
+
+    saw_blank = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            saw_blank = True
+            continue
+        if saw_blank and script_openers.match(stripped):
+            return "\n".join(lines[i:]).strip()
+
     return text
 
 

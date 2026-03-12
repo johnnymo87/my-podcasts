@@ -135,11 +135,39 @@ def test_strip_preamble_preserves_clean_script():
 
 
 def test_strip_preamble_ignores_late_separator():
-    """--- appearing after line 10 is part of the script, not preamble."""
-    lines = ["Line " + str(i) for i in range(12)]
+    """--- appearing after line 30 is part of the script, not preamble."""
+    lines = ["Line " + str(i) for i in range(32)]
     lines.append("---")
     lines.append("After separator")
     raw = "\n".join(lines)
+    assert _strip_preamble(raw) == raw
+
+
+def test_strip_preamble_blank_line_then_greeting():
+    """Preamble without --- is stripped when followed by a spoken greeting."""
+    raw = (
+        "Good, I now have enough context. Let me synthesize.\n"
+        "Here are the new stories.\n"
+        "\n"
+        "Hey, welcome to The Rundown for Thursday."
+    )
+    assert _strip_preamble(raw) == "Hey, welcome to The Rundown for Thursday."
+
+
+def test_strip_preamble_blank_line_then_good_morning():
+    """FP-style preamble with 'Good morning' opener."""
+    raw = (
+        "Now I have a comprehensive picture. Let me compose the briefing.\n"
+        "\n"
+        "\n"
+        "Good morning. It's Thursday, March 12th."
+    )
+    assert _strip_preamble(raw) == "Good morning. It's Thursday, March 12th."
+
+
+def test_strip_preamble_no_blank_gap_preserved():
+    """Without a blank line gap, no stripping occurs."""
+    raw = "Today we cover markets.\nHey, welcome to the show."
     assert _strip_preamble(raw) == raw
 
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pipeline.rundown_writer import WriterOutput, parse_summary
+from pipeline.rundown_writer import WriterOutput, _strip_preamble, parse_summary
 
 from pipeline.opencode_client import (
     create_session,
@@ -122,7 +122,7 @@ def generate_fp_script(
             raise RuntimeError("opencode session did not complete within 120 seconds")
 
         messages = get_messages(session_id)
-        raw = get_last_assistant_text(messages).strip()
+        raw = _strip_preamble(get_last_assistant_text(messages).strip())
         return parse_summary(raw)
     finally:
         delete_session(session_id)
