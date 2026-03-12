@@ -10,6 +10,11 @@ import trafilatura
 
 from pipeline.exa_client import search_related
 from pipeline.fp_editor import generate_fp_research_plan
+from pipeline.freshness import (
+    annotate_headlines,
+    classify_headlines,
+    format_coverage_ledger,
+)
 from pipeline.rss_sources import categorize_semafor_article
 
 
@@ -53,6 +58,7 @@ def collect_fp_artifacts(
     antiwar_rss_cache_dir: Path | None = None,
     semafor_cache_dir: Path | None = None,
     lookback_days: int = 2,
+    coverage_summary: list[dict] | None = None,  # NEW
 ) -> None:
     """Orchestrate FP Digest collection.
 
@@ -323,9 +329,20 @@ def collect_fp_artifacts(
         snippet = f"[semafor] {headline}\nContext: {truncated}{suffix}"
         headlines_with_snippets.append(snippet)
 
+    # Phase 4.5: Freshness annotation
+    coverage_ledger: str | None = None
+    if coverage_summary:
+        classifications = classify_headlines(headlines_with_snippets, coverage_summary)
+        headlines_with_snippets = annotate_headlines(
+            headlines_with_snippets, classifications, coverage_summary
+        )
+        coverage_ledger = format_coverage_ledger(coverage_summary)
+
     # Phase 5: Generate research plan
     plan = generate_fp_research_plan(
-        headlines_with_snippets, context_scripts=context_scripts
+        headlines_with_snippets,
+        context_scripts=context_scripts if not coverage_ledger else None,
+        coverage_ledger=coverage_ledger,
     )
 
     # Write plan.json

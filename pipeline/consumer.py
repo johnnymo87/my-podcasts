@@ -425,6 +425,7 @@ def consume_forever(
                             f"{job['id']} ({job['date_str']})"
                         )
                         fp_lookback = _compute_lookback(store, "fp-digest")
+                        fp_coverage = store.recent_coverage_summary("fp-digest", days=3)
                         collect_fp_artifacts(
                             job["id"],
                             work_dir,
@@ -439,6 +440,7 @@ def consume_forever(
                                 "/persist/my-podcasts/semafor-cache"
                             ),
                             lookback_days=fp_lookback,
+                            coverage_summary=fp_coverage,
                         )
 
                         plan_path = work_dir / "plan.json"
