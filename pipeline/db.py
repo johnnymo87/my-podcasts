@@ -315,6 +315,36 @@ class StateStore:
         result.sort(key=lambda r: (-r["days_covered"], -r["article_count"]))
         return result
 
+    def recent_article_urls(self, feed_slug: str, days: int = 3) -> set[str]:
+        """Return URLs of articles used in recent episodes.
+
+        Queries articles_json from episodes within the given day window
+        and extracts all non-null URLs.  Used to deduplicate across days.
+        """
+        episodes = self.list_episodes(feed_slug=feed_slug)
+        now = datetime.now(tz=UTC)
+        cutoff = now - timedelta(days=days)
+
+        urls: set[str] = set()
+        for ep in episodes:
+            try:
+                ep_dt = parsedate_to_datetime(ep.pub_date)
+            except Exception:
+                continue
+            if ep_dt < cutoff:
+                continue
+            if not ep.articles_json:
+                continue
+            try:
+                articles = json.loads(ep.articles_json)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            for art in articles:
+                url = art.get("url")
+                if url:
+                    urls.add(url)
+        return urls
+
     def list_feed_slugs(self) -> list[str]:
         rows = self._conn.execute(
             "SELECT DISTINCT feed_slug FROM episodes ORDER BY feed_slug ASC"

@@ -268,6 +268,7 @@ def _fp_digest_full_run(date_str: str, lookback_override: int | None = None) -> 
         lookback = lookback_override or _compute_lookback(store, "fp-digest")
         work_dir = Path(f"/tmp/fp-digest-{job['id']}")
         fp_coverage = store.recent_coverage_summary("fp-digest", days=3)
+        fp_prior_urls = store.recent_article_urls("fp-digest", days=3)
         click.echo("Collecting sources...")
         collect_fp_artifacts(
             job["id"],
@@ -277,6 +278,7 @@ def _fp_digest_full_run(date_str: str, lookback_override: int | None = None) -> 
             semafor_cache_dir=Path("/persist/my-podcasts/semafor-cache"),
             lookback_days=lookback,
             coverage_summary=fp_coverage,
+            prior_urls=fp_prior_urls,
         )
 
         plan_path = work_dir / "plan.json"

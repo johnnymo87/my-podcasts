@@ -430,6 +430,7 @@ def consume_forever(
                         )
                         fp_lookback = _compute_lookback(store, "fp-digest")
                         fp_coverage = store.recent_coverage_summary("fp-digest", days=3)
+                        fp_prior_urls = store.recent_article_urls("fp-digest", days=3)
                         collect_fp_artifacts(
                             job["id"],
                             work_dir,
@@ -445,6 +446,7 @@ def consume_forever(
                             ),
                             lookback_days=fp_lookback,
                             coverage_summary=fp_coverage,
+                            prior_urls=fp_prior_urls,
                         )
 
                         plan_path = work_dir / "plan.json"

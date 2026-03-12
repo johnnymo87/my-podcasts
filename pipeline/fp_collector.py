@@ -58,7 +58,8 @@ def collect_fp_artifacts(
     antiwar_rss_cache_dir: Path | None = None,
     semafor_cache_dir: Path | None = None,
     lookback_days: int = 2,
-    coverage_summary: list[dict] | None = None,  # NEW
+    coverage_summary: list[dict] | None = None,
+    prior_urls: set[str] | None = None,
 ) -> None:
     """Orchestrate FP Digest collection.
 
@@ -96,6 +97,10 @@ def collect_fp_artifacts(
         else Path("/persist/my-podcasts/antiwar-homepage-cache")
     )
     homepage_urls: set[str] = set()
+
+    # Seed with URLs from prior episodes to prevent cross-day repetition
+    if prior_urls:
+        homepage_urls.update(prior_urls)
 
     if not _homepage_cache.exists():
         print(f"[fp_collector] WARNING: homepage cache not found at {_homepage_cache}")
