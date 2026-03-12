@@ -42,7 +42,7 @@ def parse_homepage_links(html: str) -> list[HomepageLink]:
 
         for a_tag in next_tr.find_all("a"):
             href = a_tag.get("href", "").strip()
-            headline = a_tag.get_text(strip=True)
+            headline = " ".join(a_tag.get_text(strip=True).split())
             if not href or not headline:
                 continue
             links.append(HomepageLink(region=region, headline=headline, url=href))

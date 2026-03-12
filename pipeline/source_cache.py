@@ -171,7 +171,9 @@ def sync_antiwar_homepage_cache(cache_dir: Path) -> list[Path]:
     today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
 
     for link in links:
-        slug = _slugify(link.headline)
+        # Normalize whitespace in headline (scraper may return multi-line text)
+        headline = " ".join(link.headline.split())
+        slug = _slugify(headline)
         url_hash = hashlib.md5(link.url.encode()).hexdigest()[:8]  # noqa: S324
         filename = f"{today}-{slug}-{url_hash}.md"
         path = cache_dir / filename
@@ -181,7 +183,7 @@ def sync_antiwar_homepage_cache(cache_dir: Path) -> list[Path]:
         text = _extract_homepage_text(link.url)
 
         md = (
-            f"# {link.headline}\n\n"
+            f"# {headline}\n\n"
             f"URL: {link.url}\n"
             f"Published: {today}\n"
             f"Region: {link.region}\n"

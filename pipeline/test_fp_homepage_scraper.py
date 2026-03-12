@@ -65,3 +65,28 @@ def test_parse_homepage_links_empty_html() -> None:
     html = "<html><body><p>No hotspots here.</p></body></html>"
     links = parse_homepage_links(html)
     assert links == []
+
+
+def test_parse_homepage_links_normalizes_whitespace() -> None:
+    """Headlines with internal newlines/whitespace are collapsed to single spaces."""
+    html = """\
+<html><body>
+<table>
+<tr><td class="hotspot">Iran</td></tr>
+<tr><td>
+  <table>
+    <tr>
+      <td><a href="https://example.com/story">Democrats
+                    Say White House Offers No Clarity on
+                    Iran War Goals After 11 Days</a></td>
+    </tr>
+  </table>
+</td></tr>
+</table>
+</body></html>
+"""
+    links = parse_homepage_links(html)
+    assert len(links) == 1
+    assert links[0].headline == (
+        "Democrats Say White House Offers No Clarity on Iran War Goals After 11 Days"
+    )

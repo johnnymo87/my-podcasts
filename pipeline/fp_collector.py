@@ -111,15 +111,29 @@ def collect_fp_artifacts(
             raw = cache_path.read_text(encoding="utf-8")
             lines = raw.split("\n")
 
-            # Parse metadata
-            title = lines[0].lstrip("# ").strip() if lines else ""
+            # Parse metadata — title may span multiple lines in older cache files
+            title_parts = []
             url = ""
             region = ""
-            for line in lines[1:]:
-                if line.startswith("URL: "):
-                    url = line[5:].strip()
-                elif line.startswith("Region: "):
-                    region = line[8:].strip()
+            title_done = False
+            for line in lines:
+                stripped = line.strip()
+                if not title_done:
+                    if line.startswith("# "):
+                        title_parts.append(line.lstrip("# ").strip())
+                    elif not stripped:
+                        if title_parts:
+                            title_done = True
+                    elif title_parts:
+                        # Continuation of multi-line title
+                        title_parts.append(stripped)
+                else:
+                    if stripped.startswith("URL: "):
+                        url = stripped[5:].strip()
+                    elif stripped.startswith("Region: "):
+                        region = stripped[8:].strip()
+
+            title = " ".join(title_parts)
 
             if not title or not url:
                 continue
@@ -157,7 +171,7 @@ def collect_fp_artifacts(
             raw = cache_path.read_text(encoding="utf-8")
             lines = raw.split("\n")
 
-            title = lines[0].lstrip("# ").strip() if lines else ""
+            title = " ".join(lines[0].lstrip("# ").split()) if lines else ""
             url = ""
             source = ""
             for line in lines[1:]:
@@ -237,7 +251,7 @@ def collect_fp_artifacts(
             raw = cache_path.read_text(encoding="utf-8")
             lines = raw.split("\n")
 
-            title = lines[0].lstrip("# ").strip() if lines else ""
+            title = " ".join(lines[0].lstrip("# ").split()) if lines else ""
             url = ""
             category = ""
             for line in lines[1:]:

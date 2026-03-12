@@ -117,7 +117,7 @@ def collect_all_artifacts(
                 continue
             text = cached.read_text(encoding="utf-8")
             lines = text.split("\n")
-            headline = lines[0].lstrip("# ").strip()
+            headline = " ".join(lines[0].lstrip("# ").split())
             category = ""
             url = ""
             for line in lines[1:8]:

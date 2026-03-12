@@ -492,3 +492,66 @@ def test_fp_collector_reads_from_caches(tmp_path, monkeypatch):
     semafor_files = list(semafor_dir.glob("*.md"))
     assert len(semafor_files) == 1
     assert "Gulf Today" in semafor_files[0].read_text()
+
+
+@patch("pipeline.fp_collector.search_related")
+@patch("pipeline.fp_collector.generate_fp_research_plan")
+def test_multiline_homepage_title_normalized(
+    mock_plan,
+    mock_exa,
+    tmp_path,
+) -> None:
+    """Homepage cache files with multi-line titles are normalized to single lines."""
+    today = _today_et()
+
+    # Write a cache file with a multi-line title (reproduces real-world bug)
+    homepage_cache = tmp_path / "homepage-cache"
+    homepage_cache.mkdir()
+    multiline_title = (
+        "Democrats \n                    Say White House Offers No Clarity"
+    )
+    slug = _slugify(multiline_title)
+    from hashlib import md5
+
+    url = "http://example.com/democrats"
+    url_hash = md5(url.encode()).hexdigest()[:8]  # noqa: S324
+    filename = f"{today}-{slug}-{url_hash}.md"
+    content = (
+        f"# {multiline_title}\n\n"
+        f"URL: {url}\n"
+        f"Published: {today}\n"
+        f"Region: The War at Home\n"
+        f"Source: antiwar-homepage\n"
+        f"Type: article\n\n"
+        f"Full article text about Democrats."
+    )
+    (homepage_cache / filename).write_text(content, encoding="utf-8")
+
+    rss_cache = tmp_path / "rss-cache"
+    rss_cache.mkdir()
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+
+    mock_plan.return_value = FPResearchPlan(themes=[], directives=[])
+    mock_exa.return_value = []
+
+    work_dir = tmp_path / "work"
+    collect_fp_artifacts(
+        "test-multiline",
+        work_dir,
+        scripts_source_dir=scripts_dir,
+        homepage_cache_dir=homepage_cache,
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=semafor_cache,
+    )
+
+    # The article file should have a normalized single-line title
+    homepage_files = list((work_dir / "articles" / "homepage").rglob("*.md"))
+    assert len(homepage_files) == 1
+    written = homepage_files[0].read_text(encoding="utf-8")
+    first_line = written.split("\n")[0]
+    assert first_line == "# Democrats Say White House Offers No Clarity"
+    # File slug should use the full normalized title
+    assert "democrats-say-white-house-offers-no-clarity" in homepage_files[0].name
