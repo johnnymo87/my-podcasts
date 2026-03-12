@@ -17,6 +17,12 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 
+class ScriptThemes(BaseModel):
+    """LLM output: themes extracted from a prior episode script."""
+
+    themes: list[str]  # 3-5 theme names
+
+
 class HeadlineClassification(BaseModel):
     """LLM output: maps a headline to a prior theme or marks it fresh."""
 
@@ -179,3 +185,60 @@ def annotate_headlines(
         annotated.append(f"{tag} {headline}")
 
     return annotated
+
+
+def extract_themes_from_scripts(
+    scripts: list[str],
+) -> list[dict]:
+    """Extract theme names from prior episode scripts via LLM.
+
+    Fallback for when articles_json is not available. Returns a
+    coverage_summary-compatible list of dicts.
+    """
+    if not scripts:
+        return []
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return []
+
+    all_themes: dict[str, set[str]] = {}  # theme -> set of script indices
+
+    for i, script in enumerate(scripts):
+        truncated = script[:3000]
+        prompt = (
+            "Extract the 3-5 main themes or storylines from this podcast "
+            "episode script. Return short theme names (2-5 words each).\n\n"
+            f"Script:\n{truncated}"
+        )
+        try:
+            client = genai.Client(api_key=api_key)
+            response = client.models.generate_content(
+                model="gemini-3.1-flash-lite-preview",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=ScriptThemes,
+                    temperature=0.1,
+                ),
+            )
+            parsed = response.parsed
+            if parsed and parsed.themes:
+                for theme in parsed.themes:
+                    if theme not in all_themes:
+                        all_themes[theme] = set()
+                    all_themes[theme].add(str(i))
+        except Exception:
+            logger.exception("Failed to extract themes from script %d", i)
+            continue
+
+    return [
+        {
+            "theme": theme,
+            "days_covered": len(indices),
+            "article_count": 0,
+            "episode_dates": sorted(indices),
+            "was_lead": False,
+        }
+        for theme, indices in all_themes.items()
+    ]

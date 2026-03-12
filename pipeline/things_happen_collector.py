@@ -173,6 +173,23 @@ def collect_all_artifacts(
             headlines_with_snippets, classifications, coverage_summary
         )
         coverage_ledger = format_coverage_ledger(coverage_summary)
+    else:
+        # Fallback: extract themes from scripts when articles_json unavailable
+        context_scripts = [
+            p.read_text(encoding="utf-8") for p in sorted(context_dir.glob("*.txt"))
+        ]
+        if context_scripts:
+            from pipeline.freshness import extract_themes_from_scripts
+
+            fallback_coverage = extract_themes_from_scripts(context_scripts)
+            if fallback_coverage:
+                classifications = classify_headlines(
+                    headlines_with_snippets, fallback_coverage
+                )
+                headlines_with_snippets = annotate_headlines(
+                    headlines_with_snippets, classifications, fallback_coverage
+                )
+                coverage_ledger = format_coverage_ledger(fallback_coverage)
 
     # Phase 2: Editor AI
     plan = generate_rundown_research_plan(

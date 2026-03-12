@@ -96,6 +96,30 @@ def test_build_freshness_prompt_includes_themes_and_headlines():
     assert "headline_index" in prompt  # Schema mention
 
 
+def test_extract_themes_returns_coverage_format():
+    """Verify extract_themes_from_scripts returns coverage-compatible dicts."""
+    import os
+    from unittest.mock import patch, MagicMock
+    from pipeline.freshness import extract_themes_from_scripts, ScriptThemes
+
+    mock_response = MagicMock()
+    mock_response.parsed = ScriptThemes(themes=["Iran War", "THAAD Transfer"])
+
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+        with patch("pipeline.freshness.genai") as mock_genai:
+            mock_client = MagicMock()
+            mock_genai.Client.return_value = mock_client
+            mock_client.models.generate_content.return_value = mock_response
+
+            result = extract_themes_from_scripts(["Script text here"])
+            assert len(result) == 2
+            assert result[0]["theme"] in ("Iran War", "THAAD Transfer")
+            assert "days_covered" in result[0]
+            assert "article_count" in result[0]
+            assert result[0]["article_count"] == 0
+            assert result[0]["was_lead"] is False
+
+
 def test_freshness_integration_with_collector_args():
     """Verify annotate_headlines output format matches what editors expect."""
     headlines = [

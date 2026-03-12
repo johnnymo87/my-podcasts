@@ -337,6 +337,19 @@ def collect_fp_artifacts(
             headlines_with_snippets, classifications, coverage_summary
         )
         coverage_ledger = format_coverage_ledger(coverage_summary)
+    elif context_scripts:
+        # Fallback: extract themes from scripts when articles_json unavailable
+        from pipeline.freshness import extract_themes_from_scripts
+
+        fallback_coverage = extract_themes_from_scripts(context_scripts)
+        if fallback_coverage:
+            classifications = classify_headlines(
+                headlines_with_snippets, fallback_coverage
+            )
+            headlines_with_snippets = annotate_headlines(
+                headlines_with_snippets, classifications, fallback_coverage
+            )
+            coverage_ledger = format_coverage_ledger(fallback_coverage)
 
     # Phase 5: Generate research plan
     plan = generate_fp_research_plan(
