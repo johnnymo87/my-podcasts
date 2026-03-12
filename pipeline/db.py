@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -245,6 +246,74 @@ class StateStore:
             )
             for row in rows
         ]
+
+    def recent_coverage_summary(self, feed_slug: str, days: int = 3) -> list[dict]:
+        """Return coverage frequency of themes from recent episodes.
+
+        Queries articles_json from the most recent episodes within the
+        given day window.  Returns a list of dicts:
+          {"theme": str, "days_covered": int, "article_count": int,
+           "episode_dates": list[str], "was_lead": bool}
+        sorted by days_covered descending, then article_count descending.
+        """
+        episodes = self.list_episodes(feed_slug=feed_slug)
+        now = datetime.now(tz=UTC)
+        cutoff = now - timedelta(days=days)
+
+        theme_stats: dict[str, dict] = {}
+
+        for ep in episodes:
+            try:
+                ep_dt = parsedate_to_datetime(ep.pub_date)
+            except Exception:
+                continue
+            if ep_dt < cutoff:
+                continue
+            if not ep.articles_json:
+                continue
+            try:
+                articles = json.loads(ep.articles_json)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not articles:
+                continue
+
+            date_str = ep_dt.strftime("%Y-%m-%d")
+            lead_theme = articles[0].get("theme", "") if articles else ""
+
+            seen_themes_this_ep: dict[str, int] = {}
+            for art in articles:
+                theme = art.get("theme", "")
+                if not theme:
+                    continue
+                seen_themes_this_ep[theme] = seen_themes_this_ep.get(theme, 0) + 1
+
+            for theme, count in seen_themes_this_ep.items():
+                if theme not in theme_stats:
+                    theme_stats[theme] = {
+                        "dates": set(),
+                        "articles": 0,
+                        "lead_count": 0,
+                    }
+                theme_stats[theme]["dates"].add(date_str)
+                theme_stats[theme]["articles"] += count
+                if theme == lead_theme:
+                    theme_stats[theme]["lead_count"] += 1
+
+        result = []
+        for theme, stats in theme_stats.items():
+            result.append(
+                {
+                    "theme": theme,
+                    "days_covered": len(stats["dates"]),
+                    "article_count": stats["articles"],
+                    "episode_dates": sorted(stats["dates"]),
+                    "was_lead": stats["lead_count"] > 0,
+                }
+            )
+
+        result.sort(key=lambda r: (-r["days_covered"], -r["article_count"]))
+        return result
 
     def list_feed_slugs(self) -> list[str]:
         rows = self._conn.execute(
