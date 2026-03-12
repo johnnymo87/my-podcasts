@@ -44,6 +44,7 @@ class RundownResearchPlan(BaseModel):
         description="The 3-5 dominant themes or story arcs identified across all sources today"
     )
     directives: list[RundownStoryDirective]
+    rotation_override: str | None = None
 
 
 def _empty_plan() -> RundownResearchPlan:
@@ -53,6 +54,7 @@ def _empty_plan() -> RundownResearchPlan:
 def generate_rundown_research_plan(
     headlines_with_snippets: list[str],
     context_scripts: list[str] | None = None,
+    coverage_ledger: str | None = None,
 ) -> RundownResearchPlan:
     """Ask Gemini Flash-Lite to triage stories into themes and select which to include."""
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -79,7 +81,9 @@ def generate_rundown_research_plan(
     for item in headlines_with_snippets:
         prompt += f"- {item}\n"
 
-    if context_scripts:
+    if coverage_ledger:
+        prompt += f"\n\n{coverage_ledger}\n"
+    elif context_scripts:
         prompt += (
             "\n\nPrevious episodes (listeners already heard these):\n"
             "Deprioritize stories that were covered in depth unless there is a\n"

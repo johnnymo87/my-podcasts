@@ -187,3 +187,65 @@ def test_generate_rundown_returns_writer_output_with_summary(
     assert isinstance(result, WriterOutput)
     assert result.summary == "Today's summary."
     assert result.script == "The script text."
+
+
+def test_rundown_editor_uses_coverage_ledger_over_scripts(monkeypatch):
+    """When coverage_ledger is provided, scripts are not included in prompt."""
+    from unittest.mock import patch, MagicMock
+    from pipeline.things_happen_editor import (
+        generate_rundown_research_plan,
+        RundownResearchPlan,
+    )
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    mock_plan = RundownResearchPlan(
+        themes=["Theme A"], directives=[], rotation_override=None
+    )
+    mock_response = MagicMock()
+    mock_response.parsed = mock_plan
+
+    with patch("pipeline.things_happen_editor.genai") as mock_genai:
+        mock_client = MagicMock()
+        mock_genai.Client.return_value = mock_client
+        mock_client.models.generate_content.return_value = mock_response
+
+        generate_rundown_research_plan(
+            ["Test headline\nContext: ..."],
+            context_scripts=["Old script text here"],
+            coverage_ledger="## COVERAGE LEDGER\n| Theme | Days |",
+        )
+
+        prompt_used = mock_client.models.generate_content.call_args[1]["contents"]
+        assert "COVERAGE LEDGER" in prompt_used
+        assert "Old script text here" not in prompt_used
+
+
+def test_rundown_editor_falls_back_to_scripts(monkeypatch):
+    """When no coverage_ledger, context_scripts are used."""
+    from unittest.mock import patch, MagicMock
+    from pipeline.things_happen_editor import (
+        generate_rundown_research_plan,
+        RundownResearchPlan,
+    )
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    mock_plan = RundownResearchPlan(
+        themes=["Theme A"], directives=[], rotation_override=None
+    )
+    mock_response = MagicMock()
+    mock_response.parsed = mock_plan
+
+    with patch("pipeline.things_happen_editor.genai") as mock_genai:
+        mock_client = MagicMock()
+        mock_genai.Client.return_value = mock_client
+        mock_client.models.generate_content.return_value = mock_response
+
+        generate_rundown_research_plan(
+            ["Test headline\nContext: ..."],
+            context_scripts=["Script from yesterday"],
+            coverage_ledger=None,
+        )
+
+        prompt_used = mock_client.models.generate_content.call_args[1]["contents"]
+        assert "Script from yesterday" in prompt_used
+        assert "Previous episodes" in prompt_used
