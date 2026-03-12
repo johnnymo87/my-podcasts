@@ -127,32 +127,35 @@ def parse_summary(text: str) -> WriterOutput:
     return WriterOutput(script=text, summary="")
 
 
-def _strip_preamble(text: str) -> str:
-    """Remove LLM preamble before the actual script.
+def _extract_script(text: str) -> str:
+    """Extract the podcast script from LLM output.
 
-    The model sometimes prepends meta-commentary (reasoning about what to
-    cover, analysis of prior episodes, etc.) before the actual spoken
-    script.  This function detects the boundary and strips the preamble.
+    The model is instructed to wrap the spoken script in
+    ``<script>...</script>`` tags.  If those tags are present we extract
+    deterministically.  Otherwise we fall back to heuristics so that
+    older model behaviour (no tags) still works.
 
-    Strategies (tried in order):
+    Fallback strategies (tried in order):
     1. A ``---`` separator in the first 30 lines.
     2. A blank-line gap followed by a paragraph that looks like spoken
-       script (starts with a greeting, time reference, or conversational
-       opener).
+       script (starts with a greeting or conversational opener).
     """
-    lines = text.split("\n")
+    import re
 
-    # Strategy 1: explicit --- separator
+    # Primary: <script> tags
+    m = re.search(r"<script>\s*(.*?)\s*</script>", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+
+    # Fallback 1: explicit --- separator
+    lines = text.split("\n")
     for i, line in enumerate(lines[:30]):
         if line.strip() == "---":
             remainder = "\n".join(lines[i + 1 :]).strip()
             if remainder:
                 return remainder
 
-    # Strategy 2: find first paragraph that reads like a spoken script
-    # after a blank line gap.  We look for common script openers.
-    import re
-
+    # Fallback 2: blank-line gap then spoken opener
     script_openers = re.compile(
         r"^(Hey[,.]?\s|Hi[,.]?\s|Good\s+(morning|evening|afternoon)|"
         r"Welcome\s|Hello[,.]?\s|It'?s\s+\w+day|Today\s|"
@@ -184,7 +187,10 @@ def generate_rundown_script(
     instruction = (
         "Read the following prompt and generate the podcast briefing script. "
         "First, write a 2-3 sentence summary of today's episode wrapped in "
-        "<summary>...</summary> tags. Then write the full script text.\n\n" + prompt
+        "<summary>...</summary> tags. Then write the full spoken script wrapped in "
+        "<script>...</script> tags. Do NOT include any analysis, reasoning, or "
+        "meta-commentary outside these tags — only the summary and the script "
+        "that will be read aloud.\n\n" + prompt
     )
 
     session_id = create_session()
@@ -195,7 +201,7 @@ def generate_rundown_script(
             raise RuntimeError("opencode session did not complete within 120 seconds")
 
         messages = get_messages(session_id)
-        raw = _strip_preamble(get_last_assistant_text(messages).strip())
+        raw = _extract_script(get_last_assistant_text(messages).strip())
         return parse_summary(raw)
     finally:
         delete_session(session_id)

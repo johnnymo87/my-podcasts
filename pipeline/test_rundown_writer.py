@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from pipeline.rundown_writer import (
     WriterOutput,
-    _strip_preamble,
+    _extract_script,
     build_rundown_prompt,
     generate_rundown_script,
     parse_summary,
@@ -124,26 +124,50 @@ def test_generate_script_strips_preamble(
     assert result.summary == ""
 
 
-def test_strip_preamble_removes_meta_text():
+def test_extract_script_with_tags():
+    """<script> tags are the primary extraction method."""
+    raw = (
+        "Let me analyze what's new.\n\n"
+        "<summary>Today covers markets and AI.</summary>\n\n"
+        "<script>Hey, welcome to The Rundown for Thursday.</script>"
+    )
+    assert _extract_script(raw) == "Hey, welcome to The Rundown for Thursday."
+
+
+def test_extract_script_tags_with_reasoning():
+    """Reasoning before <script> tags is stripped."""
+    raw = (
+        "I see 8 stories. Let me figure out what's new vs repeated.\n"
+        "Stories 1-3 are new, 4-8 were covered yesterday.\n\n"
+        "<script>\nHey, welcome. Three stories today.\n\n"
+        "First up, markets moved.\n</script>"
+    )
+    assert _extract_script(raw) == (
+        "Hey, welcome. Three stories today.\n\nFirst up, markets moved."
+    )
+
+
+def test_extract_script_removes_meta_text():
+    """Fallback: --- separator still works."""
     raw = "Now I have enough context.\n\n---\n\nHey, welcome to The Rundown."
-    assert _strip_preamble(raw) == "Hey, welcome to The Rundown."
+    assert _extract_script(raw) == "Hey, welcome to The Rundown."
 
 
-def test_strip_preamble_preserves_clean_script():
+def test_extract_script_preserves_clean_script():
     raw = "Hey, welcome to The Rundown for Monday."
-    assert _strip_preamble(raw) == raw
+    assert _extract_script(raw) == raw
 
 
-def test_strip_preamble_ignores_late_separator():
+def test_extract_script_ignores_late_separator():
     """--- appearing after line 30 is part of the script, not preamble."""
     lines = ["Line " + str(i) for i in range(32)]
     lines.append("---")
     lines.append("After separator")
     raw = "\n".join(lines)
-    assert _strip_preamble(raw) == raw
+    assert _extract_script(raw) == raw
 
 
-def test_strip_preamble_blank_line_then_greeting():
+def test_extract_script_blank_line_then_greeting():
     """Preamble without --- is stripped when followed by a spoken greeting."""
     raw = (
         "Good, I now have enough context. Let me synthesize.\n"
@@ -151,10 +175,10 @@ def test_strip_preamble_blank_line_then_greeting():
         "\n"
         "Hey, welcome to The Rundown for Thursday."
     )
-    assert _strip_preamble(raw) == "Hey, welcome to The Rundown for Thursday."
+    assert _extract_script(raw) == "Hey, welcome to The Rundown for Thursday."
 
 
-def test_strip_preamble_blank_line_then_good_morning():
+def test_extract_script_blank_line_then_good_morning():
     """FP-style preamble with 'Good morning' opener."""
     raw = (
         "Now I have a comprehensive picture. Let me compose the briefing.\n"
@@ -162,13 +186,13 @@ def test_strip_preamble_blank_line_then_good_morning():
         "\n"
         "Good morning. It's Thursday, March 12th."
     )
-    assert _strip_preamble(raw) == "Good morning. It's Thursday, March 12th."
+    assert _extract_script(raw) == "Good morning. It's Thursday, March 12th."
 
 
-def test_strip_preamble_no_blank_gap_preserved():
+def test_extract_script_no_blank_gap_preserved():
     """Without a blank line gap, no stripping occurs."""
     raw = "Today we cover markets.\nHey, welcome to the show."
-    assert _strip_preamble(raw) == raw
+    assert _extract_script(raw) == raw
 
 
 def test_parse_summary_extracts_tags():
