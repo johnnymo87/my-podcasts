@@ -23,8 +23,10 @@ if TYPE_CHECKING:
 def strip_markdown_for_tts(text: str) -> str:
     """Strip markdown formatting from script text for TTS input.
 
-    Removes headings, horizontal rules, bold/italic markers, and end markers.
-    Preserves the actual content text.
+    Handles: headings, horizontal rules, bold/italic (* variants only),
+    and [END OF SCRIPT] markers. Does not strip underscore-style emphasis,
+    inline links, or backtick code -- these are not expected in standard
+    podcast scripts.
     """
     lines = text.split("\n")
     result_lines: list[str] = []
@@ -119,7 +121,10 @@ def _slugify(title: str) -> str:
     """Convert a title to a URL-safe slug."""
     slug = title.lower()
     slug = re.sub(r"[^a-z0-9]+", "-", slug)
-    return slug.strip("-")
+    slug = slug.strip("-")
+    if not slug:
+        raise ValueError(f"Title {title!r} produces an empty slug")
+    return slug
 
 
 def publish_script(

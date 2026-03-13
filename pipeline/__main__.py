@@ -617,7 +617,7 @@ def publish_script_command(
         import subprocess
         import tempfile
 
-        from pipeline.script_processor import strip_markdown_for_tts
+        from pipeline.script_processor import TTS_MODEL, strip_markdown_for_tts
 
         raw = script_file.read_text(encoding="utf-8")
         tts_text = strip_markdown_for_tts(raw)
@@ -635,7 +635,7 @@ def publish_script_command(
                 "--output-file",
                 str(output_mp3),
                 "--model",
-                "tts-1-hd",
+                TTS_MODEL,
                 "--voice",
                 voice,
             ]
