@@ -116,3 +116,55 @@ def test_strip_preserves_content() -> None:
     text = "Two point two billion dollars. That's the average cost."
     result = strip_markdown_for_tts(text)
     assert result.strip() == text
+
+
+from pipeline.script_processor import extract_summary, render_show_notes_html
+
+
+def test_extract_summary_from_show_notes() -> None:
+    md = (
+        "# Show Notes\n\n"
+        "## Editorial Notes\n\nStuff.\n\n"
+        "## Episode Summary\n\n"
+        "AI is discovering drug candidates faster than ever. "
+        "This episode explores who's doing it.\n\n"
+        "---\n\n"
+        "## Key Numbers\n\nMore stuff."
+    )
+    summary = extract_summary(md)
+    assert "AI is discovering drug candidates faster than ever" in summary
+    assert "Key Numbers" not in summary
+    assert "Editorial Notes" not in summary
+
+
+def test_extract_summary_returns_none_when_missing() -> None:
+    md = "# Show Notes\n\n## Key Numbers\n\nStuff."
+    summary = extract_summary(md)
+    assert summary is None
+
+
+def test_render_show_notes_html() -> None:
+    md = (
+        "## Key Numbers\n\n"
+        "- **$2.23 billion**: Average cost\n"
+        "- **~12%**: Phase I approval rate\n\n"
+        "## Companies\n\n"
+        "### Nova In Silico\n"
+        "- Website: [novainsilico.ai](https://www.novainsilico.ai)\n"
+    )
+    html = render_show_notes_html(md)
+    assert "<h2>" in html
+    assert "Key Numbers" in html
+    assert "<strong>" in html
+    assert 'href="https://www.novainsilico.ai"' in html
+
+
+def test_render_show_notes_handles_tables() -> None:
+    md = (
+        "| Drug | What happened |\n"
+        "|------|---------------|\n"
+        "| Vioxx | Heart attacks |\n"
+    )
+    html = render_show_notes_html(md)
+    assert "<table>" in html
+    assert "Vioxx" in html
