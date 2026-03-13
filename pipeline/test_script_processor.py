@@ -75,3 +75,44 @@ def test_feed_uses_show_notes_html_when_set(tmp_path, monkeypatch) -> None:
     assert "<p>Rich content.</p>" in encoded.text
 
     store.close()
+
+
+from pipeline.script_processor import strip_markdown_for_tts
+
+
+def test_strip_markdown_headings() -> None:
+    text = "# Title\n\n## ACT 1: THE DREAM\n\nSome text.\n\n### Story One\n\nMore text."
+    result = strip_markdown_for_tts(text)
+    assert "# " not in result
+    assert "## " not in result
+    assert "### " not in result
+    assert "Some text." in result
+    assert "More text." in result
+
+
+def test_strip_markdown_bold_italic() -> None:
+    text = "This is **bold** and *italic* and ***both***."
+    result = strip_markdown_for_tts(text)
+    assert "**" not in result
+    assert result.strip() == "This is bold and italic and both."
+
+
+def test_strip_horizontal_rules() -> None:
+    text = "Before.\n\n---\n\nAfter."
+    result = strip_markdown_for_tts(text)
+    assert "---" not in result
+    assert "Before." in result
+    assert "After." in result
+
+
+def test_strip_end_marker() -> None:
+    text = "Final paragraph.\n\n*[END OF SCRIPT]*"
+    result = strip_markdown_for_tts(text)
+    assert "[END OF SCRIPT]" not in result
+    assert "Final paragraph." in result
+
+
+def test_strip_preserves_content() -> None:
+    text = "Two point two billion dollars. That's the average cost."
+    result = strip_markdown_for_tts(text)
+    assert result.strip() == text
