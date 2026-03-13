@@ -168,3 +168,178 @@ def test_render_show_notes_handles_tables() -> None:
     html = render_show_notes_html(md)
     assert "<table>" in html
     assert "Vioxx" in html
+
+
+import subprocess
+from pathlib import Path
+from unittest.mock import MagicMock
+
+from pipeline.script_processor import publish_script
+
+
+def test_publish_script_end_to_end(tmp_path, monkeypatch) -> None:
+    """Full publish flow: read script, TTS, upload, insert episode, regen feed."""
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+
+    script_file = tmp_path / "script.md"
+    script_file.write_text(
+        "## ACT 1\n\nHere is the script content.\n\n---\n\n*[END OF SCRIPT]*",
+        encoding="utf-8",
+    )
+
+    show_notes_file = tmp_path / "notes.md"
+    show_notes_file.write_text(
+        "## Episode Summary\n\nA great episode about testing.\n\n---\n\n"
+        "## Key Numbers\n\n- **42**: The answer.\n",
+        encoding="utf-8",
+    )
+
+    # Mock ttsjoin and ffprobe
+    def fake_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "ttsjoin":
+            output_file = cmd[cmd.index("--output-file") + 1]
+            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
+            return subprocess.CompletedProcess(cmd, 0)
+        if cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(cmd, 0, stdout="180.0\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+
+    # Mock feed regeneration
+    feed_regen_called = []
+    monkeypatch.setattr(
+        "pipeline.script_processor.regenerate_and_upload_feed",
+        lambda s, r: feed_regen_called.append(True),
+    )
+
+    result = publish_script(
+        script_file=script_file,
+        title="Test Episode",
+        feed_slug="deep-dives",
+        store=store,
+        r2_client=r2_client,
+        show_notes_file=show_notes_file,
+        voice="nova",
+        category="Technology",
+        date_str="2026-03-13",
+    )
+
+    # Episode should be inserted
+    episodes = store.list_episodes(feed_slug="deep-dives")
+    assert len(episodes) == 1
+    ep = episodes[0]
+    assert ep.title == "Test Episode"
+    assert ep.feed_slug == "deep-dives"
+    assert ep.category == "Technology"
+    assert ep.summary == "A great episode about testing."
+    assert ep.show_notes_html is not None
+    assert "<strong>" in ep.show_notes_html
+    assert ep.duration_seconds == 180
+
+    # MP3 should be uploaded
+    r2_client.upload_file.assert_called_once()
+    upload_key = r2_client.upload_file.call_args[0][1]
+    assert upload_key.startswith("episodes/deep-dives/")
+    assert "2026-03-13" in upload_key
+
+    # Feed should be regenerated
+    assert feed_regen_called
+
+    # Result should contain key info
+    assert result.r2_key == upload_key
+    assert result.title == "Test Episode"
+
+    store.close()
+
+
+def test_publish_script_without_show_notes(tmp_path, monkeypatch) -> None:
+    """Publish works without show notes file."""
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+
+    script_file = tmp_path / "script.md"
+    script_file.write_text("Just a plain script.", encoding="utf-8")
+
+    def fake_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "ttsjoin":
+            output_file = cmd[cmd.index("--output-file") + 1]
+            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
+            return subprocess.CompletedProcess(cmd, 0)
+        if cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(cmd, 0, stdout="60.0\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(
+        "pipeline.script_processor.regenerate_and_upload_feed",
+        lambda s, r: None,
+    )
+
+    publish_script(
+        script_file=script_file,
+        title="No Notes Episode",
+        feed_slug="general",
+        store=store,
+        r2_client=r2_client,
+        voice="ash",
+        category="News",
+        date_str="2026-03-13",
+    )
+
+    episodes = store.list_episodes(feed_slug="general")
+    assert len(episodes) == 1
+    assert episodes[0].summary is None
+    assert episodes[0].show_notes_html is None
+
+    store.close()
+
+
+def test_publish_script_tts_receives_stripped_text(tmp_path, monkeypatch) -> None:
+    """Verify TTS input file contains stripped text, not raw markdown."""
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+
+    script_file = tmp_path / "script.md"
+    script_file.write_text(
+        "## Heading\n\nThis is **bold** text.\n\n---\n\n*[END OF SCRIPT]*",
+        encoding="utf-8",
+    )
+
+    tts_input_text = []
+
+    def fake_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "ttsjoin":
+            input_file = cmd[cmd.index("--input-file") + 1]
+            tts_input_text.append(Path(input_file).read_text(encoding="utf-8"))
+            output_file = cmd[cmd.index("--output-file") + 1]
+            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
+            return subprocess.CompletedProcess(cmd, 0)
+        if cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(cmd, 0, stdout="30.0\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(
+        "pipeline.script_processor.regenerate_and_upload_feed",
+        lambda s, r: None,
+    )
+
+    publish_script(
+        script_file=script_file,
+        title="Strip Test",
+        feed_slug="test",
+        store=store,
+        r2_client=r2_client,
+        date_str="2026-03-13",
+    )
+
+    assert len(tts_input_text) == 1
+    assert "##" not in tts_input_text[0]
+    assert "**" not in tts_input_text[0]
+    assert "---" not in tts_input_text[0]
+    assert "[END OF SCRIPT]" not in tts_input_text[0]
+    assert "This is bold text." in tts_input_text[0]
+
+    store.close()
