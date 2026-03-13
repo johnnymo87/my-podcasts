@@ -117,7 +117,9 @@ def generate_feed_xml(store: StateStore, feed_slug: str | None = None) -> bytes:
         elif episode.summary:
             ET.SubElement(item, "description").text = episode.summary
 
-        show_notes_html = _build_show_notes_html(episode.summary, episode.articles_json)
+        show_notes_html = episode.show_notes_html or _build_show_notes_html(
+            episode.summary, episode.articles_json
+        )
         if show_notes_html:
             ET.SubElement(
                 item, "{http://purl.org/rss/1.0/modules/content/}encoded"
