@@ -254,8 +254,6 @@ def test_process_things_happen_with_show_notes(tmp_path, monkeypatch) -> None:
                 "exa_query": "",
                 "is_foreign_policy": False,
                 "fp_query": "",
-                "is_ai": False,
-                "ai_query": "",
                 "include_in_episode": True,
             }
         ],
@@ -341,8 +339,6 @@ def test_process_things_happen_filters_by_covered_headlines(
                 "exa_query": "",
                 "is_foreign_policy": False,
                 "fp_query": "",
-                "is_ai": False,
-                "ai_query": "",
                 "include_in_episode": True,
             },
             {
@@ -354,8 +350,6 @@ def test_process_things_happen_filters_by_covered_headlines(
                 "exa_query": "",
                 "is_foreign_policy": False,
                 "fp_query": "",
-                "is_ai": False,
-                "ai_query": "",
                 "include_in_episode": True,
             },
         ],

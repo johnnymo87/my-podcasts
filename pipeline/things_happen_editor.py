@@ -28,12 +28,6 @@ class RundownStoryDirective(BaseModel):
     fp_query: str = Field(
         description="A concise query to search antiwar/independent RSS feeds (2-4 keywords). Empty string if is_foreign_policy is false."
     )
-    is_ai: bool = Field(
-        description="True if the story focuses on artificial intelligence, LLMs, AI companies, or AI safety"
-    )
-    ai_query: str = Field(
-        description="A concise query to search AI-focused independent RSS feeds (2-4 keywords). Empty string if is_ai is false."
-    )
     include_in_episode: bool = Field(
         description="True if this story should be included in today's episode. Select 8-12 stories that best cover the major themes. Exclude foreign policy stories."
     )

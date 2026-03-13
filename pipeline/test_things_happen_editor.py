@@ -43,8 +43,6 @@ def test_generate_plan_success(mock_client_class, monkeypatch) -> None:
                 exa_query="tech company IPO 2026",
                 is_foreign_policy=False,
                 fp_query="",
-                is_ai=False,
-                ai_query="",
                 include_in_episode=True,
             ),
             RundownStoryDirective(
@@ -56,8 +54,6 @@ def test_generate_plan_success(mock_client_class, monkeypatch) -> None:
                 exa_query="",
                 is_foreign_policy=True,
                 fp_query="war breaks out",
-                is_ai=False,
-                ai_query="",
                 include_in_episode=False,
             ),
         ],

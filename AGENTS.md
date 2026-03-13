@@ -62,7 +62,7 @@ Daily current-affairs digest covering business, technology, AI, law, media, scie
 **Sources (all co-equal, read from persistent caches with adaptive lookback):**
 - Matt Levine's "Things Happen" links (extracted from email, cached to `/persist/my-podcasts/levine-cache/`)
 - Semafor RSS (`semafor.com/rss.xml`) — Business, Technology, Media, CEO, Energy categories + Politics (shared with FP Digest)
-- Zvi Mowshowitz / "Don't Worry About the Vase" (`thezvi.substack.com/feed`) — AI roundup sections split by topic, essays kept whole. Persistent cache at `/persist/my-podcasts/zvi-cache/` (180-day retention). Also used for AI enrichment via keyword search.
+- Zvi Mowshowitz / "Don't Worry About the Vase" (`thezvi.substack.com/feed`) — AI roundup sections split by topic, essays kept whole. Persistent cache at `/persist/my-podcasts/zvi-cache/` (180-day retention).
 
 **Subscription:** `https://podcast.mohrbacher.dev/feeds/the-rundown.xml`
 
@@ -72,7 +72,7 @@ Daily current-affairs digest covering business, technology, AI, law, media, scie
 1. Systemd timer triggers, or CLI: `uv run python -m pipeline the-rundown [--date YYYY-MM-DD] [--lookback N] [--dry-run]`
 2. `things_happen_collector.py` reads Levine links from cache, Semafor from cache, syncs Zvi cache — all within adaptive lookback window. Routes FP-flagged links to `/persist/my-podcasts/fp-routed-links/` for FP Digest.
 3. `things_happen_editor.py` (Gemini Flash-Lite) triages into 3-5 themes, selects 8-12 stories, writes `plan.json`
-4. Exa enrichment for paywalled articles + Zvi cache keyword search for AI perspectives
+4. Exa enrichment for paywalled articles
 5. `rundown_writer.py` generates script via opencode-serve (synchronous, no agent session)
 6. `things_happen_processor.py` runs TTS (`ttsjoin`) + publishes to R2 + updates feed
 
@@ -81,7 +81,7 @@ Daily current-affairs digest covering business, technology, AI, law, media, scie
 - `pipeline/rundown_writer.py` — synchronous script generator via opencode-serve
 - `pipeline/things_happen_collector.py` — article collection, Semafor integration, Zvi integration, FP routing
 - `pipeline/things_happen_editor.py` — Gemini AI for themed research plan (story selection, priority, FP flagging)
-- `pipeline/zvi_cache.py` — Zvi RSS fetch, roundup splitting, persistent cache, keyword search
+- `pipeline/zvi_cache.py` — Zvi RSS fetch, roundup splitting, persistent cache
 - `pipeline/exa_client.py` — Exa search API wrapper
 - `pipeline/rss_sources.py` — RSS source definitions, `SEMAFOR`, `categorize_semafor_article()`
 - `pipeline/source_cache.py` — Persistent cache sync for Semafor, Antiwar RSS, and Antiwar homepage

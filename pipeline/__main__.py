@@ -29,7 +29,6 @@ def _find_rundown_article_text(directive: Any, work_dir: Path) -> str:
     - work_dir/articles/semafor/{slug}.md
     - work_dir/articles/zvi/{slug}.md
     - work_dir/enrichment/exa/{slug}.md
-    - work_dir/enrichment/rss/{slug}*.md
     """
     from pipeline.things_happen_collector import _slugify
 
@@ -57,12 +56,6 @@ def _find_rundown_article_text(directive: Any, work_dir: Path) -> str:
     exa_file = work_dir / "enrichment" / "exa" / f"{slug}.md"
     if exa_file.exists():
         return exa_file.read_text(encoding="utf-8")
-
-    # RSS enrichment (Zvi AI perspectives)
-    rss_dir = work_dir / "enrichment" / "rss"
-    if rss_dir.exists():
-        for match in rss_dir.glob(f"*{slug}*.md"):
-            return match.read_text(encoding="utf-8")
 
     return ""
 

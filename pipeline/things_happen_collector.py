@@ -15,7 +15,7 @@ from pipeline.freshness import (
 from pipeline.rss_sources import categorize_semafor_article
 from pipeline.things_happen_editor import generate_rundown_research_plan
 from pipeline.things_happen_extractor import resolve_redirect_url
-from pipeline.zvi_cache import search_zvi_cache, sync_zvi_cache
+from pipeline.zvi_cache import sync_zvi_cache
 
 
 def _slugify(text: str) -> str:
@@ -49,10 +49,9 @@ def collect_all_artifacts(
     articles_dir = work_dir / "articles"
     enrichment_dir = work_dir / "enrichment"
     exa_dir = enrichment_dir / "exa"
-    rss_dir = enrichment_dir / "rss"
     context_dir = work_dir / "context"
 
-    for d in (articles_dir, exa_dir, rss_dir, context_dir):
+    for d in (articles_dir, exa_dir, context_dir):
         d.mkdir(parents=True, exist_ok=True)
 
     _et = ZoneInfo("America/New_York")
@@ -263,17 +262,3 @@ def collect_all_artifacts(
                     (exa_dir / f"{slug}.md").write_text(out, encoding="utf-8")
             except Exception as e:
                 print(f"[collector] Exa search failed for '{directive.exa_query}': {e}")
-
-        # Zvi cache search (AI)
-        if directive.is_ai and directive.ai_query:
-            try:
-                zvi_results = search_zvi_cache(directive.ai_query, zvi_cache)
-                if zvi_results:
-                    out = f"# Zvi Perspectives for: {directive.headline}\nQuery: {directive.ai_query}\n\n"
-                    for r in zvi_results:
-                        out += f"## [{r['headline']}]\n{r['snippet']}\n\n"
-                    (rss_dir / f"{slug}-ai.md").write_text(out, encoding="utf-8")
-            except Exception as e:
-                print(
-                    f"[collector] Zvi cache search failed for '{directive.ai_query}': {e}"
-                )

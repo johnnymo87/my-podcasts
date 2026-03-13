@@ -24,11 +24,9 @@ def test_slugify() -> None:
 @patch("pipeline.things_happen_collector.resolve_redirect_url")
 @patch("pipeline.things_happen_collector.generate_rundown_research_plan")
 @patch("pipeline.things_happen_collector.search_related")
-@patch("pipeline.things_happen_collector.search_zvi_cache")
 @patch("pipeline.things_happen_collector.sync_zvi_cache")
 def test_collect_all_artifacts(
     mock_zvi,
-    mock_zvi_search,
     mock_exa,
     mock_plan,
     mock_resolve,
@@ -56,22 +54,12 @@ def test_collect_all_artifacts(
                 exa_query="exa test",
                 is_foreign_policy=False,
                 fp_query="",
-                is_ai=True,
-                ai_query="ai test",
                 include_in_episode=True,
             )
         ],
     )
 
     mock_exa.return_value = [ExaResult(title="Exa", url="http://exa", text="Exa text")]
-    mock_zvi_search.return_value = [
-        {
-            "headline": "Zvi AI Take",
-            "path": "/fake/path",
-            "snippet": "Zvi AI text",
-            "score": 5.0,
-        }
-    ]
 
     # Setup fake context scripts
     scripts_dir = tmp_path / "scripts" / "the-rundown"
@@ -102,7 +90,6 @@ def test_collect_all_artifacts(
     # Verify directories created
     assert (work_dir / "articles").exists()
     assert (work_dir / "enrichment" / "exa").exists()
-    assert (work_dir / "enrichment" / "rss").exists()
     assert (work_dir / "context").exists()
 
     # Verify article written
@@ -118,11 +105,6 @@ def test_collect_all_artifacts(
     # Verify enrichment written
     exa_file = list((work_dir / "enrichment" / "exa").glob("*.md"))[0]
     assert "Exa text" in exa_file.read_text()
-
-    rss_ai_files = list((work_dir / "enrichment" / "rss").glob("*-ai.md"))
-    assert len(rss_ai_files) == 1
-    assert "Zvi AI text" in rss_ai_files[0].read_text()
-    assert "Zvi Perspectives" in rss_ai_files[0].read_text()
 
     # Verify plan.json written
     plan_path = work_dir / "plan.json"
@@ -161,9 +143,6 @@ def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "pipeline.things_happen_collector.search_related", lambda *a, **kw: []
     )
-    monkeypatch.setattr(
-        "pipeline.things_happen_collector.search_zvi_cache", lambda *a, **kw: []
-    )
 
     # Editor returns one FP link and one non-FP link
     monkeypatch.setattr(
@@ -180,8 +159,6 @@ def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
                     exa_query="",
                     is_foreign_policy=True,
                     fp_query="iran war",
-                    is_ai=False,
-                    ai_query="",
                     include_in_episode=False,
                 ),
                 RundownStoryDirective(
@@ -193,8 +170,6 @@ def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
                     exa_query="",
                     is_foreign_policy=False,
                     fp_query="",
-                    is_ai=False,
-                    ai_query="",
                     include_in_episode=True,
                 ),
             ],
@@ -343,91 +318,6 @@ def test_zvi_articles_added_to_work_dir(tmp_path, monkeypatch):
     zvi_files = list(zvi_dir.glob("*.md"))
     assert len(zvi_files) == 1
     assert "Fresh Essay" in zvi_files[0].read_text()
-
-
-def test_ai_enrichment_uses_zvi_cache(tmp_path, monkeypatch):
-    """When a directive has is_ai=True, enrichment searches the Zvi cache."""
-    monkeypatch.setattr(
-        "pipeline.things_happen_collector.fetch_all_articles",
-        lambda *a, **kw: [
-            Article(
-                headline="New AI Model",
-                url="https://example.com/ai",
-                content="AI model content",
-            ),
-        ],
-    )
-    monkeypatch.setattr(
-        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
-    )
-    monkeypatch.setattr(
-        "pipeline.things_happen_collector.search_related", lambda *a, **kw: []
-    )
-    monkeypatch.setattr(
-        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
-    )
-
-    monkeypatch.setattr(
-        "pipeline.things_happen_collector.generate_rundown_research_plan",
-        lambda *a, **kw: RundownResearchPlan(
-            themes=["AI"],
-            directives=[
-                RundownStoryDirective(
-                    headline="New AI Model",
-                    source="levine",
-                    priority=1,
-                    theme="AI",
-                    needs_exa=False,
-                    exa_query="",
-                    is_foreign_policy=False,
-                    fp_query="",
-                    is_ai=True,
-                    ai_query="new AI model release",
-                    include_in_episode=True,
-                ),
-            ],
-        ),
-    )
-
-    # Create a Zvi cache with a matching article
-    zvi_cache = tmp_path / "zvi-cache"
-    zvi_cache.mkdir()
-    (zvi_cache / "2026-03-07-ai-models.md").write_text(
-        "# AI Models Overview\n\nPost: AI Models\nURL: https://zvi.com\nPublished: 2026-03-07\nType: essay\n\n"
-        "A new AI model was released this week, achieving state of the art results."
-    )
-
-    # Write links to levine cache
-    _et = ZoneInfo("America/New_York")
-    today = datetime.now(tz=_et).strftime("%Y-%m-%d")
-    levine_cache = tmp_path / "levine-cache"
-    levine_cache.mkdir()
-    (levine_cache / f"{today}.json").write_text(
-        json.dumps([{"raw_url": "https://example.com/ai", "headline": "New AI Model"}])
-    )
-
-    work_dir = tmp_path / "work"
-    scripts_dir = tmp_path / "scripts"
-    scripts_dir.mkdir()
-    semafor_cache = tmp_path / "semafor-cache"
-    semafor_cache.mkdir()
-
-    collect_all_artifacts(
-        "test-job",
-        work_dir,
-        levine_cache_dir=levine_cache,
-        scripts_source_dir=scripts_dir,
-        zvi_cache_dir=zvi_cache,
-        semafor_cache_dir=semafor_cache,
-    )
-
-    # Enrichment should have written a Zvi match file
-    rss_dir = work_dir / "enrichment" / "rss"
-    ai_files = list(rss_dir.glob("*-ai.md"))
-    assert len(ai_files) == 1
-    content = ai_files[0].read_text()
-    assert "AI Models Overview" in content
-    assert "Zvi Perspectives" in content
 
 
 def test_semafor_reads_from_cache(tmp_path, monkeypatch):

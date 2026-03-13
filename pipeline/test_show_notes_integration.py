@@ -27,8 +27,6 @@ def test_show_notes_end_to_end(tmp_path, monkeypatch) -> None:
                 "exa_query": "",
                 "is_foreign_policy": False,
                 "fp_query": "",
-                "is_ai": False,
-                "ai_query": "",
                 "include_in_episode": True,
             },
             {
@@ -40,8 +38,6 @@ def test_show_notes_end_to_end(tmp_path, monkeypatch) -> None:
                 "exa_query": "",
                 "is_foreign_policy": False,
                 "fp_query": "",
-                "is_ai": False,
-                "ai_query": "",
                 "include_in_episode": True,
             },
         ],
