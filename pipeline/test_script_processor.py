@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+from unittest.mock import MagicMock
 from xml.etree import ElementTree as ET
 
 from pipeline.db import Episode, StateStore
 from pipeline.feed import generate_feed_xml
+from pipeline.script_processor import (
+    extract_summary,
+    publish_script,
+    render_show_notes_html,
+    strip_markdown_for_tts,
+)
 
 
 def test_episode_show_notes_html_stored_and_retrieved(tmp_path) -> None:
@@ -37,7 +46,7 @@ def test_episode_show_notes_html_stored_and_retrieved(tmp_path) -> None:
 
 
 def test_feed_uses_show_notes_html_when_set(tmp_path, monkeypatch) -> None:
-    """Episodes with show_notes_html use it for content:encoded instead of articles_json."""
+    """show_notes_html is used for content:encoded instead of articles_json."""
     monkeypatch.setenv("PODCAST_BASE_URL", "https://podcast.test")
     store = StateStore(tmp_path / "test.sqlite3")
 
@@ -77,9 +86,6 @@ def test_feed_uses_show_notes_html_when_set(tmp_path, monkeypatch) -> None:
     store.close()
 
 
-from pipeline.script_processor import strip_markdown_for_tts
-
-
 def test_strip_markdown_headings() -> None:
     text = "# Title\n\n## ACT 1: THE DREAM\n\nSome text.\n\n### Story One\n\nMore text."
     result = strip_markdown_for_tts(text)
@@ -116,9 +122,6 @@ def test_strip_preserves_content() -> None:
     text = "Two point two billion dollars. That's the average cost."
     result = strip_markdown_for_tts(text)
     assert result.strip() == text
-
-
-from pipeline.script_processor import extract_summary, render_show_notes_html
 
 
 def test_extract_summary_from_show_notes() -> None:
@@ -168,13 +171,6 @@ def test_render_show_notes_handles_tables() -> None:
     html = render_show_notes_html(md)
     assert "<table>" in html
     assert "Vioxx" in html
-
-
-import subprocess
-from pathlib import Path
-from unittest.mock import MagicMock
-
-from pipeline.script_processor import publish_script
 
 
 def test_publish_script_end_to_end(tmp_path, monkeypatch) -> None:

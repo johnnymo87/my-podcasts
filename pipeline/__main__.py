@@ -376,8 +376,8 @@ def the_rundown_command(
     date_str: str | None, dry_run: bool, lookback_days: int | None
 ) -> None:
     """Create and launch a Rundown episode."""
-    from zoneinfo import ZoneInfo
     from datetime import datetime
+    from zoneinfo import ZoneInfo
 
     if date_str is None:
         date_str = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
@@ -614,9 +614,10 @@ def publish_script_command(
         date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
 
     if dry_run:
-        from pipeline.script_processor import strip_markdown_for_tts
         import subprocess
         import tempfile
+
+        from pipeline.script_processor import strip_markdown_for_tts
 
         raw = script_file.read_text(encoding="utf-8")
         tts_text = strip_markdown_for_tts(raw)

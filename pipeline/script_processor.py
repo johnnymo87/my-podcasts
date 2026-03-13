@@ -14,6 +14,7 @@ import markdown as md_lib
 
 from pipeline.feed import regenerate_and_upload_feed
 
+
 if TYPE_CHECKING:
     from pipeline.db import StateStore
     from pipeline.r2 import R2Client
