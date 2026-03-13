@@ -29,6 +29,7 @@ class Episode:
     duration_seconds: int | None
     summary: str | None = None
     articles_json: str | None = None
+    show_notes_html: str | None = None
 
 
 SCHEMA = """
@@ -117,6 +118,7 @@ class StateStore:
             "source_url": "ALTER TABLE episodes ADD COLUMN source_url TEXT",
             "summary": "ALTER TABLE episodes ADD COLUMN summary TEXT",
             "articles_json": "ALTER TABLE episodes ADD COLUMN articles_json TEXT",
+            "show_notes_html": "ALTER TABLE episodes ADD COLUMN show_notes_html TEXT",
         }
         for column, ddl in migrations.items():
             if column not in existing_cols:
@@ -157,9 +159,10 @@ class StateStore:
                     size_bytes,
                     duration_seconds,
                     summary,
-                    articles_json
+                    articles_json,
+                    show_notes_html
                 )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 episode.id,
@@ -176,6 +179,7 @@ class StateStore:
                 episode.duration_seconds,
                 episode.summary,
                 episode.articles_json,
+                episode.show_notes_html,
             ),
         )
         self._conn.commit()
@@ -198,7 +202,8 @@ class StateStore:
                     size_bytes,
                     duration_seconds,
                     summary,
-                    articles_json
+                    articles_json,
+                    show_notes_html
                 FROM episodes
                 WHERE feed_slug = ?
                 ORDER BY created_at DESC
@@ -222,7 +227,8 @@ class StateStore:
                     size_bytes,
                     duration_seconds,
                     summary,
-                    articles_json
+                    articles_json,
+                    show_notes_html
                 FROM episodes
                 ORDER BY created_at DESC
                 """
@@ -243,6 +249,7 @@ class StateStore:
                 duration_seconds=row["duration_seconds"],
                 summary=row["summary"],
                 articles_json=row["articles_json"],
+                show_notes_html=row["show_notes_html"],
             )
             for row in rows
         ]
