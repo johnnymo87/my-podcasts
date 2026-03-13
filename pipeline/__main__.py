@@ -12,6 +12,7 @@ from pipeline.db import StateStore
 from pipeline.feed import regenerate_and_upload_feed
 from pipeline.processor import process_local_eml_file
 from pipeline.r2 import R2Client
+from pipeline.script_processor import publish_script
 from pipeline.source_cache import (
     sync_antiwar_homepage_cache,
     sync_antiwar_rss_cache,
@@ -561,6 +562,110 @@ def _the_rundown_full_run(date_str: str, lookback_override: int | None = None) -
         shutil.copy(script_file, persist_dir / f"{date_str}.txt")
 
         click.echo(f"Published The Rundown for {date_str}")
+    finally:
+        store.close()
+
+
+@cli.command("publish-script")
+@click.option(
+    "--script-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="Path to the script file (markdown or plain text).",
+)
+@click.option("--title", required=True, type=str, help="Episode title.")
+@click.option("--feed-slug", required=True, type=str, help="Feed slug to publish on.")
+@click.option(
+    "--show-notes",
+    "show_notes_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to markdown show notes file.",
+)
+@click.option("--voice", default="nova", show_default=True, type=str)
+@click.option("--category", default="Technology", show_default=True, type=str)
+@click.option(
+    "--date",
+    "date_str",
+    default=None,
+    type=str,
+    help="Date (YYYY-MM-DD). Defaults to today.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Run TTS locally but don't publish to R2 or insert into DB.",
+)
+def publish_script_command(
+    script_file: Path,
+    title: str,
+    feed_slug: str,
+    show_notes_file: Path | None,
+    voice: str,
+    category: str,
+    date_str: str | None,
+    dry_run: bool,
+) -> None:
+    """Publish a podcast episode from a pre-written script file."""
+    from datetime import UTC, datetime
+
+    if date_str is None:
+        date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+
+    if dry_run:
+        from pipeline.script_processor import strip_markdown_for_tts
+        import subprocess
+        import tempfile
+
+        raw = script_file.read_text(encoding="utf-8")
+        tts_text = strip_markdown_for_tts(raw)
+
+        with tempfile.TemporaryDirectory(prefix="publish-script-dry-") as tmp_dir:
+            tmp = Path(tmp_dir)
+            input_txt = tmp / "dry-run.txt"
+            output_mp3 = tmp / "dry-run.mp3"
+            input_txt.write_text(tts_text, encoding="utf-8")
+
+            cmd = [
+                "ttsjoin",
+                "--input-file",
+                str(input_txt),
+                "--output-file",
+                str(output_mp3),
+                "--model",
+                "tts-1-hd",
+                "--voice",
+                voice,
+            ]
+            click.echo(f"Running TTS (dry run, voice={voice})...")
+            subprocess.run(cmd, check=True)
+            size = output_mp3.stat().st_size
+            click.echo(f"MP3 generated: {output_mp3} ({size} bytes)")
+            click.echo("Dry run complete. No episode published.")
+        return
+
+    store = StateStore(_default_state_db_path())
+    try:
+        r2_client = R2Client()
+        click.echo(f"Publishing '{title}' to feed '{feed_slug}'...")
+        result = publish_script(
+            script_file=script_file,
+            title=title,
+            feed_slug=feed_slug,
+            store=store,
+            r2_client=r2_client,
+            show_notes_file=show_notes_file,
+            voice=voice,
+            category=category,
+            date_str=date_str,
+        )
+        click.echo(f"Published: {result.r2_key}")
+        click.echo(f"Title: {result.title}")
+        click.echo(f"Feed: {result.feed_slug}")
+        click.echo(f"Size: {result.size_bytes} bytes")
+        if result.duration_seconds is not None:
+            click.echo(f"Duration: {result.duration_seconds} sec")
     finally:
         store.close()
 
