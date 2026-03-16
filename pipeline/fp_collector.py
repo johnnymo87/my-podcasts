@@ -399,3 +399,14 @@ def collect_fp_artifacts(
                 print(
                     f"[fp_collector] Exa search failed for '{directive.exa_query}': {e}"
                 )
+
+    # Write sentinel — collection completed successfully
+    sentinel = {
+        "job_id": job_id,
+        "completed_at": datetime.now(tz=_et).isoformat(),
+        "lookback_days": lookback_days,
+        "directives": len(plan.directives),
+    }
+    (work_dir / "collection_done.json").write_text(
+        json.dumps(sentinel, indent=2), encoding="utf-8"
+    )

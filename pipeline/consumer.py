@@ -317,32 +317,44 @@ def consume_forever(
                         )
                         from pipeline.things_happen_editor import RundownResearchPlan
 
-                        print(
-                            f"Running Rundown collection: "
-                            f"{job['id']} ({job['date_str']})"
-                        )
-                        rundown_lookback = _compute_lookback(store, "the-rundown")
-                        rundown_coverage = store.recent_coverage_summary(
-                            "the-rundown", days=3
-                        )
-                        rundown_prior_urls = store.recent_article_urls(
-                            "the-rundown", days=3
-                        )
-                        collect_all_artifacts(
-                            job["id"],
-                            work_dir,
-                            levine_cache_dir=Path("/persist/my-podcasts/levine-cache"),
-                            semafor_cache_dir=Path(
-                                "/persist/my-podcasts/semafor-cache"
-                            ),
-                            zvi_cache_dir=Path("/persist/my-podcasts/zvi-cache"),
-                            fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
-                            lookback_days=rundown_lookback,
-                            coverage_summary=rundown_coverage,
-                            prior_urls=rundown_prior_urls,
-                        )
-
+                        collection_sentinel = work_dir / "collection_done.json"
                         plan_path = work_dir / "plan.json"
+
+                        if collection_sentinel.exists() and plan_path.exists():
+                            print(
+                                f"Reusing prior collection for Rundown: "
+                                f"{job['id']} ({job['date_str']})"
+                            )
+                        else:
+                            print(
+                                f"Running Rundown collection: "
+                                f"{job['id']} ({job['date_str']})"
+                            )
+                            rundown_lookback = _compute_lookback(store, "the-rundown")
+                            rundown_coverage = store.recent_coverage_summary(
+                                "the-rundown", days=3
+                            )
+                            rundown_prior_urls = store.recent_article_urls(
+                                "the-rundown", days=3
+                            )
+                            collect_all_artifacts(
+                                job["id"],
+                                work_dir,
+                                levine_cache_dir=Path(
+                                    "/persist/my-podcasts/levine-cache"
+                                ),
+                                semafor_cache_dir=Path(
+                                    "/persist/my-podcasts/semafor-cache"
+                                ),
+                                zvi_cache_dir=Path("/persist/my-podcasts/zvi-cache"),
+                                fp_routed_dir=Path(
+                                    "/persist/my-podcasts/fp-routed-links"
+                                ),
+                                lookback_days=rundown_lookback,
+                                coverage_summary=rundown_coverage,
+                                prior_urls=rundown_prior_urls,
+                            )
+
                         if not plan_path.exists():
                             print(
                                 f"No plan generated for Rundown {job['id']}, skipping"
@@ -437,32 +449,46 @@ def consume_forever(
                         shutil.copy(script_file, persist_dir / f"{job['date_str']}.txt")
                     else:
                         # Full pipeline: collect -> edit -> write -> save script
-                        print(
-                            f"Running FP digest collection: "
-                            f"{job['id']} ({job['date_str']})"
-                        )
-                        fp_lookback = _compute_lookback(store, "fp-digest")
-                        fp_coverage = store.recent_coverage_summary("fp-digest", days=3)
-                        fp_prior_urls = store.recent_article_urls("fp-digest", days=3)
-                        collect_fp_artifacts(
-                            job["id"],
-                            work_dir,
-                            fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
-                            homepage_cache_dir=Path(
-                                "/persist/my-podcasts/antiwar-homepage-cache"
-                            ),
-                            antiwar_rss_cache_dir=Path(
-                                "/persist/my-podcasts/antiwar-rss-cache"
-                            ),
-                            semafor_cache_dir=Path(
-                                "/persist/my-podcasts/semafor-cache"
-                            ),
-                            lookback_days=fp_lookback,
-                            coverage_summary=fp_coverage,
-                            prior_urls=fp_prior_urls,
-                        )
-
+                        collection_sentinel = work_dir / "collection_done.json"
                         plan_path = work_dir / "plan.json"
+
+                        if collection_sentinel.exists() and plan_path.exists():
+                            print(
+                                f"Reusing prior collection for FP digest: "
+                                f"{job['id']} ({job['date_str']})"
+                            )
+                        else:
+                            print(
+                                f"Running FP digest collection: "
+                                f"{job['id']} ({job['date_str']})"
+                            )
+                            fp_lookback = _compute_lookback(store, "fp-digest")
+                            fp_coverage = store.recent_coverage_summary(
+                                "fp-digest", days=3
+                            )
+                            fp_prior_urls = store.recent_article_urls(
+                                "fp-digest", days=3
+                            )
+                            collect_fp_artifacts(
+                                job["id"],
+                                work_dir,
+                                fp_routed_dir=Path(
+                                    "/persist/my-podcasts/fp-routed-links"
+                                ),
+                                homepage_cache_dir=Path(
+                                    "/persist/my-podcasts/antiwar-homepage-cache"
+                                ),
+                                antiwar_rss_cache_dir=Path(
+                                    "/persist/my-podcasts/antiwar-rss-cache"
+                                ),
+                                semafor_cache_dir=Path(
+                                    "/persist/my-podcasts/semafor-cache"
+                                ),
+                                lookback_days=fp_lookback,
+                                coverage_summary=fp_coverage,
+                                prior_urls=fp_prior_urls,
+                            )
+
                         if not plan_path.exists():
                             print(
                                 f"No plan generated for FP digest {job['id']}, skipping"

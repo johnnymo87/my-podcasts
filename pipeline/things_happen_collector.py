@@ -262,3 +262,17 @@ def collect_all_artifacts(
                     (exa_dir / f"{slug}.md").write_text(out, encoding="utf-8")
             except Exception as e:
                 print(f"[collector] Exa search failed for '{directive.exa_query}': {e}")
+
+    # Write sentinel — collection completed successfully
+    sentinel = {
+        "job_id": job_id,
+        "completed_at": datetime.now(tz=_et).isoformat(),
+        "lookback_days": lookback_days,
+        "levine_articles": len(articles),
+        "directives": len(plan.directives),
+        "fp_routed": len(fp_directives),
+        "enriched": len(non_fp_directives),
+    }
+    (work_dir / "collection_done.json").write_text(
+        json.dumps(sentinel, indent=2), encoding="utf-8"
+    )

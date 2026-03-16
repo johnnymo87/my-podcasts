@@ -74,7 +74,7 @@ def test_generate_script(
     assert result.summary == ""
     mock_create.assert_called_once()
     mock_send.assert_called_once()
-    mock_wait.assert_called_once_with("ses_123", timeout=120)
+    mock_wait.assert_called_once_with("ses_123", timeout=300)
     mock_delete.assert_called_once_with("ses_123")
 
 
@@ -94,7 +94,7 @@ def test_generate_script_timeout_raises(mock_create, mock_send, mock_wait, mock_
         )
         assert False, "Should have raised RuntimeError"
     except RuntimeError as e:
-        assert "120 seconds" in str(e)
+        assert "300 seconds" in str(e)
 
     mock_delete.assert_called_once_with("ses_timeout")
 

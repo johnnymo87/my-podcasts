@@ -181,8 +181,8 @@ def generate_rundown_script(
     try:
         send_prompt_async(session_id, instruction)
 
-        if not wait_for_idle(session_id, timeout=120):
-            raise RuntimeError("opencode session did not complete within 120 seconds")
+        if not wait_for_idle(session_id, timeout=300):
+            raise RuntimeError("opencode session did not complete within 300 seconds")
 
         messages = get_messages(session_id)
         full_text = get_last_assistant_text(messages).strip()
