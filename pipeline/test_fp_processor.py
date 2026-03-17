@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from pipeline.fp_processor import process_fp_digest_job
 
 
@@ -245,5 +247,38 @@ def test_process_fp_filters_by_covered_headlines(tmp_path, monkeypatch) -> None:
     # Only Gaza should appear, not Mali
     assert len(articles) == 1
     assert articles[0]["title"] == "Gaza Ceasefire Talks"
+
+    store.close()
+
+
+def test_process_fp_digest_job_rejects_empty_script(tmp_path, monkeypatch) -> None:
+    from pipeline.db import StateStore
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+
+    past = (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()
+    store._conn.execute(
+        """INSERT INTO pending_fp_digest
+           (id, date_str, status, process_after)
+           VALUES (?, ?, ?, ?)""",
+        ("fp-job-empty", "2026-03-17", "pending", past),
+    )
+    store._conn.commit()
+
+    script_file = tmp_path / "fp_empty_script.txt"
+    script_file.write_text("   \n", encoding="utf-8")
+
+    def fail_if_called(cmd, **kwargs):
+        raise AssertionError(f"subprocess.run should not be called: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fail_if_called)
+
+    job = store.list_due_fp_digest()[0]
+    with pytest.raises(RuntimeError, match="empty script"):
+        process_fp_digest_job(job, store, r2_client, script_path=script_file)
+
+    r2_client.upload_file.assert_not_called()
+    assert len(store.list_due_fp_digest()) == 1
 
     store.close()

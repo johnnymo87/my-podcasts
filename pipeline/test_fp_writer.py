@@ -58,7 +58,7 @@ def test_generate_fp_script(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "pipeline.fp_writer.wait_for_idle",
-        lambda session_id, timeout=120: True,
+        lambda session_id, timeout=300: True,
     )
     monkeypatch.setattr(
         "pipeline.fp_writer.get_messages",
@@ -97,7 +97,7 @@ def test_generate_fp_returns_writer_output_with_summary(monkeypatch) -> None:
     )
     monkeypatch.setattr("pipeline.fp_writer.send_prompt_async", lambda sid, text: None)
     monkeypatch.setattr(
-        "pipeline.fp_writer.wait_for_idle", lambda sid, timeout=120: True
+        "pipeline.fp_writer.wait_for_idle", lambda sid, timeout=300: True
     )
     monkeypatch.setattr(
         "pipeline.fp_writer.get_messages",
@@ -136,7 +136,7 @@ def test_generate_fp_script_timeout(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "pipeline.fp_writer.wait_for_idle",
-        lambda session_id, timeout=120: False,
+        lambda session_id, timeout=300: False,
     )
     deleted: list[str] = []
     monkeypatch.setattr(
@@ -147,8 +147,48 @@ def test_generate_fp_script_timeout(monkeypatch) -> None:
     themes = ["Iran Nuclear Deal"]
     articles_by_theme = {"Iran Nuclear Deal": ["Iran talks resumed."]}
 
-    with pytest.raises(RuntimeError, match="120 seconds"):
+    with pytest.raises(RuntimeError, match="300 seconds"):
         generate_fp_script(themes, articles_by_theme, date_str="2026-03-06")
 
     # delete_session must be called in finally block even on error
     assert "sess-fp-timeout" in deleted
+
+
+def test_generate_fp_script_rejects_empty_output(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "pipeline.fp_writer.create_session",
+        lambda directory=None: "sess-fp-empty",
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_writer.send_prompt_async",
+        lambda session_id, text: None,
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_writer.wait_for_idle",
+        lambda session_id, timeout=300: True,
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_writer.get_messages",
+        lambda session_id: [
+            {
+                "role": "assistant",
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": "<summary>FP summary.</summary>\n\n<script>   </script>",
+                    }
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_writer.delete_session",
+        lambda session_id: None,
+    )
+
+    with pytest.raises(RuntimeError, match="empty script"):
+        generate_fp_script(
+            themes=["Iran Nuclear Deal"],
+            articles_by_theme={"Iran Nuclear Deal": ["Iran talks resumed in Vienna."]},
+            date_str="2026-03-06",
+        )

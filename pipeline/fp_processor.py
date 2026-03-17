@@ -61,7 +61,9 @@ def process_fp_digest_job(
     date_str = job["date_str"]
 
     # Step 1: Read script from script_path.
-    script = script_path.read_text(encoding="utf-8")
+    script = script_path.read_text(encoding="utf-8").strip()
+    if not script:
+        raise RuntimeError(f"FP digest job {job_id} has empty script")
 
     # Step 2: TTS via ttsjoin.
     episode_slug = f"{date_str}-fp-digest"
