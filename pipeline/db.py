@@ -71,6 +71,8 @@ CREATE TABLE IF NOT EXISTS pending_fp_digest (
     date_str TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL DEFAULT 'pending',
     process_after TEXT NOT NULL,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -79,6 +81,8 @@ CREATE TABLE IF NOT EXISTS pending_the_rundown (
     date_str TEXT NOT NULL UNIQUE,
     status TEXT NOT NULL DEFAULT 'pending',
     process_after TEXT NOT NULL,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
@@ -123,6 +127,51 @@ class StateStore:
         for column, ddl in migrations.items():
             if column not in existing_cols:
                 self._conn.execute(ddl)
+
+        self._ensure_pending_retry_columns("pending_fp_digest")
+        self._ensure_pending_retry_columns("pending_the_rundown")
+
+    def _ensure_pending_retry_columns(self, table_name: str) -> None:
+        existing_cols = {
+            row["name"]
+            for row in self._conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if "failure_count" not in existing_cols:
+            self._conn.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "last_error" not in existing_cols:
+            self._conn.execute(f"ALTER TABLE {table_name} ADD COLUMN last_error TEXT")
+
+    def _next_retry_process_after(self, failure_count: int) -> str:
+        # Backoff schedule: 1m, 2m, 4m, 8m, then cap at 15m.
+        delay_minutes = min(15, 2 ** max(0, failure_count - 1))
+        return (datetime.now(tz=UTC) + timedelta(minutes=delay_minutes)).isoformat()
+
+    def _mark_pending_job_failed(
+        self, table_name: str, job_id: str, error: str
+    ) -> tuple[int, str]:
+        row = self._conn.execute(
+            f"SELECT failure_count FROM {table_name} WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Unknown job id: {job_id}")
+        failure_count = int(row["failure_count"] or 0) + 1
+        process_after = self._next_retry_process_after(failure_count)
+        self._conn.execute(
+            f"UPDATE {table_name} SET status = 'pending', failure_count = ?, last_error = ?, process_after = ? WHERE id = ?",
+            (failure_count, error[:500], process_after, job_id),
+        )
+        self._conn.commit()
+        return failure_count, process_after
+
+    def _mark_pending_job_completed(self, table_name: str, job_id: str) -> None:
+        self._conn.execute(
+            f"UPDATE {table_name} SET status = 'completed', failure_count = 0, last_error = NULL WHERE id = ?",
+            (job_id,),
+        )
+        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -451,11 +500,11 @@ class StateStore:
 
     def mark_fp_digest_completed(self, job_id: str) -> None:
         """Set fp_digest job status to 'completed'."""
-        self._conn.execute(
-            "UPDATE pending_fp_digest SET status = 'completed' WHERE id = ?",
-            (job_id,),
-        )
-        self._conn.commit()
+        self._mark_pending_job_completed("pending_fp_digest", job_id)
+
+    def mark_fp_digest_failed(self, job_id: str, error: str) -> tuple[int, str]:
+        """Increment failure count and schedule the next fp_digest retry."""
+        return self._mark_pending_job_failed("pending_fp_digest", job_id, error)
 
     def insert_pending_the_rundown(self, date_str: str) -> str | None:
         """Insert a pending the_rundown job.
@@ -490,8 +539,8 @@ class StateStore:
 
     def mark_the_rundown_completed(self, job_id: str) -> None:
         """Set the_rundown job status to 'completed'."""
-        self._conn.execute(
-            "UPDATE pending_the_rundown SET status = 'completed' WHERE id = ?",
-            (job_id,),
-        )
-        self._conn.commit()
+        self._mark_pending_job_completed("pending_the_rundown", job_id)
+
+    def mark_the_rundown_failed(self, job_id: str, error: str) -> tuple[int, str]:
+        """Increment failure count and schedule the next the_rundown retry."""
+        return self._mark_pending_job_failed("pending_the_rundown", job_id, error)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from pipeline.db import StateStore
 
 
@@ -45,4 +47,46 @@ def test_no_duplicate_for_same_date(tmp_path) -> None:
     assert job_id_2 is None
     due = store.list_due_fp_digest()
     assert len(due) == 1
+    store.close()
+
+
+def test_mark_fp_digest_failed_schedules_retry(tmp_path) -> None:
+    store = StateStore(tmp_path / "test.sqlite3")
+    job_id = store.insert_pending_fp_digest(date_str="2026-03-06")
+    assert job_id is not None
+
+    store.mark_fp_digest_failed(job_id, "upstream error")
+
+    assert store.list_due_fp_digest() == []
+    row = store._conn.execute(
+        "SELECT failure_count, last_error, process_after FROM pending_fp_digest WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    assert row["failure_count"] == 1
+    assert row["last_error"] == "upstream error"
+    assert datetime.fromisoformat(row["process_after"]) > datetime.now(tz=UTC)
+    store.close()
+
+
+def test_mark_fp_digest_failed_increases_backoff(tmp_path) -> None:
+    store = StateStore(tmp_path / "test.sqlite3")
+    job_id = store.insert_pending_fp_digest(date_str="2026-03-06")
+    assert job_id is not None
+
+    store.mark_fp_digest_failed(job_id, "first")
+    first = store._conn.execute(
+        "SELECT failure_count, process_after FROM pending_fp_digest WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    store.mark_fp_digest_failed(job_id, "second")
+    second = store._conn.execute(
+        "SELECT failure_count, process_after FROM pending_fp_digest WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+
+    assert first["failure_count"] == 1
+    assert second["failure_count"] == 2
+    assert datetime.fromisoformat(second["process_after"]) > datetime.fromisoformat(
+        first["process_after"]
+    )
     store.close()

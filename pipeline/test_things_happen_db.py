@@ -94,3 +94,20 @@ def test_mark_the_rundown_completed(tmp_path):
     store.mark_the_rundown_completed(job_id)
     assert store.list_due_the_rundown() == []
     store.close()
+
+
+def test_mark_the_rundown_failed_schedules_retry(tmp_path):
+    store = StateStore(tmp_path / "test.db")
+    job_id = store.insert_pending_the_rundown("2026-03-09")
+    assert job_id is not None
+
+    store.mark_the_rundown_failed(job_id, "upstream error")
+
+    assert store.list_due_the_rundown() == []
+    row = store._conn.execute(
+        "SELECT failure_count, last_error FROM pending_the_rundown WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    assert row["failure_count"] == 1
+    assert row["last_error"] == "upstream error"
+    store.close()
