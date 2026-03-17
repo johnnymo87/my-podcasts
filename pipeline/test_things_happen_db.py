@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
-from pipeline.db import StateStore
+from pipeline.db import MAX_RETRY_FAILURES, StateStore
 
 
 def test_insert_and_list_pending_things_happen(tmp_path) -> None:
@@ -109,5 +109,28 @@ def test_mark_the_rundown_failed_schedules_retry(tmp_path):
         (job_id,),
     ).fetchone()
     assert row["failure_count"] == 1
+    assert row["last_error"] == "upstream error"
+    store.close()
+
+
+def test_mark_the_rundown_failed_marks_job_errored_after_retry_budget(tmp_path):
+    store = StateStore(tmp_path / "test.db")
+    job_id = store.insert_pending_the_rundown("2026-03-09")
+    assert job_id is not None
+
+    result = None
+    for _ in range(MAX_RETRY_FAILURES):
+        result = store.mark_the_rundown_failed(job_id, "upstream error")
+
+    assert result is not None
+    assert result.exhausted is True
+    assert result.status == "errored"
+    assert store.list_due_the_rundown() == []
+    row = store._conn.execute(
+        "SELECT status, failure_count, last_error FROM pending_the_rundown WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    assert row["status"] == "errored"
+    assert row["failure_count"] == MAX_RETRY_FAILURES
     assert row["last_error"] == "upstream error"
     store.close()

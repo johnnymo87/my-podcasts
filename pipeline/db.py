@@ -32,6 +32,17 @@ class Episode:
     show_notes_html: str | None = None
 
 
+@dataclass(frozen=True)
+class RetryUpdate:
+    failure_count: int
+    process_after: str | None
+    status: str
+    exhausted: bool
+
+
+MAX_RETRY_FAILURES = 51
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS episodes (
     id TEXT PRIMARY KEY,
@@ -150,7 +161,7 @@ class StateStore:
 
     def _mark_pending_job_failed(
         self, table_name: str, job_id: str, error: str
-    ) -> tuple[int, str]:
+    ) -> RetryUpdate:
         row = self._conn.execute(
             f"SELECT failure_count FROM {table_name} WHERE id = ?",
             (job_id,),
@@ -158,13 +169,30 @@ class StateStore:
         if row is None:
             raise ValueError(f"Unknown job id: {job_id}")
         failure_count = int(row["failure_count"] or 0) + 1
+        if failure_count >= MAX_RETRY_FAILURES:
+            self._conn.execute(
+                f"UPDATE {table_name} SET status = 'errored', failure_count = ?, last_error = ? WHERE id = ?",
+                (failure_count, error[:500], job_id),
+            )
+            self._conn.commit()
+            return RetryUpdate(
+                failure_count=failure_count,
+                process_after=None,
+                status="errored",
+                exhausted=True,
+            )
         process_after = self._next_retry_process_after(failure_count)
         self._conn.execute(
             f"UPDATE {table_name} SET status = 'pending', failure_count = ?, last_error = ?, process_after = ? WHERE id = ?",
             (failure_count, error[:500], process_after, job_id),
         )
         self._conn.commit()
-        return failure_count, process_after
+        return RetryUpdate(
+            failure_count=failure_count,
+            process_after=process_after,
+            status="pending",
+            exhausted=False,
+        )
 
     def _mark_pending_job_completed(self, table_name: str, job_id: str) -> None:
         self._conn.execute(
@@ -502,7 +530,7 @@ class StateStore:
         """Set fp_digest job status to 'completed'."""
         self._mark_pending_job_completed("pending_fp_digest", job_id)
 
-    def mark_fp_digest_failed(self, job_id: str, error: str) -> tuple[int, str]:
+    def mark_fp_digest_failed(self, job_id: str, error: str) -> RetryUpdate:
         """Increment failure count and schedule the next fp_digest retry."""
         return self._mark_pending_job_failed("pending_fp_digest", job_id, error)
 
@@ -541,6 +569,6 @@ class StateStore:
         """Set the_rundown job status to 'completed'."""
         self._mark_pending_job_completed("pending_the_rundown", job_id)
 
-    def mark_the_rundown_failed(self, job_id: str, error: str) -> tuple[int, str]:
+    def mark_the_rundown_failed(self, job_id: str, error: str) -> RetryUpdate:
         """Increment failure count and schedule the next the_rundown retry."""
         return self._mark_pending_job_failed("pending_the_rundown", job_id, error)

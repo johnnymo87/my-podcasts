@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from pipeline.db import StateStore
+from pipeline.db import MAX_RETRY_FAILURES, StateStore
 
 
 def test_fp_digest_table_created(tmp_path) -> None:
@@ -89,4 +89,27 @@ def test_mark_fp_digest_failed_increases_backoff(tmp_path) -> None:
     assert datetime.fromisoformat(second["process_after"]) > datetime.fromisoformat(
         first["process_after"]
     )
+    store.close()
+
+
+def test_mark_fp_digest_failed_marks_job_errored_after_retry_budget(tmp_path) -> None:
+    store = StateStore(tmp_path / "test.sqlite3")
+    job_id = store.insert_pending_fp_digest(date_str="2026-03-06")
+    assert job_id is not None
+
+    result = None
+    for _ in range(MAX_RETRY_FAILURES):
+        result = store.mark_fp_digest_failed(job_id, "upstream error")
+
+    assert result is not None
+    assert result.exhausted is True
+    assert result.status == "errored"
+    assert store.list_due_fp_digest() == []
+    row = store._conn.execute(
+        "SELECT status, failure_count, last_error FROM pending_fp_digest WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    assert row["status"] == "errored"
+    assert row["failure_count"] == MAX_RETRY_FAILURES
+    assert row["last_error"] == "upstream error"
     store.close()

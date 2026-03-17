@@ -189,6 +189,8 @@ def generate_rundown_script(
         covered = parse_covered(full_text)
         summary_result = parse_summary(full_text)
         script = _extract_script(summary_result.script)
+        if not script.strip():
+            raise RuntimeError("Rundown writer returned empty script")
         return WriterOutput(
             script=script,
             summary=summary_result.summary,

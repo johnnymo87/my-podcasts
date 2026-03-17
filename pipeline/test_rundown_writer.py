@@ -125,6 +125,31 @@ def test_generate_script_extracts_script_tags(
     assert result.summary == ""
 
 
+@patch("pipeline.rundown_writer.delete_session")
+@patch("pipeline.rundown_writer.get_last_assistant_text")
+@patch("pipeline.rundown_writer.get_messages")
+@patch("pipeline.rundown_writer.wait_for_idle")
+@patch("pipeline.rundown_writer.send_prompt_async")
+@patch("pipeline.rundown_writer.create_session")
+def test_generate_rundown_script_rejects_empty_output(
+    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete
+):
+    mock_create.return_value = "ses_empty"
+    mock_wait.return_value = True
+    mock_messages.return_value = [{"role": "assistant", "parts": []}]
+    mock_text.return_value = "<summary>Today.</summary>\n\n<script>   </script>"
+
+    try:
+        generate_rundown_script(
+            themes=["Tech"],
+            articles_by_theme={"Tech": ["Article"]},
+            date_str="2026-03-10",
+        )
+        assert False, "Should have raised RuntimeError"
+    except RuntimeError as e:
+        assert "empty script" in str(e)
+
+
 def test_extract_script_with_tags():
     """<script> tags extract the spoken script."""
     raw = (

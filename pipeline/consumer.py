@@ -404,13 +404,17 @@ def consume_forever(
                         # Next loop will pick up the script and run TTS
 
                 except Exception as exc:
-                    failure_count, process_after = store.mark_the_rundown_failed(
-                        job["id"], str(exc)
-                    )
-                    print(
-                        f"Failed Rundown job {job['id']}: {exc} "
-                        f"(retry #{failure_count} at {process_after})"
-                    )
+                    retry = store.mark_the_rundown_failed(job["id"], str(exc))
+                    if retry.exhausted:
+                        print(
+                            f"Failed Rundown job {job['id']}: {exc} "
+                            f"(retry budget exhausted after #{retry.failure_count}; marked errored)"
+                        )
+                    else:
+                        print(
+                            f"Failed Rundown job {job['id']}: {exc} "
+                            f"(retry #{retry.failure_count} at {retry.process_after})"
+                        )
         except Exception as exc:
             print(f"Error checking Rundown jobs: {exc}")
 
@@ -543,13 +547,17 @@ def consume_forever(
                             )
                         # Next loop will pick up the script and run TTS
                 except Exception as exc:
-                    failure_count, process_after = store.mark_fp_digest_failed(
-                        job["id"], str(exc)
-                    )
-                    print(
-                        f"Failed FP digest job {job['id']}: {exc} "
-                        f"(retry #{failure_count} at {process_after})"
-                    )
+                    retry = store.mark_fp_digest_failed(job["id"], str(exc))
+                    if retry.exhausted:
+                        print(
+                            f"Failed FP digest job {job['id']}: {exc} "
+                            f"(retry budget exhausted after #{retry.failure_count}; marked errored)"
+                        )
+                    else:
+                        print(
+                            f"Failed FP digest job {job['id']}: {exc} "
+                            f"(retry #{retry.failure_count} at {retry.process_after})"
+                        )
         except Exception as exc:
             print(f"Error checking FP digest jobs: {exc}")
 
