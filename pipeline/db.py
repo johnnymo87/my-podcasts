@@ -601,9 +601,12 @@ class StateStore:
         return [dict(row) for row in rows]
 
     def _reset_daily_job(self, table: str, job_id: str) -> None:
-        """Reset a daily job row to pending with zeroed failure state."""
+        """Reset a daily job row to pending with zeroed failure state.
+
+        Raises ValueError if no row with *job_id* exists.
+        """
         process_after = datetime.now(tz=UTC).isoformat()
-        self._conn.execute(
+        cursor = self._conn.execute(
             f"UPDATE {table}"
             f" SET status = 'pending', failure_count = 0, last_error = NULL,"
             f"     process_after = ?"
@@ -611,6 +614,8 @@ class StateStore:
             (process_after, job_id),
         )
         self._conn.commit()
+        if cursor.rowcount == 0:
+            raise ValueError(f"Unknown job id: {job_id}")
 
     def reset_fp_digest_job(self, job_id: str) -> None:
         """Reset an fp_digest job back to pending so the consumer will retry it."""

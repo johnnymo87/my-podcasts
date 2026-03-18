@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from pipeline.db import MAX_RETRY_FAILURES, StateStore
 
 
@@ -166,4 +168,12 @@ def test_reset_fp_digest_job(tmp_path) -> None:
     # process_after should be in the near future (reset to now)
     process_after_dt = datetime.fromisoformat(row["process_after"])
     assert process_after_dt <= datetime.now(tz=UTC)
+    store.close()
+
+
+def test_reset_fp_digest_job_raises_for_unknown_id(tmp_path) -> None:
+    """reset_fp_digest_job raises ValueError when the job_id does not exist."""
+    store = StateStore(tmp_path / "test.sqlite3")
+    with pytest.raises(ValueError, match="nonexistent-id"):
+        store.reset_fp_digest_job("nonexistent-id")
     store.close()
