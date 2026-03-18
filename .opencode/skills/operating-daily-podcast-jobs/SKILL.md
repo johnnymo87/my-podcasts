@@ -54,46 +54,25 @@ for r in rows: print(dict(r))
 - retries back off: 1m, 2m, 4m, 8m, then 15m cap
 - after about 12 hours of failures, jobs become `status='errored'`
 
-## Manual recovery today
+## Resetting an errored job
 
-Until the admin reset CLI lands, manual recovery is:
+Use the `jobs` CLI — see `.opencode/skills/resetting-errored-daily-jobs/SKILL.md` for the full workflow.
 
-1. Inspect the latest pending row and confirm whether it is still retrying or already `errored`.
-2. Inspect the work dir:
-
-```bash
-python3 - <<'PY'
-from pathlib import Path
-for prefix in ['fp-digest', 'the-rundown']:
-    for p in sorted(Path('/tmp').glob(f'{prefix}-*'))[-3:]:
-        print(p)
-        for name in ['collection_done.json', 'plan.json', 'script.txt', 'summary.txt', 'covered.json']:
-            f = p / name
-            print(' ', name, 'exists' if f.exists() else 'missing')
-PY
-```
-
-3. If the writer produced bad empty artifacts, remove `script.txt`, `summary.txt`, and `covered.json` for that job so the writer reruns cleanly while collection is preserved.
-4. If the job is still `pending`, you can move `process_after` to now for an immediate retry:
+Quick reference:
 
 ```bash
-uv run python -c "
-import sqlite3
-conn = sqlite3.connect('/persist/my-podcasts/state.sqlite3')
-conn.execute(\"UPDATE pending_fp_digest SET process_after = datetime('now') WHERE id = ? AND status = 'pending'\", ('<job_id>',))
-conn.commit()
-"
+# List errored jobs
+uv run python -m pipeline jobs list
+
+# Reset by date (clears stale writer artifacts by default)
+uv run python -m pipeline jobs reset --feed fp-digest --date 2026-03-17
+uv run python -m pipeline jobs reset --feed the-rundown --date 2026-03-17
 ```
 
-Replace `pending_fp_digest` with `pending_the_rundown` as needed.
-
-5. Restart the consumer only if you need to kick the loop or after code changes:
-
-```bash
-sudo systemctl restart my-podcasts-consumer
-```
+Restart the consumer only if the service is `inactive` or `failed`; a reset job is picked up on the next loop automatically.
 
 ## When to use other skills
 
 - Whole-system monitoring: `.opencode/skills/monitoring-my-podcasts-pipeline/SKILL.md`
+- Reset errored jobs step-by-step: `.opencode/skills/resetting-errored-daily-jobs/SKILL.md`
 - Rundown-specific collection and writer behavior: `.opencode/skills/operating-things-happen-digest/SKILL.md`

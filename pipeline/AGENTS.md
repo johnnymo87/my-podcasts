@@ -17,6 +17,7 @@ Quick start and incident-response guide for the two daily podcasts: The Rundown 
 
 - Whole-pipeline monitoring: `.opencode/skills/monitoring-my-podcasts-pipeline/SKILL.md`
 - Stuck, delayed, or errored daily jobs: `.opencode/skills/operating-daily-podcast-jobs/SKILL.md`
+- Resetting errored jobs via CLI: `.opencode/skills/resetting-errored-daily-jobs/SKILL.md`
 - Rundown-specific collection / writer behavior: `.opencode/skills/operating-things-happen-digest/SKILL.md`
 
 ## Current Hardening
@@ -58,4 +59,4 @@ If The Rundown or FP Digest is missing, late, or stuck:
 3. Check recent episodes to see whether the episode actually published late.
 4. Read consumer logs for writer-stage failures, TTS failures, or publish failures.
 5. If the job is still `pending`, compare `process_after` to current time before assuming it is stuck.
-6. If the job is `errored`, use the documented manual recovery flow in `.opencode/skills/operating-daily-podcast-jobs/SKILL.md` until the admin reset CLI lands.
+6. If the job is `errored`, use the admin reset CLI: `.opencode/skills/resetting-errored-daily-jobs/SKILL.md`.
