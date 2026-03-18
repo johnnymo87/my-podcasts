@@ -157,12 +157,16 @@ def jobs_reset_command(
             job_id = matching[0]["id"]
 
         # Reset DB row
-        if feed_slug == "fp-digest":
-            store.reset_fp_digest_job(job_id)
-        elif feed_slug == "the-rundown":
-            store.reset_the_rundown_job(job_id)
-        else:
-            click.echo(f"Unknown feed: {feed_slug!r}", err=True)
+        try:
+            if feed_slug == "fp-digest":
+                store.reset_fp_digest_job(job_id)
+            elif feed_slug == "the-rundown":
+                store.reset_the_rundown_job(job_id)
+            else:
+                click.echo(f"Unknown feed: {feed_slug!r}", err=True)
+                raise SystemExit(1)
+        except ValueError as exc:
+            click.echo(f"Error: {exc}", err=True)
             raise SystemExit(1)
 
         click.echo(f"Reset {feed_slug} job {job_id} to pending.")

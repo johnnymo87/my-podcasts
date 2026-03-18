@@ -231,3 +231,24 @@ def test_jobs_reset_requires_date_or_job_id(tmp_path: Path) -> None:
     runner = CliRunner()
     result = runner.invoke(cli, ["jobs", "reset", "--feed", "fp-digest"])
     assert result.exit_code != 0
+
+
+def test_jobs_reset_nonexistent_job_id_emits_clean_error(tmp_path: Path) -> None:
+    """jobs reset --job-id <bad-id> prints a clean error and exits nonzero (no traceback)."""
+    with patch(
+        "pipeline.__main__._default_state_db_path",
+        return_value=tmp_path / "state.sqlite3",
+    ):
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            ["jobs", "reset", "--feed", "fp-digest", "--job-id", "does-not-exist"],
+        )
+
+    # Must be nonzero
+    assert result.exit_code != 0
+    # Must mention the bad ID in the output (stderr is mixed into output by CliRunner)
+    assert "does-not-exist" in result.output
+    # Must NOT be an unhandled exception (no traceback)
+    assert "Traceback" not in result.output
+    assert "ValueError" not in result.output
