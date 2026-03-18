@@ -572,3 +572,50 @@ class StateStore:
     def mark_the_rundown_failed(self, job_id: str, error: str) -> RetryUpdate:
         """Increment failure count and schedule the next the_rundown retry."""
         return self._mark_pending_job_failed("pending_the_rundown", job_id, error)
+
+    # ------------------------------------------------------------------ #
+    # Shared daily-job helpers                                             #
+    # ------------------------------------------------------------------ #
+
+    _FEED_SLUG_TO_TABLE: dict[str, str] = {
+        "fp-digest": "pending_fp_digest",
+        "the-rundown": "pending_the_rundown",
+    }
+
+    def list_daily_jobs(self, feed_slug: str, status: str) -> list[dict]:
+        """Return daily jobs for *feed_slug* filtered by *status*.
+
+        Returns a list of row dicts ordered by date_str descending.
+        Raises ValueError for unknown feed slugs.
+        """
+        table = self._FEED_SLUG_TO_TABLE.get(feed_slug)
+        if table is None:
+            raise ValueError(f"Unknown feed_slug: {feed_slug!r}")
+        rows = self._conn.execute(
+            f"SELECT id, date_str, status, process_after, failure_count, last_error"
+            f" FROM {table}"
+            f" WHERE status = ?"
+            f" ORDER BY date_str DESC",
+            (status,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _reset_daily_job(self, table: str, job_id: str) -> None:
+        """Reset a daily job row to pending with zeroed failure state."""
+        process_after = datetime.now(tz=UTC).isoformat()
+        self._conn.execute(
+            f"UPDATE {table}"
+            f" SET status = 'pending', failure_count = 0, last_error = NULL,"
+            f"     process_after = ?"
+            f" WHERE id = ?",
+            (process_after, job_id),
+        )
+        self._conn.commit()
+
+    def reset_fp_digest_job(self, job_id: str) -> None:
+        """Reset an fp_digest job back to pending so the consumer will retry it."""
+        self._reset_daily_job("pending_fp_digest", job_id)
+
+    def reset_the_rundown_job(self, job_id: str) -> None:
+        """Reset a the_rundown job back to pending so the consumer will retry it."""
+        self._reset_daily_job("pending_the_rundown", job_id)

@@ -113,3 +113,57 @@ def test_mark_fp_digest_failed_marks_job_errored_after_retry_budget(tmp_path) ->
     assert row["failure_count"] == MAX_RETRY_FAILURES
     assert row["last_error"] == "upstream error"
     store.close()
+
+
+def test_list_daily_jobs_by_feed_and_status_fp_digest(tmp_path) -> None:
+    """list_daily_jobs returns errored fp-digest jobs filtered by feed_slug and status."""
+    store = StateStore(tmp_path / "test.sqlite3")
+    job_id = store.insert_pending_fp_digest(date_str="2026-03-17")
+    assert job_id is not None
+
+    # Drive it to errored
+    for _ in range(MAX_RETRY_FAILURES):
+        store.mark_fp_digest_failed(job_id, "test error")
+
+    jobs = store.list_daily_jobs(feed_slug="fp-digest", status="errored")
+    assert len(jobs) == 1
+    assert jobs[0]["date_str"] == "2026-03-17"
+    assert jobs[0]["status"] == "errored"
+    store.close()
+
+
+def test_list_daily_jobs_filters_out_other_statuses_fp_digest(tmp_path) -> None:
+    """list_daily_jobs does not return completed fp-digest jobs when filtering for errored."""
+    store = StateStore(tmp_path / "test.sqlite3")
+    job_id = store.insert_pending_fp_digest(date_str="2026-03-17")
+    assert job_id is not None
+    store.mark_fp_digest_completed(job_id)
+
+    jobs = store.list_daily_jobs(feed_slug="fp-digest", status="errored")
+    assert jobs == []
+    store.close()
+
+
+def test_reset_fp_digest_job(tmp_path) -> None:
+    """reset_fp_digest_job sets a job back to pending with failure_count=0 and last_error=None."""
+    store = StateStore(tmp_path / "test.sqlite3")
+    job_id = store.insert_pending_fp_digest(date_str="2026-03-17")
+    assert job_id is not None
+
+    # Drive it to errored
+    for _ in range(MAX_RETRY_FAILURES):
+        store.mark_fp_digest_failed(job_id, "test error")
+
+    store.reset_fp_digest_job(job_id)
+
+    row = store._conn.execute(
+        "SELECT status, failure_count, last_error, process_after FROM pending_fp_digest WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    assert row["status"] == "pending"
+    assert row["failure_count"] == 0
+    assert row["last_error"] is None
+    # process_after should be in the near future (reset to now)
+    process_after_dt = datetime.fromisoformat(row["process_after"])
+    assert process_after_dt <= datetime.now(tz=UTC)
+    store.close()
