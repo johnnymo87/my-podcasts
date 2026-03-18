@@ -64,9 +64,129 @@ def _default_state_db_path() -> Path:
     return Path(os.getenv("MY_PODCASTS_STATE_DB", "/persist/my-podcasts/state.sqlite3"))
 
 
+def _jobs_work_dir_base() -> Path:
+    """Return the base directory where daily-job work directories live."""
+    return Path("/tmp")
+
+
+# ---------------------------------------------------------------------------
+# jobs group
+# ---------------------------------------------------------------------------
+
+_ARTIFACT_FILES = ("script.txt", "summary.txt", "covered.json")
+
+_FEED_WORK_DIR_PREFIX: dict[str, str] = {
+    "fp-digest": "fp-digest-",
+    "the-rundown": "the-rundown-",
+}
+
+
+@click.group()
+def jobs() -> None:
+    """Inspect and manage daily podcast jobs."""
+
+
+@jobs.command("list")
+@click.option(
+    "--feed", "feed_slug", default=None, type=str, help="Filter by feed slug."
+)
+@click.option(
+    "--status",
+    default="errored",
+    show_default=True,
+    type=str,
+    help="Filter by job status.",
+)
+def jobs_list_command(feed_slug: str | None, status: str) -> None:
+    """List daily jobs filtered by status (and optionally by feed)."""
+    store = StateStore(_default_state_db_path())
+    try:
+        feeds = [feed_slug] if feed_slug else list(store._FEED_SLUG_TO_TABLE.keys())
+        found_any = False
+        for slug in feeds:
+            try:
+                rows = store.list_daily_jobs(slug, status)
+            except ValueError as exc:
+                click.echo(f"Error: {exc}", err=True)
+                continue
+            for row in rows:
+                found_any = True
+                click.echo(
+                    f"{slug}\t{row['id']}\t{row['date_str']}\t{row['status']}"
+                    f"\tfailures={row['failure_count']}"
+                    f"\terror={row['last_error'] or ''}"
+                )
+        if not found_any:
+            click.echo(f"No jobs found with status={status!r}.")
+    finally:
+        store.close()
+
+
+@jobs.command("reset")
+@click.option("--feed", "feed_slug", required=True, type=str, help="Feed slug.")
+@click.option("--date", "date_str", default=None, type=str, help="Date (YYYY-MM-DD).")
+@click.option("--job-id", "job_id", default=None, type=str, help="Job UUID.")
+@click.option(
+    "--keep-artifacts",
+    is_flag=True,
+    default=False,
+    help="Do not remove script.txt/summary.txt/covered.json from the work dir.",
+)
+def jobs_reset_command(
+    feed_slug: str, date_str: str | None, job_id: str | None, keep_artifacts: bool
+) -> None:
+    """Reset an errored daily job back to pending so the consumer retries it."""
+    if date_str is None and job_id is None:
+        raise click.UsageError("Provide --date or --job-id.")
+
+    store = StateStore(_default_state_db_path())
+    try:
+        # Resolve job_id from date_str if needed
+        if job_id is None:
+            rows = store.list_daily_jobs(feed_slug, "errored")
+            matching = [r for r in rows if r["date_str"] == date_str]
+            if not matching:
+                # Also try pending jobs
+                rows_pending = store.list_daily_jobs(feed_slug, "pending")
+                matching = [r for r in rows_pending if r["date_str"] == date_str]
+            if not matching:
+                click.echo(
+                    f"No job found for feed={feed_slug!r} date={date_str!r}.", err=True
+                )
+                raise SystemExit(1)
+            job_id = matching[0]["id"]
+
+        # Reset DB row
+        if feed_slug == "fp-digest":
+            store.reset_fp_digest_job(job_id)
+        elif feed_slug == "the-rundown":
+            store.reset_the_rundown_job(job_id)
+        else:
+            click.echo(f"Unknown feed: {feed_slug!r}", err=True)
+            raise SystemExit(1)
+
+        click.echo(f"Reset {feed_slug} job {job_id} to pending.")
+
+        # Clear stale artifacts unless --keep-artifacts
+        if not keep_artifacts:
+            prefix = _FEED_WORK_DIR_PREFIX.get(feed_slug, f"{feed_slug}-")
+            work_dir = _jobs_work_dir_base() / f"{prefix}{job_id}"
+            if work_dir.exists():
+                for filename in _ARTIFACT_FILES:
+                    artifact = work_dir / filename
+                    if artifact.exists():
+                        artifact.unlink()
+                        click.echo(f"  Removed {artifact}")
+    finally:
+        store.close()
+
+
 @click.group()
 def cli() -> None:
     """My Podcasts pipeline commands."""
+
+
+cli.add_command(jobs)
 
 
 @cli.command("consume")
