@@ -24,9 +24,12 @@ Quick start and navigation for humans and coding agents.
 
 ## Docs TOC
 
+- Domain guides:
+  - `pipeline/AGENTS.md`
 - Agent skills:
   - `.opencode/skills/monitoring-my-podcasts-pipeline/SKILL.md`
   - `.opencode/skills/monitoring-my-podcasts-pipeline/REFERENCE.md`
+  - `.opencode/skills/operating-daily-podcast-jobs/SKILL.md`
   - `.opencode/skills/shipping-my-podcasts-workers/SKILL.md`
   - `.opencode/skills/shipping-my-podcasts-workers/REFERENCE.md`
   - `.opencode/skills/operating-things-happen-digest/SKILL.md`
@@ -54,6 +57,13 @@ Quick start and navigation for humans and coding agents.
 - Email ingest worker: `workers/email-ingest/`
 - Podcast serving worker: `workers/podcast-serve/`
 - The Rundown pipeline: `pipeline/rundown_writer.py` (script generator), `pipeline/exa_client.py` (Exa wrapper)
+
+## Where To Start
+
+- Daily podcast operations and incident response: `pipeline/AGENTS.md`
+- Whole-system health checks: `.opencode/skills/monitoring-my-podcasts-pipeline/SKILL.md`
+- Stuck or errored Rundown / FP Digest jobs: `.opencode/skills/operating-daily-podcast-jobs/SKILL.md`
+- Rundown-specific writer / collection behavior: `.opencode/skills/operating-things-happen-digest/SKILL.md`
 
 ## The Rundown Pipeline
 
