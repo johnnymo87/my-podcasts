@@ -339,3 +339,95 @@ def test_publish_script_tts_receives_stripped_text(tmp_path, monkeypatch) -> Non
     assert "This is bold text." in tts_input_text[0]
 
     store.close()
+
+
+def test_publish_script_archives_source_files(tmp_path, monkeypatch) -> None:
+    """Successful publish with show notes archives both script and show-notes markdown."""
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+    archive_root = tmp_path / "persisted-scripts"
+
+    script_file = tmp_path / "script.md"
+    # No trailing newline intentionally: archive copy must preserve bytes verbatim.
+    script_file.write_text("# Dog Story\n\nBody text.", encoding="utf-8")
+    show_notes_file = tmp_path / "notes.md"
+    show_notes_file.write_text("## Episode Summary\n\nSummary.\n", encoding="utf-8")
+
+    def fake_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "ttsjoin":
+            output_file = cmd[cmd.index("--output-file") + 1]
+            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
+            return subprocess.CompletedProcess(cmd, 0)
+        if cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(cmd, 0, stdout="120.0\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(
+        "pipeline.script_processor.regenerate_and_upload_feed", lambda s, r: None
+    )
+    monkeypatch.setattr("pipeline.script_processor.SCRIPT_ARCHIVE_ROOT", archive_root)
+
+    publish_script(
+        script_file=script_file,
+        title="Dog Story",
+        feed_slug="deep-dives",
+        store=store,
+        r2_client=r2_client,
+        show_notes_file=show_notes_file,
+        date_str="2026-03-17",
+    )
+
+    assert (archive_root / "deep-dives" / "2026-03-17-dog-story.md").read_text(
+        encoding="utf-8"
+    ) == "# Dog Story\n\nBody text."
+    assert (
+        archive_root / "deep-dives" / "2026-03-17-dog-story-show-notes.md"
+    ).read_text(encoding="utf-8") == "## Episode Summary\n\nSummary.\n"
+
+    store.close()
+
+
+def test_publish_script_archives_script_without_show_notes(
+    tmp_path, monkeypatch
+) -> None:
+    """Successful publish without show notes archives only the script; no show-notes file is created."""
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+    archive_root = tmp_path / "persisted-scripts"
+
+    script_file = tmp_path / "script.md"
+    script_file.write_text("# Solo Script\n\nJust the script.", encoding="utf-8")
+
+    def fake_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "ttsjoin":
+            output_file = cmd[cmd.index("--output-file") + 1]
+            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
+            return subprocess.CompletedProcess(cmd, 0)
+        if cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(cmd, 0, stdout="60.0\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(
+        "pipeline.script_processor.regenerate_and_upload_feed", lambda s, r: None
+    )
+    monkeypatch.setattr("pipeline.script_processor.SCRIPT_ARCHIVE_ROOT", archive_root)
+
+    publish_script(
+        script_file=script_file,
+        title="Solo Script",
+        feed_slug="deep-dives",
+        store=store,
+        r2_client=r2_client,
+        date_str="2026-03-17",
+    )
+
+    assert (archive_root / "deep-dives" / "2026-03-17-solo-script.md").read_text(
+        encoding="utf-8"
+    ) == "# Solo Script\n\nJust the script."
+    assert not (
+        archive_root / "deep-dives" / "2026-03-17-solo-script-show-notes.md"
+    ).exists()
+
+    store.close()

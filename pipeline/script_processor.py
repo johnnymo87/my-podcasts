@@ -84,6 +84,28 @@ def render_show_notes_html(show_notes_md: str) -> str:
 TTS_MODEL = "tts-1-hd"
 DEFAULT_VOICE = "nova"
 DEFAULT_CATEGORY = "Technology"
+SCRIPT_ARCHIVE_ROOT = Path("/persist/my-podcasts/scripts")
+
+
+def _archive_publish_inputs(
+    *,
+    script_file: Path,
+    show_notes_file: Path | None,
+    feed_slug: str,
+    episode_slug: str,
+) -> None:
+    archive_dir = SCRIPT_ARCHIVE_ROOT / feed_slug
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    archive_script = archive_dir / f"{episode_slug}.md"
+    archive_script.write_text(script_file.read_text(encoding="utf-8"), encoding="utf-8")
+
+    if show_notes_file is not None:
+        archive_notes = archive_dir / f"{episode_slug}-show-notes.md"
+        archive_notes.write_text(
+            show_notes_file.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
 
 
 @dataclass(frozen=True)
@@ -204,6 +226,12 @@ def publish_script(
     )
     store.insert_episode(episode)
     regenerate_and_upload_feed(store, r2_client)
+    _archive_publish_inputs(
+        script_file=script_file,
+        show_notes_file=show_notes_file,
+        feed_slug=feed_slug,
+        episode_slug=episode_slug,
+    )
 
     return PublishResult(
         title=title,
