@@ -51,9 +51,9 @@ def _find_rundown_article_text(directive: Any, work_dir: Path) -> str:
             if fpath.exists():
                 return fpath.read_text(encoding="utf-8")
 
-        # Word-overlap match: score each indexed headline by how many
-        # significant words from the directive headline appear in the
-        # original headline or the file content.
+        # Word-overlap match: pick the file whose content best matches
+        # the directive headline. The editor reformulates headlines, but
+        # the rewritten version always draws words from the source article.
         if index:
             query_words = {
                 w.lower()
@@ -73,8 +73,7 @@ def _find_rundown_article_text(directive: Any, work_dir: Path) -> str:
                     if score > best_score:
                         best_score = score
                         best_path = rel_path
-                # Require at least 40% of query words to match
-                if best_path and best_score >= len(query_words) * 0.4:
+                if best_path and best_score > 0:
                     fpath = work_dir / best_path
                     return fpath.read_text(encoding="utf-8")
 
