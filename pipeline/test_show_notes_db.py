@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 
 from pipeline.db import Episode, StateStore
+
+
+def _recent_pub_date(days_ago: int = 0) -> str:
+    """Return an RFC 2822 date string for N days ago."""
+    dt = datetime.now(tz=UTC) - timedelta(days=days_ago)
+    return format_datetime(dt)
 
 
 def test_episode_with_show_notes_round_trip(tmp_path) -> None:
@@ -82,10 +90,10 @@ def test_recent_coverage_summary_returns_themes(tmp_path):
     store.insert_episode(
         Episode(
             id="ep-1",
-            title="2026-03-10 - FP Digest",
-            slug="2026-03-10-fp-digest",
-            pub_date="Tue, 10 Mar 2026 22:00:00 +0000",
-            r2_key="episodes/fp-digest/2026-03-10.mp3",
+            title="FP Digest",
+            slug="fp-digest-1",
+            pub_date=_recent_pub_date(days_ago=1),
+            r2_key="episodes/fp-digest/1.mp3",
             feed_slug="fp-digest",
             category="News",
             source_tag=None,
@@ -114,10 +122,10 @@ def test_recent_coverage_summary_multi_day(tmp_path):
     store.insert_episode(
         Episode(
             id="ep-1",
-            title="2026-03-10 - FP Digest",
-            slug="2026-03-10-fp-digest",
-            pub_date="Tue, 10 Mar 2026 22:00:00 +0000",
-            r2_key="episodes/fp-digest/2026-03-10.mp3",
+            title="FP Digest",
+            slug="fp-digest-1",
+            pub_date=_recent_pub_date(days_ago=2),
+            r2_key="episodes/fp-digest/1.mp3",
             feed_slug="fp-digest",
             category="News",
             source_tag=None,
@@ -132,10 +140,10 @@ def test_recent_coverage_summary_multi_day(tmp_path):
     store.insert_episode(
         Episode(
             id="ep-2",
-            title="2026-03-11 - FP Digest",
-            slug="2026-03-11-fp-digest",
-            pub_date="Wed, 11 Mar 2026 22:00:00 +0000",
-            r2_key="episodes/fp-digest/2026-03-11.mp3",
+            title="FP Digest",
+            slug="fp-digest-2",
+            pub_date=_recent_pub_date(days_ago=1),
+            r2_key="episodes/fp-digest/2.mp3",
             feed_slug="fp-digest",
             category="News",
             source_tag=None,
@@ -161,10 +169,10 @@ def test_recent_coverage_summary_no_articles_json(tmp_path):
     store.insert_episode(
         Episode(
             id="ep-1",
-            title="2026-03-10 - FP Digest",
-            slug="2026-03-10-fp-digest",
-            pub_date="Tue, 10 Mar 2026 22:00:00 +0000",
-            r2_key="episodes/fp-digest/2026-03-10.mp3",
+            title="FP Digest",
+            slug="fp-digest-1",
+            pub_date=_recent_pub_date(days_ago=1),
+            r2_key="episodes/fp-digest/1.mp3",
             feed_slug="fp-digest",
             category="News",
             source_tag=None,
