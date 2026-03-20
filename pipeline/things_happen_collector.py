@@ -137,6 +137,18 @@ def collect_all_artifacts(
             if not art_path.exists():
                 art_path.write_text(text, encoding="utf-8")
 
+    # Semafor headlines
+    for semafor_path in semafor_dir.glob("*.md"):
+        text = semafor_path.read_text(encoding="utf-8")
+        parts = text.split("\n\n", 2)
+        headline = parts[0].lstrip("# ").strip() if parts else ""
+        body = parts[2].strip() if len(parts) > 2 else ""
+        truncated = body[:300]
+        suffix = "..." if len(body) > 300 else ""
+        snippet = f"[semafor] {headline}\nContext: {truncated}{suffix}"
+        headlines_with_snippets.append(snippet)
+        headline_index[headline] = str(semafor_path.relative_to(work_dir))
+
     # Phase 1c: Zvi articles (day-of posts from persistent cache)
     zvi_cache = (
         zvi_cache_dir

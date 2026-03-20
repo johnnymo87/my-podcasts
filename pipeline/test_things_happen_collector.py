@@ -271,6 +271,57 @@ def test_semafor_articles_added_to_work_dir(tmp_path, monkeypatch):
     assert len(semafor_files) == 1
     assert "Tech Company IPO" in semafor_files[0].read_text()
 
+    # Semafor headline should be in headline_index.json
+    index_path = work_dir / "headline_index.json"
+    assert index_path.exists()
+    index = json.loads(index_path.read_text())
+    assert "Tech Company IPO" in index
+    assert "semafor/" in index["Tech Company IPO"]
+
+
+def test_semafor_headlines_sent_to_editor(tmp_path, monkeypatch):
+    """Semafor TH articles are included in headlines_with_snippets for the editor."""
+    captured_snippets = []
+
+    def mock_plan(headlines_with_snippets, **kwargs):
+        captured_snippets.extend(headlines_with_snippets)
+        return RundownResearchPlan(themes=[], directives=[])
+
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_rundown_research_plan", mock_plan
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
+    )
+
+    today = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    (semafor_cache / f"{today}-pwc-ai.md").write_text(
+        f"# PwC US boss tells staff to embrace AI\n\nURL: https://semafor.com/pwc-ai\nPublished: {today}\nSource: semafor\nCategory: CEO\nType: article\n\nPwC's US chief tells employees to integrate AI into daily work."
+    )
+
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+    work_dir = tmp_path / "work"
+
+    collect_all_artifacts(
+        "test-semafor-snippets",
+        work_dir,
+        levine_cache_dir=levine_cache,
+        semafor_cache_dir=semafor_cache,
+    )
+
+    semafor_snippets = [s for s in captured_snippets if "[semafor]" in s]
+    assert len(semafor_snippets) == 1
+    assert "PwC US boss tells staff to embrace AI" in semafor_snippets[0]
+
 
 def test_zvi_articles_added_to_work_dir(tmp_path, monkeypatch):
     """Zvi posts published today appear in work_dir/articles/zvi/."""
