@@ -29,13 +29,13 @@ class RundownStoryDirective(BaseModel):
         description="A concise query to search antiwar/independent RSS feeds (2-4 keywords). Empty string if is_foreign_policy is false."
     )
     include_in_episode: bool = Field(
-        description="True if this story should be included in today's episode. Select 8-12 stories that best cover the major themes. Exclude foreign policy stories."
+        description="True if this story should be included in today's episode. Exclude foreign policy stories."
     )
 
 
 class RundownResearchPlan(BaseModel):
     themes: list[str] = Field(
-        description="The 3-5 dominant themes or story arcs identified across all sources today"
+        description="The dominant themes or story arcs identified across all sources today"
     )
     directives: list[RundownStoryDirective]
     rotation_override: str | None = None
@@ -64,12 +64,12 @@ def generate_rundown_research_plan(
         "You are the editor of The Rundown, a daily podcast covering business, "
         "technology, AI, law, media, science, and culture. Foreign policy goes to "
         "a separate podcast — flag FP stories but do NOT include them in the episode.\n\n"
-        "Analyze these headlines and:\n"
-        "1. Identify 3-5 dominant themes or story arcs across all sources today\n"
-        "2. Assign each story to a theme and set its priority (1=lead story)\n"
-        "3. Select 8-12 stories that best cover the major themes — avoid redundancy\n"
-        "4. Flag paywalled or inaccessible articles that need open-access alternatives via Exa\n"
-        "5. Flag foreign policy stories (is_foreign_policy=true, include_in_episode=false)\n\n"
+        "Analyze these headlines. Identify the dominant themes, assign each story "
+        "to a theme, set priorities (1=lead), and select the stories that a smart, "
+        "busy listener most needs to hear today. Prefer breadth over depth — cover "
+        "the important stories rather than clustering on one topic. Flag paywalled "
+        "articles that need open-access alternatives via Exa. Flag foreign policy "
+        "stories (is_foreign_policy=true, include_in_episode=false).\n\n"
         "Headlines:\n"
     )
     for item in headlines_with_snippets:
@@ -79,11 +79,11 @@ def generate_rundown_research_plan(
         prompt += f"\n\n{coverage_ledger}\n"
     elif context_scripts:
         prompt += (
-            "\n\nPrevious episodes (listeners already heard these):\n"
-            "Deprioritize stories that were covered in depth unless there is a\n"
-            "significant new development (new facts, new numbers, a policy change,\n"
-            "a concrete event — not just continued coverage of the same situation).\n"
-            "When in doubt, prefer fresh stories over continuing threads.\n"
+            "\n\nPrevious episodes (listeners already heard these). Your goal is "
+            "to produce an episode that is genuinely valuable to someone who heard "
+            "these — prioritize new developments and under-covered stories, but "
+            "don't shy away from running stories when something significant has "
+            "changed.\n"
         )
         for script in context_scripts:
             prompt += f"\n---\n{script}\n"

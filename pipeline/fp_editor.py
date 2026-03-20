@@ -26,13 +26,13 @@ class FPStoryDirective(BaseModel):
         description="Search query for finding open-access alternatives (3-6 keywords). Empty string if needs_exa is false."  # noqa: E501
     )
     include_in_episode: bool = Field(
-        description="True if this story should be included in today's episode. Select 8-12 stories that best cover the major themes."  # noqa: E501
+        description="True if this story should be included in today's episode."
     )
 
 
 class FPResearchPlan(BaseModel):
     themes: list[str] = Field(
-        description="The 3-5 dominant themes or story arcs identified across all sources today"  # noqa: E501
+        description="The dominant themes or story arcs identified across all sources today"
     )
     directives: list[FPStoryDirective]
     rotation_override: str | None = None  # Explanation if freshness budget unmet
@@ -59,11 +59,12 @@ def generate_fp_research_plan(
     prompt = (
         "You are the editor of Foreign Policy Digest, an antiwar podcast covering "
         "geopolitics, military conflicts, and international relations.\n\n"
-        "Analyze these headlines and:\n"
-        "1. Identify 3-5 dominant themes or story arcs across all sources today\n"
-        "2. Assign each story to a theme and set its priority (1=lead story)\n"
-        "3. Select 8-12 stories that best cover the major themes — avoid redundancy\n"
-        "4. Flag paywalled or inaccessible articles that need open-access alternatives via Exa\n\n"  # noqa: E501
+        "Analyze these headlines. Identify the dominant themes, assign each story "
+        "to a theme, set priorities (1=lead), and select the stories that a "
+        "thoughtful listener most needs to hear today. Prefer breadth over depth — "
+        "cover the important developments across different regions and conflicts "
+        "rather than clustering on one theater. Flag paywalled articles that need "
+        "open-access alternatives via Exa.\n\n"
         "Headlines:\n"
     )
     for item in headlines_with_snippets:
@@ -75,11 +76,11 @@ def generate_fp_research_plan(
     elif context_scripts:
         # Fallback for transition period
         prompt += (
-            "\n\nPrevious episodes (listeners already heard these):\n"
-            "Deprioritize stories that were covered in depth unless there is a\n"
-            "significant new development (new facts, new numbers, a policy change,\n"
-            "a concrete event — not just continued coverage of the same situation).\n"
-            "When in doubt, prefer fresh stories over continuing threads.\n"
+            "\n\nPrevious episodes (listeners already heard these). Your goal is "
+            "to produce an episode that is genuinely valuable to someone who heard "
+            "these — prioritize new developments and under-covered stories, but "
+            "don't shy away from running stories when something significant has "
+            "changed.\n"
         )
         for script in context_scripts:
             prompt += f"\n---\n{script}\n"
