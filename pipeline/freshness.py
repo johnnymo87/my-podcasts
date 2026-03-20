@@ -61,20 +61,22 @@ def format_coverage_ledger(
         lines.append(f"| {theme} | {days}/{window_days} | {lead} | {dates} |")
 
     lines.append("")
-    lines.append("## FRESHNESS BUDGET")
-    lines.append("- At least 40% of selected stories must be tagged [FRESH]")
-    lines.append("- Themes covered 3+ consecutive days CANNOT be the lead story")
+    lines.append("## EDITORIAL GUIDANCE")
     lines.append(
-        "- Recurring themes: only include if you can cite a specific new "
-        "fact, number, or event that justifies re-covering them"
+        "Your editorial goal is to produce a briefing that is genuinely "
+        "valuable to a listener who heard the last few episodes. Prioritize "
+        "new developments and under-covered stories. Don't rehash yesterday's "
+        "analysis. But don't shy away from running stories when something "
+        "significant has changed — a ground invasion, a major escalation, "
+        "a policy reversal, new casualty figures. Your listeners count on you "
+        "for comprehensive coverage of the most important foreign policy "
+        "developments, even if a region has been in the news for days. A story "
+        "that appears under a familiar theme can still be the most important "
+        "story of the day."
     )
     lines.append(
-        "- A shorter episode with genuinely fresh material is better than "
-        "a longer one that retreads familiar ground"
-    )
-    lines.append(
-        "- If you cannot meet the 40% freshness budget due to limited "
-        "fresh material, set rotation_override explaining why"
+        "If you notice that your selection skews heavily toward recurring "
+        "themes, set rotation_override explaining your reasoning."
     )
 
     return "\n".join(lines)
@@ -98,9 +100,12 @@ def build_freshness_prompt(
         "prior themes above. If it does, set matched_theme to the exact "
         "theme name string. If the headline covers a genuinely different "
         "topic, set matched_theme to null.\n\n"
-        "Be generous with matching — if a headline is about the same "
-        "ongoing situation or storyline as a prior theme, it matches, "
-        "even if the specific angle is different.\n\n"
+        "Match headlines to prior themes when they cover essentially the "
+        "same angle or analysis. But if a headline represents a significant "
+        "new development — escalation, de-escalation, new actors, new "
+        "theaters, or a distinct sub-conflict within a broader war — it "
+        "should be considered fresh (matched_theme = null) even if it falls "
+        "within the same broad region or conflict.\n\n"
         "HEADLINES:\n"
     )
     for i, headline in enumerate(headlines):
