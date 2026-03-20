@@ -115,6 +115,13 @@ def test_collect_all_artifacts(
     assert "themes" in plan_data
     assert "directives" in plan_data
 
+    # Verify headline_index.json written with Levine article
+    index_path = work_dir / "headline_index.json"
+    assert index_path.exists()
+    index = _json.loads(index_path.read_text())
+    assert "Test Article" in index
+    assert index["Test Article"].startswith("articles/")
+
 
 def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
     """FP-flagged links are written to fp-routed-links dir, not enriched."""
@@ -394,6 +401,124 @@ def test_semafor_reads_from_cache(tmp_path, monkeypatch):
     # Gulf (FP-only) and Old Tech Story (outside lookback) should NOT be present
     assert "Gulf Tensions Rise" not in headlines
     assert "Old Tech Story" not in headlines
+
+
+def test_headline_index_includes_zvi(tmp_path, monkeypatch):
+    """Zvi section titles are included in headline_index.json."""
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(themes=[], directives=[]),
+    )
+
+    zvi_cache = tmp_path / "zvi-cache"
+    zvi_cache.mkdir()
+    today = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    (zvi_cache / f"{today}-chip-city.md").write_text(
+        f"# Chip City\n\nPost: AI Weekly\nURL: https://zvi.com/ai\nPublished: {today}\n"
+        "Type: roundup-section\n\n"
+        "Nvidia to spend $26 billion to build open weight AI models."
+    )
+
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
+    )
+
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+    work_dir = tmp_path / "work"
+
+    collect_all_artifacts(
+        "test-zvi-index",
+        work_dir,
+        levine_cache_dir=levine_cache,
+        semafor_cache_dir=tmp_path / "semafor",
+        zvi_cache_dir=zvi_cache,
+    )
+
+    index_path = work_dir / "headline_index.json"
+    assert index_path.exists()
+    index = json.loads(index_path.read_text())
+    assert "Chip City" in index
+    assert "zvi/" in index["Chip City"]
+
+
+def test_find_rundown_article_text_fuzzy_matches_zvi(tmp_path):
+    """Fuzzy lookup finds Zvi article when editor reformulates the headline."""
+    # Setup a work dir with a Zvi article and headline index
+    articles_dir = tmp_path / "articles" / "zvi"
+    articles_dir.mkdir(parents=True)
+    zvi_file = articles_dir / "2026-03-19-chip-city.md"
+    zvi_file.write_text(
+        "# Chip City\n\nPost: AI Weekly\nURL: https://zvi.com/ai\n\n"
+        "Nvidia to spend $26 billion to build open weight AI models. "
+        "The company announced plans for inference workloads."
+    )
+
+    index = {"Chip City": "articles/zvi/2026-03-19-chip-city.md"}
+    (tmp_path / "headline_index.json").write_text(json.dumps(index))
+
+    from pipeline.__main__ import _find_rundown_article_text
+
+    class FakeDirective:
+        # Editor reformulated "Chip City" into a descriptive headline
+        headline = "Nvidia to spend $26 billion to build open weight AI models"
+        source = "zvi"
+
+    text = _find_rundown_article_text(FakeDirective(), tmp_path)
+    assert text
+    assert "Chip City" in text
+    assert "Nvidia" in text
+
+
+def test_find_rundown_article_text_exact_match(tmp_path):
+    """Exact headline match in index takes priority."""
+    articles_dir = tmp_path / "articles"
+    articles_dir.mkdir(parents=True)
+    art_file = articles_dir / "00-test-article.md"
+    art_file.write_text("# Test Article\n\nURL: http://example.com\n\nContent here.")
+
+    index = {"Test Article": "articles/00-test-article.md"}
+    (tmp_path / "headline_index.json").write_text(json.dumps(index))
+
+    from pipeline.__main__ import _find_rundown_article_text
+
+    class FakeDirective:
+        headline = "Test Article"
+        source = "levine"
+
+    text = _find_rundown_article_text(FakeDirective(), tmp_path)
+    assert text
+    assert "Test Article" in text
+
+
+def test_find_rundown_article_text_no_false_match(tmp_path):
+    """Fuzzy lookup does not match unrelated articles."""
+    articles_dir = tmp_path / "articles" / "zvi"
+    articles_dir.mkdir(parents=True)
+    zvi_file = articles_dir / "2026-03-19-dog-story.md"
+    zvi_file.write_text(
+        "# The Lighter Side\n\nPost: AI Weekly\nURL: https://zvi.com/ai\n\n"
+        "A heartwarming story about a dog who learned to paint."
+    )
+
+    index = {"The Lighter Side": "articles/zvi/2026-03-19-dog-story.md"}
+    (tmp_path / "headline_index.json").write_text(json.dumps(index))
+
+    from pipeline.__main__ import _find_rundown_article_text
+
+    class FakeDirective:
+        # Completely unrelated headline
+        headline = "Federal Reserve raises interest rates to combat inflation"
+        source = "zvi"
+
+    text = _find_rundown_article_text(FakeDirective(), tmp_path)
+    assert text == ""
 
 
 def test_collector_works_without_levine_links(tmp_path, monkeypatch):

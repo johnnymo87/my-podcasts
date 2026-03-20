@@ -24,16 +24,61 @@ from pipeline.zvi_cache import sync_zvi_cache
 def _find_rundown_article_text(directive: Any, work_dir: Path) -> str:
     """Find article text for a Rundown directive.
 
-    Searches:
-    - work_dir/articles/{nn}-{slug}.md (flat Levine articles)
-    - work_dir/articles/semafor/{slug}.md
-    - work_dir/articles/zvi/{slug}.md
-    - work_dir/enrichment/exa/{slug}.md
+    Searches (in order):
+    1. headline_index.json — exact match on original headline
+    2. headline_index.json — best word-overlap match for the directive's source
+    3. Slug-based file matching (legacy fallback)
+    4. Exa enrichment by slug
     """
+    import json as _json
+
     from pipeline.things_happen_collector import _slugify
 
-    slug = _slugify(directive.headline)
+    headline = directive.headline
+    slug = _slugify(headline)
 
+    # --- Index-based lookup (handles editor headline reformulation) ---
+    index_path = work_dir / "headline_index.json"
+    if index_path.exists():
+        try:
+            index: dict[str, str] = _json.loads(index_path.read_text(encoding="utf-8"))
+        except Exception:
+            index = {}
+
+        # Exact match
+        if headline in index:
+            fpath = work_dir / index[headline]
+            if fpath.exists():
+                return fpath.read_text(encoding="utf-8")
+
+        # Word-overlap match: score each indexed headline by how many
+        # significant words from the directive headline appear in the
+        # original headline or the file content.
+        if index:
+            query_words = {
+                w.lower()
+                for w in headline.split()
+                if len(w) > 3  # skip short words
+            }
+            if query_words:
+                best_score = 0
+                best_path: str | None = None
+                for orig_headline, rel_path in index.items():
+                    fpath = work_dir / rel_path
+                    if not fpath.exists():
+                        continue
+                    content = fpath.read_text(encoding="utf-8")
+                    content_lower = content.lower()
+                    score = sum(1 for w in query_words if w in content_lower)
+                    if score > best_score:
+                        best_score = score
+                        best_path = rel_path
+                # Require at least 40% of query words to match
+                if best_path and best_score >= len(query_words) * 0.4:
+                    fpath = work_dir / best_path
+                    return fpath.read_text(encoding="utf-8")
+
+    # --- Legacy slug-based fallback ---
     # Flat Levine articles (e.g. "00-headline.md")
     articles_dir = work_dir / "articles"
     if articles_dir.exists():

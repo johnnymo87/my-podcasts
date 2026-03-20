@@ -85,6 +85,8 @@ def collect_all_artifacts(
         articles = []
 
     headlines_with_snippets = []
+    # Maps the headline text sent to the editor → file path (relative to work_dir)
+    headline_index: dict[str, str] = {}
 
     for i, art in enumerate(articles):
         # Skip articles already used in prior episodes
@@ -103,6 +105,7 @@ def collect_all_artifacts(
         suffix = "..." if len(art.content) > 300 else ""
         snippet = f"Headline: {art.headline}\nContext: {truncated}{suffix}"
         headlines_with_snippets.append(snippet)
+        headline_index[art.headline] = str(art_path.relative_to(work_dir))
 
     # Phase 1b: Semafor articles from cache (TH categories)
     semafor_dir = articles_dir / "semafor"
@@ -170,6 +173,7 @@ def collect_all_artifacts(
         suffix = "..." if len(body) > 300 else ""
         snippet = f"[zvi] {headline}\nContext: {truncated}{suffix}"
         headlines_with_snippets.append(snippet)
+        headline_index[headline] = str(zvi_path.relative_to(work_dir))
 
     # Copy trailing window context (last 3 scripts)
     scripts_dir = (
@@ -184,6 +188,11 @@ def collect_all_artifacts(
             if not target.exists():
                 # Read and write instead of symlink to avoid cross-device link issues
                 target.write_text(script.read_text(encoding="utf-8"))
+
+    # Write headline index for article lookup
+    (work_dir / "headline_index.json").write_text(
+        json.dumps(headline_index, indent=2), encoding="utf-8"
+    )
 
     # Freshness annotation
     coverage_ledger: str | None = None
