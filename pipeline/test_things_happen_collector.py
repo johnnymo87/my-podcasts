@@ -572,6 +572,64 @@ def test_find_rundown_article_text_no_false_match(tmp_path):
     assert text == ""
 
 
+def test_semafor_routing_header_preferred_over_category(tmp_path, monkeypatch):
+    """Routing: header overrides Category-based routing for Semafor articles."""
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(themes=[], directives=[]),
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
+    )
+
+    today = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+
+    # Article 1: Category=Gulf (FP-only by default), but Routing=th → should be INCLUDED
+    (semafor_cache / f"{today}-gulf-with-th-routing.md").write_text(
+        f"# Gulf Story With TH Routing\n\nURL: https://semafor.com/gulf-th\nPublished: {today}\nSource: semafor\nCategory: Gulf\nRouting: th\nType: article\n\nA Gulf story routed to TH."
+    )
+
+    # Article 2: Category empty, Routing=fp → should be EXCLUDED from Rundown
+    (semafor_cache / f"{today}-fp-only-article.md").write_text(
+        f"# FP Only Article\n\nURL: https://semafor.com/fp-only\nPublished: {today}\nSource: semafor\nCategory: \nRouting: fp\nType: article\n\nAn FP-only article."
+    )
+
+    # Article 3: Category empty, Routing=skip → should be EXCLUDED
+    (semafor_cache / f"{today}-skipped-article.md").write_text(
+        f"# Skipped Article\n\nURL: https://semafor.com/skip\nPublished: {today}\nSource: semafor\nCategory: \nRouting: skip\nType: article\n\nThis article should be skipped."
+    )
+
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+    work_dir = tmp_path / "work"
+
+    collect_all_artifacts(
+        "test-routing-header",
+        work_dir,
+        levine_cache_dir=levine_cache,
+        semafor_cache_dir=semafor_cache,
+    )
+
+    semafor_dir = work_dir / "articles" / "semafor"
+    assert semafor_dir.exists()
+    semafor_files = list(semafor_dir.glob("*.md"))
+
+    # Only the first article (Routing: th) should be included
+    assert len(semafor_files) == 1
+    content = semafor_files[0].read_text()
+    assert "Gulf Story With TH Routing" in content
+    assert "FP Only Article" not in content
+    assert "Skipped Article" not in content
+
+
 def test_collector_works_without_levine_links(tmp_path, monkeypatch):
     """Collector proceeds with Semafor + Zvi when no Levine links exist."""
     monkeypatch.setattr(

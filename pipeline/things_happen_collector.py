@@ -122,12 +122,17 @@ def collect_all_artifacts(
             headline = " ".join(lines[0].lstrip("# ").split())
             category = ""
             url = ""
+            routing = ""
             for line in lines[1:8]:
                 if line.startswith("Category: "):
                     category = line[10:].strip()
                 elif line.startswith("URL: "):
                     url = line[5:].strip()
-            routing = categorize_semafor_article(category)
+                elif line.startswith("Routing: "):
+                    routing = line[9:].strip()
+            # Prefer Routing header; fall back to category-based classification
+            if not routing:
+                routing = categorize_semafor_article(category)
             if routing not in ("th", "both"):
                 continue
             if url and url in _prior:
