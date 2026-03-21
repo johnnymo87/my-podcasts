@@ -2,17 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import html as html_mod
+import logging
+import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 import trafilatura
+from google import genai
+from google.genai import types
+from pydantic import BaseModel
 
 from pipeline.fp_homepage_scraper import scrape_homepage
 from pipeline.rss_sources import FP_DIGEST_RSS_SOURCES, SEMAFOR, fetch_feed
 
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+logger = logging.getLogger(__name__)
 
 
 def _slugify(text: str) -> str:
@@ -33,6 +40,102 @@ def _parse_publish_date(entry: dict) -> datetime | None:
         if st:
             return datetime(*st[:6], tzinfo=UTC)
     return None
+
+
+class _ArticleRouting(BaseModel):
+    index: int
+    routing: str
+
+
+class _RoutingResult(BaseModel):
+    articles: list[_ArticleRouting]
+
+
+_ROUTING_PROMPT = """\
+Classify each article for two daily podcasts.
+
+**FP Digest** (`fp`): foreign policy, geopolitics, military conflicts, diplomacy, \
+international relations, wars, sanctions, territorial disputes, international \
+humanitarian crises, international organizations.
+
+**The Rundown** (`th`): business, technology, AI, science, culture, entertainment, \
+domestic US politics, media, energy markets, startups, corporate news.
+
+**Both** (`both`): articles that clearly span both (e.g., US trade policy, sanctions \
+with major business impact, arms deals).
+
+**Skip** (`skip`): publisher self-promotion, event announcements, sponsored content, \
+meta-content about the publisher itself.
+
+For each article, return its index and routing.
+
+Articles:
+"""
+
+
+def classify_semafor_articles(
+    articles: list[dict],
+) -> dict[int, str]:
+    """Classify Semafor articles into fp/th/both/skip using Gemini.
+
+    Args:
+        articles: list of dicts with 'title' and 'description' keys.
+
+    Returns:
+        dict mapping article index to routing string.
+        Falls back to 'both' for all articles on any failure.
+    """
+    if not articles:
+        return {}
+
+    fallback = {i: "both" for i in range(len(articles))}
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        logger.warning(
+            "GEMINI_API_KEY not set; defaulting all Semafor routing to 'both'"
+        )
+        return fallback
+
+    lines = []
+    for i, art in enumerate(articles):
+        desc = art.get("description", "")
+        entry = f"{i}. {art['title']}"
+        if desc:
+            entry += f" — {desc}"
+        lines.append(entry)
+
+    prompt = _ROUTING_PROMPT + "\n".join(lines)
+
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=_RoutingResult,
+                temperature=0.1,
+            ),
+        )
+        parsed = response.parsed
+        if parsed and parsed.articles:
+            result = {}
+            for art in parsed.articles:
+                routing = art.routing.strip().lower()
+                if routing in ("fp", "th", "both", "skip"):
+                    result[art.index] = routing
+                else:
+                    result[art.index] = "both"
+            # Fill in any missing indices
+            for i in range(len(articles)):
+                if i not in result:
+                    result[i] = "both"
+            return result
+    except Exception:
+        logger.exception("Gemini Semafor classification failed; defaulting to 'both'")
+
+    return fallback
 
 
 def sync_semafor_cache(cache_dir: Path) -> list[Path]:

@@ -8,6 +8,7 @@ from click.testing import CliRunner
 from pipeline.__main__ import cli
 from pipeline.fp_homepage_scraper import HomepageLink
 from pipeline.source_cache import (
+    classify_semafor_articles,
     sync_antiwar_homepage_cache,
     sync_antiwar_rss_cache,
     sync_semafor_cache,
@@ -211,3 +212,119 @@ def test_sync_sources_cli():
     mock_semafor.assert_called_once()
     mock_rss.assert_called_once()
     mock_homepage.assert_called_once()
+
+
+def test_classify_semafor_articles_returns_routing(monkeypatch):
+    """LLM classifier returns routing for each article."""
+    articles = [
+        {
+            "title": "Hungary blocks EU loan to Ukraine",
+            "description": "Orban demands Russian oil access.",
+        },
+        {
+            "title": "Nvidia's Claw Bar was a pricey wakeup call",
+            "description": "A demo at GTC was really a sales pitch.",
+        },
+        {"title": "Iran war reshapes Gulf diplomacy", "description": ""},
+    ]
+
+    mock_parsed = MagicMock()
+    mock_parsed.articles = [
+        MagicMock(index=0, routing="fp"),
+        MagicMock(index=1, routing="th"),
+        MagicMock(index=2, routing="fp"),
+    ]
+    mock_response = MagicMock()
+    mock_response.parsed = mock_parsed
+
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = mock_response
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+    with patch("pipeline.source_cache.genai") as mock_genai:
+        mock_genai.Client.return_value = mock_client
+        result = classify_semafor_articles(articles)
+
+    assert result == {0: "fp", 1: "th", 2: "fp"}
+    call_args = mock_client.models.generate_content.call_args
+    assert "gemini-3.1-flash-lite-preview" in str(call_args)
+
+
+def test_classify_semafor_articles_fallback_no_api_key(monkeypatch):
+    """Without GEMINI_API_KEY, all articles get 'both'."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    articles = [
+        {"title": "Some Article", "description": "Desc."},
+        {"title": "Another Article", "description": ""},
+    ]
+    result = classify_semafor_articles(articles)
+    assert result == {0: "both", 1: "both"}
+
+
+def test_classify_semafor_articles_fallback_on_error(monkeypatch):
+    """On Gemini API error, all articles get 'both'."""
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+    with patch("pipeline.source_cache.genai") as mock_genai:
+        mock_genai.Client.return_value.models.generate_content.side_effect = Exception(
+            "API down"
+        )
+        result = classify_semafor_articles([{"title": "Test", "description": ""}])
+
+    assert result == {0: "both"}
+
+
+def test_classify_semafor_articles_empty_list():
+    """Empty input returns empty dict."""
+    result = classify_semafor_articles([])
+    assert result == {}
+
+
+def test_classify_semafor_articles_normalises_unknown_routing(monkeypatch):
+    """LLM returning an unknown routing string falls back to 'both'."""
+    mock_parsed = MagicMock()
+    mock_parsed.articles = [
+        MagicMock(index=0, routing="UNKNOWN_VALUE"),
+    ]
+    mock_response = MagicMock()
+    mock_response.parsed = mock_parsed
+
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = mock_response
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+    with patch("pipeline.source_cache.genai") as mock_genai:
+        mock_genai.Client.return_value = mock_client
+        result = classify_semafor_articles([{"title": "Test", "description": ""}])
+
+    assert result == {0: "both"}
+
+
+def test_classify_semafor_articles_fills_missing_indices(monkeypatch):
+    """LLM omitting some indices gets them filled with 'both'."""
+    mock_parsed = MagicMock()
+    mock_parsed.articles = [
+        MagicMock(index=0, routing="fp"),
+        # index 1 missing
+    ]
+    mock_response = MagicMock()
+    mock_response.parsed = mock_parsed
+
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = mock_response
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+    with patch("pipeline.source_cache.genai") as mock_genai:
+        mock_genai.Client.return_value = mock_client
+        result = classify_semafor_articles(
+            [
+                {"title": "Article A", "description": ""},
+                {"title": "Article B", "description": ""},
+            ]
+        )
+
+    assert result == {0: "fp", 1: "both"}
