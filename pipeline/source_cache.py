@@ -148,6 +148,7 @@ def sync_semafor_cache(cache_dir: Path) -> list[Path]:
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     new_files: list[Path] = []
+    new_articles: list[dict] = []
 
     for entry in feed.entries:
         title = (entry.get("title") or "").strip()
@@ -162,16 +163,14 @@ def sync_semafor_cache(cache_dir: Path) -> list[Path]:
         if entry.get("tags"):
             category = entry["tags"][0].get("term", "")
 
+        description = (entry.get("summary") or "").strip()
+
         content_html = (
             entry.get("content", [{}])[0].get("value", "")
             if entry.get("content")
             else ""
         )
-        text = (
-            _strip_html(content_html)
-            if content_html
-            else (entry.get("summary") or "").strip()
-        )
+        text = _strip_html(content_html) if content_html else description
 
         slug = _slugify(title)
         filename = f"{date_str}-{slug}.md"
@@ -185,11 +184,22 @@ def sync_semafor_cache(cache_dir: Path) -> list[Path]:
             f"Published: {date_str}\n"
             f"Source: semafor\n"
             f"Category: {category}\n"
+            f"Routing: __PENDING__\n"
             f"Type: article\n\n"
             f"{text}"
         )
         path.write_text(md, encoding="utf-8")
         new_files.append(path)
+        new_articles.append({"title": title, "description": description})
+
+    # Classify new articles and patch routing into files
+    if new_articles:
+        routings = classify_semafor_articles(new_articles)
+        for i, path in enumerate(new_files):
+            routing = routings.get(i, "both")
+            content = path.read_text(encoding="utf-8")
+            content = content.replace("Routing: __PENDING__", f"Routing: {routing}", 1)
+            path.write_text(content, encoding="utf-8")
 
     return new_files
 

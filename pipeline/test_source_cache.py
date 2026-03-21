@@ -303,6 +303,48 @@ def test_classify_semafor_articles_normalises_unknown_routing(monkeypatch):
     assert result == {0: "both"}
 
 
+def test_sync_semafor_writes_routing_header(tmp_path, monkeypatch):
+    """sync_semafor_cache writes a Routing: header from LLM classification."""
+    entry = _make_semafor_entry("Iran War Update", "", "2026-03-20")
+    feed = MagicMock()
+    feed.entries = [entry]
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+    with (
+        patch("pipeline.source_cache.fetch_feed", return_value=feed),
+        patch(
+            "pipeline.source_cache.classify_semafor_articles",
+            return_value={0: "fp"},
+        ),
+    ):
+        new_files = sync_semafor_cache(tmp_path)
+
+    assert len(new_files) == 1
+    content = new_files[0].read_text()
+    assert "Routing: fp" in content
+    assert "Category:" in content  # Category still present
+
+
+def test_sync_semafor_routing_fallback_on_classification_failure(tmp_path, monkeypatch):
+    """If classification returns all 'both', Routing defaults to 'both'."""
+    entry = _make_semafor_entry("Some Article", "Technology", "2026-03-20")
+    feed = MagicMock()
+    feed.entries = [entry]
+
+    with (
+        patch("pipeline.source_cache.fetch_feed", return_value=feed),
+        patch(
+            "pipeline.source_cache.classify_semafor_articles",
+            return_value={0: "both"},
+        ),
+    ):
+        new_files = sync_semafor_cache(tmp_path)
+
+    content = new_files[0].read_text()
+    assert "Routing: both" in content
+
+
 def test_classify_semafor_articles_fills_missing_indices(monkeypatch):
     """LLM omitting some indices gets them filled with 'both'."""
     mock_parsed = MagicMock()
