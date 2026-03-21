@@ -73,7 +73,7 @@ Daily current-affairs digest covering business, technology, AI, law, media, scie
 
 **Sources (all co-equal, read from persistent caches with adaptive lookback):**
 - Matt Levine's "Things Happen" links (extracted from email, cached to `/persist/my-podcasts/levine-cache/`)
-- Semafor RSS (`semafor.com/rss.xml`) — Business, Technology, Media, CEO, Energy categories + Politics (shared with FP Digest)
+- Semafor RSS (`semafor.com/rss.xml`) — articles classified by Gemini Flash-Lite at cache sync time into `fp`, `th`, `both`, or `skip` via `Routing:` header
 - Zvi Mowshowitz / "Don't Worry About the Vase" (`thezvi.substack.com/feed`) — AI roundup sections split by topic, essays kept whole. Persistent cache at `/persist/my-podcasts/zvi-cache/` (180-day retention).
 
 **Subscription:** `https://podcast.mohrbacher.dev/feeds/the-rundown.xml`
@@ -95,8 +95,8 @@ Daily current-affairs digest covering business, technology, AI, law, media, scie
 - `pipeline/things_happen_editor.py` — Gemini AI for themed research plan (story selection, priority, FP flagging)
 - `pipeline/zvi_cache.py` — Zvi RSS fetch, roundup splitting, persistent cache
 - `pipeline/exa_client.py` — Exa search API wrapper
-- `pipeline/rss_sources.py` — RSS source definitions, `SEMAFOR`, `categorize_semafor_article()`
-- `pipeline/source_cache.py` — Persistent cache sync for Semafor, Antiwar RSS, and Antiwar homepage
+- `pipeline/rss_sources.py` — RSS source definitions, `SEMAFOR`, `categorize_semafor_article()` (legacy fallback)
+- `pipeline/source_cache.py` — Persistent cache sync for Semafor (with LLM routing), Antiwar RSS, and Antiwar homepage
 
 ## FP Digest Pipeline
 
@@ -105,7 +105,7 @@ Daily foreign policy podcast. Fully automated, no human-in-the-loop.
 **Sources (all read from persistent caches with adaptive lookback):**
 - antiwar.com homepage (~49 curated external links across 13 regions)
 - 3 antiwar.com RSS feeds + Caitlin Johnstone feed
-- Semafor RSS — Africa, Gulf, Security categories + Politics (shared with The Rundown)
+- Semafor RSS — articles with `Routing: fp` or `Routing: both` (classified by Gemini at cache sync time)
 - Routed FP links from The Rundown (via `/persist/my-podcasts/fp-routed-links/`)
 
 **Flow:**
@@ -122,7 +122,7 @@ Daily foreign policy podcast. Fully automated, no human-in-the-loop.
 - `pipeline/fp_collector.py` — multi-source collection orchestrator (homepage, RSS, Semafor, routed links)
 - `pipeline/fp_writer.py` — script generation via opencode-serve
 - `pipeline/fp_processor.py` — TTS + publish
-- `pipeline/rss_sources.py` — RSS source definitions, Semafor category routing
+- `pipeline/rss_sources.py` — RSS source definitions, Semafor category routing (legacy fallback)
 - `pipeline/source_cache.py` — Persistent cache sync for all sources
 
 **CLI:** `uv run python -m pipeline fp-digest [--date YYYY-MM-DD] [--lookback N] [--dry-run]`
@@ -134,7 +134,7 @@ Foreign policy content is exclusively routed to FP Digest, not The Rundown:
 - **The Rundown editor** classifies each link with `is_foreign_policy: bool`
 - FP-flagged links are written to `/persist/my-podcasts/fp-routed-links/{date}-{job_id}.json`
 - FP Digest collector reads routed files within the lookback window
-- **Semafor** articles are split by category: FP categories → FP Digest, business/tech → The Rundown, Politics → both
+- **Semafor** articles are classified by Gemini Flash-Lite at cache sync time via a `Routing:` header (`fp`, `th`, `both`, or `skip`). Legacy cache files without `Routing:` fall back to category-based routing via `categorize_semafor_article()`
 - Routed link files are cleaned up after 7 days
 
 ## Source Caching
@@ -147,7 +147,7 @@ All external sources are cached daily to persistent storage by the `sync-sources
 - Antiwar RSS: `/persist/my-podcasts/antiwar-rss-cache/`
 - Antiwar Homepage: `/persist/my-podcasts/antiwar-homepage-cache/`
 
-All caches use 180-day retention (cleaned up by `_cleanup_old_work_dirs` in consumer). Files are markdown with metadata headers (URL, Published, Source, Category/Region).
+All caches use 180-day retention (cleaned up by `_cleanup_old_work_dirs` in consumer). Files are markdown with metadata headers (URL, Published, Source, Category/Region). Semafor cache files also include a `Routing:` header (`fp`, `th`, `both`, or `skip`) set by Gemini Flash-Lite at sync time.
 
 **Key module:** `pipeline/source_cache.py` — `sync_semafor_cache`, `sync_antiwar_rss_cache`, `sync_antiwar_homepage_cache`
 
