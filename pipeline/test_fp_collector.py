@@ -555,3 +555,109 @@ def test_multiline_homepage_title_normalized(
     assert first_line == "# Democrats Say White House Offers No Clarity"
     # File slug should use the full normalized title
     assert "democrats-say-white-house-offers-no-clarity" in homepage_files[0].name
+
+
+def _write_semafor_cache_file_with_routing(
+    cache_dir: Path,
+    date: str,
+    headline: str,
+    url: str,
+    category: str,
+    routing: str,
+    text: str = "Semafor article text.",
+) -> None:
+    """Write a Semafor cache file with an explicit Routing: header."""
+    slug = _slugify(headline)
+    filename = f"{date}-{slug}.md"
+    content = (
+        f"# {headline}\n\n"
+        f"URL: {url}\n"
+        f"Published: {date}\n"
+        f"Source: semafor\n"
+        f"Category: {category}\n"
+        f"Routing: {routing}\n"
+        f"Type: article\n\n"
+        f"{text}"
+    )
+    (cache_dir / filename).write_text(content, encoding="utf-8")
+
+
+def test_semafor_routing_header_preferred_over_category(tmp_path, monkeypatch):
+    """Routing: header overrides Category:-based routing for Semafor articles."""
+    from pipeline.fp_collector import collect_fp_artifacts
+
+    monkeypatch.setattr(
+        "pipeline.fp_collector._extract_article_text", lambda url: "text"
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+    monkeypatch.setattr("pipeline.fp_collector.search_related", lambda *a, **kw: [])
+
+    # Empty homepage and RSS caches
+    homepage_cache = tmp_path / "homepage-cache"
+    homepage_cache.mkdir()
+    rss_cache = tmp_path / "rss-cache"
+    rss_cache.mkdir()
+
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    today = _today_et()
+
+    # Article 1: Category=Business (normally excluded) but Routing=fp → INCLUDED
+    _write_semafor_cache_file_with_routing(
+        semafor_cache,
+        today,
+        "Business Article With FP Routing",
+        "https://semafor.com/business-fp",
+        "Business",
+        "fp",
+        "Business but FP routed article text",
+    )
+
+    # Article 2: Category=Technology (normally excluded) and Routing=th → EXCLUDED
+    _write_semafor_cache_file_with_routing(
+        semafor_cache,
+        today,
+        "Tech Article With TH Routing",
+        "https://semafor.com/tech-th",
+        "Technology",
+        "th",
+        "Tech article text",
+    )
+
+    # Article 3: Routing=skip → EXCLUDED
+    _write_semafor_cache_file_with_routing(
+        semafor_cache,
+        today,
+        "Article With Skip Routing",
+        "https://semafor.com/skip",
+        "Gulf",
+        "skip",
+        "This Gulf article is explicitly skipped",
+    )
+
+    work_dir = tmp_path / "work"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+
+    collect_fp_artifacts(
+        "test-routing",
+        work_dir,
+        scripts_source_dir=scripts_dir,
+        homepage_cache_dir=homepage_cache,
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=semafor_cache,
+    )
+
+    semafor_dir = work_dir / "articles" / "semafor"
+    assert semafor_dir.exists()
+    semafor_files = list(semafor_dir.glob("*.md"))
+
+    # Only the Business article with Routing: fp should be included
+    assert len(semafor_files) == 1
+    contents = semafor_files[0].read_text()
+    assert "Business Article With FP Routing" in contents
+    assert "Tech Article With TH Routing" not in contents
+    assert "Article With Skip Routing" not in contents

@@ -254,16 +254,21 @@ def collect_fp_artifacts(
             title = " ".join(lines[0].lstrip("# ").split()) if lines else ""
             url = ""
             category = ""
+            routing = ""
             for line in lines[1:]:
                 if line.startswith("URL: "):
                     url = line[5:].strip()
                 elif line.startswith("Category: "):
                     category = line[10:].strip()
+                elif line.startswith("Routing: "):
+                    routing = line[9:].strip()
 
             if not title or not url:
                 continue
 
-            routing = categorize_semafor_article(category)
+            # Prefer Routing header; fall back to category-based classification
+            if not routing:
+                routing = categorize_semafor_article(category)
             if routing not in ("fp", "both"):
                 continue
 
