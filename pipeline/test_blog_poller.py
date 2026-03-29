@@ -1,6 +1,13 @@
+import subprocess
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from pipeline.blog_poller import BlogPost, parse_blog_feed, adapt_for_audio
+from pipeline.blog_poller import (
+    BlogPost,
+    parse_blog_feed,
+    adapt_for_audio,
+    process_blog_post,
+)
 from pipeline.blog_sources import BLOG_SOURCES, BlogSource
 from pipeline.db import StateStore
 
@@ -105,3 +112,79 @@ def test_adapt_for_audio_returns_none_without_api_key(monkeypatch) -> None:
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     result = adapt_for_audio("<p>Hello</p>", "Test Title")
     assert result is None
+
+
+def test_process_blog_post_publishes_episode(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("PODCAST_BASE_URL", "https://test.example.com")
+
+    store = StateStore(tmp_path / "test.db")
+    r2_client = MagicMock()
+
+    post = BlogPost(
+        title="Test Post Title",
+        url="https://example.com/post1",
+        pub_date="Sun, 29 Mar 2026 05:17:35 +0000",
+        html_content="<p>Hello world. This is a test post.</p>",
+        guid="https://example.com/?p=123",
+    )
+    source = BLOG_SOURCES[0]
+
+    # Mock Gemini
+    mock_gemini_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = "Hello world. This is a test post."
+    mock_gemini_client.models.generate_content.return_value = mock_response
+
+    # Mock subprocess.run for both ttsjoin and ffprobe
+    def fake_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "ttsjoin":
+            output_idx = cmd.index("--output-file") + 1
+            Path(cmd[output_idx]).write_bytes(b"\x00" * 100)
+            return subprocess.CompletedProcess(cmd, 0)
+        elif cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(cmd, 0, stdout="10.0", stderr="")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    with (
+        patch("pipeline.blog_poller.genai") as mock_genai,
+        patch("subprocess.run", side_effect=fake_subprocess_run),
+        patch("pipeline.feed.regenerate_and_upload_feed"),
+    ):
+        mock_genai.Client.return_value = mock_gemini_client
+        process_blog_post(post, source, store, r2_client)
+
+    # Episode should be inserted
+    episodes = store.list_episodes(feed_slug="aaronson")
+    assert len(episodes) == 1
+    assert episodes[0].title == "Test Post Title"
+    assert episodes[0].source_url == "https://example.com/post1"
+    assert episodes[0].feed_slug == "aaronson"
+    assert episodes[0].category == "Technology"
+
+    # Post should be marked as processed
+    assert store.is_blog_post_processed("https://example.com/post1") is True
+
+    store.close()
+
+
+def test_process_blog_post_skips_already_processed(tmp_path, monkeypatch) -> None:
+    store = StateStore(tmp_path / "test.db")
+    r2_client = MagicMock()
+
+    post = BlogPost(
+        title="Already Done",
+        url="https://example.com/done",
+        pub_date="Sun, 29 Mar 2026 05:17:35 +0000",
+        html_content="<p>Already processed</p>",
+        guid="done",
+    )
+    source = BLOG_SOURCES[0]
+    store.mark_blog_post_processed("https://example.com/done", "aaronson")
+
+    # Should not call anything - just skip
+    process_blog_post(post, source, store, r2_client)
+
+    episodes = store.list_episodes(feed_slug="aaronson")
+    assert len(episodes) == 0
+    store.close()
