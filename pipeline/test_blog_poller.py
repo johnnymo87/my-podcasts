@@ -1,4 +1,6 @@
-from pipeline.blog_poller import BlogPost, parse_blog_feed
+from unittest.mock import patch, MagicMock
+
+from pipeline.blog_poller import BlogPost, parse_blog_feed, adapt_for_audio
 from pipeline.blog_sources import BLOG_SOURCES, BlogSource
 from pipeline.db import StateStore
 
@@ -80,3 +82,26 @@ def test_mark_blog_post_processed_idempotent(tmp_path) -> None:
     store.mark_blog_post_processed("https://example.com/post1", "aaronson")
     assert store.is_blog_post_processed("https://example.com/post1") is True
     store.close()
+
+
+def test_adapt_for_audio_calls_gemini(monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = "Adapted text for TTS."
+    mock_client.models.generate_content.return_value = mock_response
+
+    with patch("pipeline.blog_poller.genai") as mock_genai:
+        mock_genai.Client.return_value = mock_client
+        result = adapt_for_audio("<p>Hello <b>world</b></p>", "Test Title")
+
+    assert result == "Adapted text for TTS."
+    call_args = mock_client.models.generate_content.call_args
+    assert "gemini" in str(call_args)
+
+
+def test_adapt_for_audio_returns_none_without_api_key(monkeypatch) -> None:
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    result = adapt_for_audio("<p>Hello</p>", "Test Title")
+    assert result is None
