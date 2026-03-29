@@ -96,6 +96,12 @@ CREATE TABLE IF NOT EXISTS pending_the_rundown (
     last_error TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS processed_blog_posts (
+    source_url TEXT PRIMARY KEY,
+    feed_slug TEXT NOT NULL,
+    processed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -215,6 +221,20 @@ class StateStore:
         self._conn.execute(
             "INSERT OR REPLACE INTO processed_emails (r2_key) VALUES (?)",
             (r2_key,),
+        )
+        self._conn.commit()
+
+    def is_blog_post_processed(self, source_url: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM processed_blog_posts WHERE source_url = ?",
+            (source_url,),
+        ).fetchone()
+        return row is not None
+
+    def mark_blog_post_processed(self, source_url: str, feed_slug: str) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO processed_blog_posts (source_url, feed_slug) VALUES (?, ?)",
+            (source_url, feed_slug),
         )
         self._conn.commit()
 

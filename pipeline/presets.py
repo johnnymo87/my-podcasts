@@ -54,6 +54,14 @@ PRESETS: tuple[NewsletterPreset, ...] = (
         category="News",
         feed_slug="fp-digest",
     ),
+    NewsletterPreset(
+        name="Scott Aaronson - Shtetl-Optimized",
+        route_tags=("aaronson", "shtetl-optimized"),
+        tts_model="tts-1-hd",
+        tts_voice="fable",
+        category="Technology",
+        feed_slug="aaronson",
+    ),
 )
 
 
