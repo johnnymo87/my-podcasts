@@ -24,6 +24,10 @@ if TYPE_CHECKING:
     from pipeline.r2 import R2Client
 
 
+_BLOG_POLL_INTERVAL = 6 * 3600  # 6 hours
+_last_blog_poll = 0.0
+
+
 def _compute_lookback(
     store: StateStore, feed_slug: str, default: int = 2, cap: int = 14
 ) -> int:
@@ -563,16 +567,14 @@ def consume_forever(
 
         # Poll blog sources for new posts.
         try:
+            global _last_blog_poll  # noqa: PLW0603
             now = time.time()
-            if not hasattr(consume_forever, "_last_blog_poll"):
-                consume_forever._last_blog_poll = 0.0  # type: ignore[attr-defined]
-            blog_poll_interval = 6 * 3600  # 6 hours
-            if now - consume_forever._last_blog_poll >= blog_poll_interval:  # type: ignore[attr-defined]
+            if now - _last_blog_poll >= _BLOG_POLL_INTERVAL:
                 from pipeline.blog_poller import poll_all_blogs
 
                 print("Polling blog sources for new posts...")
                 poll_all_blogs(store, r2_client)
-                consume_forever._last_blog_poll = now  # type: ignore[attr-defined]
+                _last_blog_poll = now
         except Exception as exc:
             print(f"Error polling blog sources: {exc}")
 

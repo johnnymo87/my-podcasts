@@ -162,6 +162,8 @@ def test_process_blog_post_publishes_episode(tmp_path, monkeypatch) -> None:
     assert episodes[0].source_url == "https://example.com/post1"
     assert episodes[0].feed_slug == "aaronson"
     assert episodes[0].category == "Technology"
+    # Verify original pub_date from RSS is used (not processing time)
+    assert "29 Mar 2026" in episodes[0].pub_date
 
     # Post should be marked as processed
     assert store.is_blog_post_processed("https://example.com/post1") is True

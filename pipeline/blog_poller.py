@@ -9,7 +9,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from email.utils import format_datetime
+from email.utils import format_datetime, parsedate_to_datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -188,11 +188,17 @@ def process_blog_post(
             except ValueError:
                 pass
 
+    # Use original pub_date from RSS feed for correct chronological ordering
+    try:
+        episode_pub_date = format_datetime(parsedate_to_datetime(post.pub_date))
+    except Exception:
+        episode_pub_date = format_datetime(datetime.now(tz=UTC))
+
     episode = Episode(
         id=str(uuid.uuid4()),
         title=post.title,
         slug=episode_slug,
-        pub_date=format_datetime(datetime.now(tz=UTC)),
+        pub_date=episode_pub_date,
         r2_key=episode_r2_key,
         feed_slug=source.feed_slug,
         category=source.category,
