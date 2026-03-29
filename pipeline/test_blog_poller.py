@@ -1,5 +1,54 @@
+from pipeline.blog_poller import BlogPost, parse_blog_feed
 from pipeline.blog_sources import BLOG_SOURCES, BlogSource
 from pipeline.db import StateStore
+
+
+SAMPLE_RSS = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel>
+<title>Test Blog</title>
+<item>
+  <title>Test Post</title>
+  <link>https://example.com/post1</link>
+  <pubDate>Sun, 29 Mar 2026 05:17:35 +0000</pubDate>
+  <content:encoded><![CDATA[<p>Hello world</p>]]></content:encoded>
+  <guid isPermaLink="false">https://example.com/?p=123</guid>
+</item>
+<item>
+  <title>Second Post</title>
+  <link>https://example.com/post2</link>
+  <pubDate>Wed, 18 Mar 2026 16:10:13 +0000</pubDate>
+  <content:encoded><![CDATA[<p>Another post</p>]]></content:encoded>
+  <guid isPermaLink="false">https://example.com/?p=124</guid>
+</item>
+</channel>
+</rss>"""
+
+
+def test_parse_blog_feed_extracts_posts() -> None:
+    posts = parse_blog_feed(SAMPLE_RSS)
+    assert len(posts) == 2
+    assert posts[0].title == "Test Post"
+    assert posts[0].url == "https://example.com/post1"
+    assert posts[0].html_content == "<p>Hello world</p>"
+    assert posts[0].pub_date == "Sun, 29 Mar 2026 05:17:35 +0000"
+
+
+def test_parse_blog_feed_handles_missing_content() -> None:
+    rss = """<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>Test</title>
+    <item><title>No Content</title><link>https://example.com/x</link>
+    <pubDate>Sun, 29 Mar 2026 05:17:35 +0000</pubDate></item>
+    </channel></rss>"""
+    posts = parse_blog_feed(rss)
+    assert len(posts) == 0  # skip posts without content:encoded
+
+
+def test_parse_blog_feed_empty() -> None:
+    rss = """<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel><title>Test</title></channel></rss>"""
+    posts = parse_blog_feed(rss)
+    assert len(posts) == 0
 
 
 def test_blog_sources_has_aaronson() -> None:
