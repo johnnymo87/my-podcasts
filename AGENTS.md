@@ -21,6 +21,7 @@ Quick start and navigation for humans and coding agents.
    - Silver Bulletin: `https://podcast.mohrbacher.dev/feeds/silver.xml`
    - The Rundown: `https://podcast.mohrbacher.dev/feeds/the-rundown.xml` (created on first episode)
    - FP Digest: `https://podcast.mohrbacher.dev/feeds/fp-digest.xml`
+   - Aaronson: `https://podcast.mohrbacher.dev/feeds/aaronson.xml`
 
 ## Docs TOC
 
@@ -156,6 +157,21 @@ All caches use 180-day retention (cleaned up by `_cleanup_old_work_dirs` in cons
 **Timer:** `sync-sources.timer` — daily at noon ET
 
 **Adaptive lookback:** `pipeline/db.py:days_since_last_episode()` queries the latest episode date per feed. `pipeline/consumer.py:_compute_lookback()` computes `min(max(2, days_since + 1), 14)`.
+
+## Blog Polling
+
+WordPress and other blog sources are polled via RSS for new posts. Each new post is adapted for audio (via Gemini Flash), converted to speech, and published as a standalone episode.
+
+**Polling interval:** Every 6 hours (inside the consumer loop)
+
+**CLI:** `uv run python -m pipeline poll-blogs [--dry-run]`
+
+**Sources:**
+- Scott Aaronson / Shtetl-Optimized: `https://scottaaronson.blog/?feed=rss2` -> feed slug `aaronson`
+
+**Key module:** `pipeline/blog_poller.py` -- RSS fetch, AI adaptation, TTS + publish
+
+**Source definitions:** `pipeline/blog_sources.py` -- `BlogSource` dataclass, `BLOG_SOURCES` tuple
 
 ## Landing the Plane (Session Completion)
 
