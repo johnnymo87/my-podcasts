@@ -561,5 +561,20 @@ def consume_forever(
         except Exception as exc:
             print(f"Error checking FP digest jobs: {exc}")
 
+        # Poll blog sources for new posts.
+        try:
+            now = time.time()
+            if not hasattr(consume_forever, "_last_blog_poll"):
+                consume_forever._last_blog_poll = 0.0  # type: ignore[attr-defined]
+            blog_poll_interval = 6 * 3600  # 6 hours
+            if now - consume_forever._last_blog_poll >= blog_poll_interval:  # type: ignore[attr-defined]
+                from pipeline.blog_poller import poll_all_blogs
+
+                print("Polling blog sources for new posts...")
+                poll_all_blogs(store, r2_client)
+                consume_forever._last_blog_poll = now  # type: ignore[attr-defined]
+        except Exception as exc:
+            print(f"Error polling blog sources: {exc}")
+
         if not messages:
             time.sleep(poll_interval)
