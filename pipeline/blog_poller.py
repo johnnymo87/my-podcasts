@@ -13,9 +13,11 @@ from email.utils import format_datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import requests
 from google import genai
 from google.genai import types
 
+from pipeline.blog_sources import BLOG_SOURCES
 from pipeline.feed import regenerate_and_upload_feed
 from pipeline.script_processor import TTS_MODEL
 
@@ -206,3 +208,22 @@ def process_blog_post(
     store.mark_blog_post_processed(post.url, source.feed_slug)
     regenerate_and_upload_feed(store, r2_client)
     logger.info("Published blog episode: %s", post.title)
+
+
+def poll_all_blogs(store: StateStore, r2_client: R2Client) -> None:
+    """Fetch all blog RSS feeds and process new posts."""
+    for source in BLOG_SOURCES:
+        try:
+            logger.info("Polling blog: %s", source.name)
+            resp = requests.get(source.feed_url, timeout=30)
+            resp.raise_for_status()
+            posts = parse_blog_feed(resp.text)
+            logger.info("Found %d posts in feed for %s", len(posts), source.name)
+
+            for post in posts:
+                try:
+                    process_blog_post(post, source, store, r2_client)
+                except Exception:
+                    logger.exception("Failed to process post: %s", post.title)
+        except Exception:
+            logger.exception("Failed to poll blog: %s", source.name)
