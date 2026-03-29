@@ -832,6 +832,56 @@ def publish_script_command(
         store.close()
 
 
+@cli.command("poll-blogs")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Fetch and adapt but don't TTS or publish.",
+)
+def poll_blogs_command(dry_run: bool) -> None:
+    """Poll all blog RSS feeds and process new posts."""
+    from pipeline.blog_poller import poll_all_blogs, parse_blog_feed, adapt_for_audio
+    from pipeline.blog_sources import BLOG_SOURCES
+
+    import requests
+
+    if dry_run:
+        for source in BLOG_SOURCES:
+            click.echo(f"Polling: {source.name} ({source.feed_url})")
+            try:
+                resp = requests.get(source.feed_url, timeout=30)
+                resp.raise_for_status()
+                posts = parse_blog_feed(resp.text)
+                click.echo(f"  Found {len(posts)} posts in feed")
+
+                store = StateStore(_default_state_db_path())
+                try:
+                    for post in posts:
+                        processed = store.is_blog_post_processed(post.url)
+                        status = "SKIP (already processed)" if processed else "NEW"
+                        click.echo(f"  [{status}] {post.title}")
+                        if not processed:
+                            adapted = adapt_for_audio(post.html_content, post.title)
+                            if adapted:
+                                click.echo(f"    Adapted: {len(adapted)} chars")
+                            else:
+                                click.echo("    Adaptation failed (no API key?)")
+                finally:
+                    store.close()
+            except Exception as e:
+                click.echo(f"  FAILED: {e}", err=True)
+        return
+
+    store = StateStore(_default_state_db_path())
+    try:
+        r2_client = R2Client()
+        poll_all_blogs(store, r2_client)
+        click.echo("Blog polling complete.")
+    finally:
+        store.close()
+
+
 @cli.command("sync-sources")
 def sync_sources_command() -> None:
     """Sync all source caches (Zvi, Semafor, Antiwar RSS, Antiwar homepage)."""
