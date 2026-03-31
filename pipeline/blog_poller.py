@@ -190,13 +190,18 @@ def process_blog_post(
 
     # Use original pub_date from RSS feed for correct chronological ordering
     try:
-        episode_pub_date = format_datetime(parsedate_to_datetime(post.pub_date))
+        parsed_pub_date = parsedate_to_datetime(post.pub_date)
+        episode_pub_date = format_datetime(parsed_pub_date)
     except Exception:
-        episode_pub_date = format_datetime(datetime.now(tz=UTC))
+        parsed_pub_date = datetime.now(tz=UTC)
+        episode_pub_date = format_datetime(parsed_pub_date)
+
+    date_prefix = parsed_pub_date.strftime("%b %-d")
+    episode_title = f"{date_prefix} - {post.title}"
 
     episode = Episode(
         id=str(uuid.uuid4()),
-        title=post.title,
+        title=episode_title,
         slug=episode_slug,
         pub_date=episode_pub_date,
         r2_key=episode_r2_key,

@@ -81,15 +81,27 @@ def generate_feed_xml(store: StateStore, feed_slug: str | None = None) -> bytes:
     image_url = os.getenv("PODCAST_IMAGE_URL", f"{base_url}/cover-general.jpg")
     default_category = os.getenv("PODCAST_DEFAULT_CATEGORY", "News")
 
+    episodes = store.list_episodes(feed_slug=feed_slug)
+    category = episodes[0].category if episodes else default_category
+
     if feed_slug and feed_slug != "general":
-        title = f"{base_title} - {feed_slug.title()}"
+        # Use the source name from episodes if available and unambiguous
+        # (e.g. blog feeds store "Scott Aaronson - Shtetl-Optimized").
+        # Ignore generic preset names that don't identify the source.
+        _generic_presets = {"Script"}
+        preset_names = {
+            e.preset_name
+            for e in episodes
+            if e.preset_name and e.preset_name not in _generic_presets
+        }
+        if len(preset_names) == 1:
+            title = f"{base_title} - {next(iter(preset_names))}"
+        else:
+            title = f"{base_title} - {feed_slug.title()}"
         image_env_key = f"PODCAST_IMAGE_URL_{feed_slug.upper().replace('-', '_')}"
         image_url = os.getenv(image_env_key, f"{base_url}/cover-{feed_slug}.jpg")
     else:
         title = base_title
-
-    episodes = store.list_episodes(feed_slug=feed_slug)
-    category = episodes[0].category if episodes else default_category
 
     rss = ET.Element(
         "rss",
