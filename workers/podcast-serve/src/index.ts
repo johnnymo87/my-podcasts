@@ -119,7 +119,7 @@ export default {
     }
 
     const url = new URL(request.url);
-    const key = normalizePathToKey(url.pathname);
+    const key = normalizePathToKey(decodeURIComponent(url.pathname));
     if (!key) {
       return notFound();
     }
