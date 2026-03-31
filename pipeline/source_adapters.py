@@ -285,6 +285,7 @@ ADAPTERS: dict[str, SourceAdapter] = {
     "levine": LevineAdapter(),
     "yglesias": SubstackAdapter(brand_name="Slow Boring", domain="slowboring.com"),
     "silver": SubstackAdapter(brand_name="Silver Bulletin", domain="natesilver.net"),
+    "chinatalk": SubstackAdapter(brand_name="ChinaTalk", domain="chinatalk.media"),
 }
 
 

@@ -62,6 +62,14 @@ PRESETS: tuple[NewsletterPreset, ...] = (
         category="Technology",
         feed_slug="aaronson",
     ),
+    NewsletterPreset(
+        name="ChinaTalk",
+        route_tags=("chinatalk",),
+        tts_model="tts-1-hd",
+        tts_voice="alloy",
+        category="News",
+        feed_slug="chinatalk",
+    ),
 )
 
 
