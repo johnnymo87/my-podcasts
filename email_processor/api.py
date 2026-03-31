@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import email
 import re
+import unicodedata
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -129,7 +130,13 @@ class EmailProcessor:
         except Exception:
             raw_subject = str(raw_subject_header).strip()
 
-        without_punc = re.sub(r"[^\w\s-]", "", raw_subject)
+        # Transliterate non-ASCII chars to ASCII (e.g. ñ → n) for URL-safe slugs
+        ascii_subject = (
+            unicodedata.normalize("NFKD", raw_subject)
+            .encode("ascii", "ignore")
+            .decode("ascii")
+        )
+        without_punc = re.sub(r"[^\w\s-]", "", ascii_subject)
         subject_slug = re.sub(r"\s+", "-", without_punc.strip())
 
         return date_str, subject_slug, raw_subject
