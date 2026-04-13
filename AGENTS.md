@@ -21,8 +21,7 @@ Quick start and navigation for humans and coding agents.
    - Silver Bulletin: `https://podcast.mohrbacher.dev/feeds/silver.xml`
    - The Rundown: `https://podcast.mohrbacher.dev/feeds/the-rundown.xml` (created on first episode)
    - FP Digest: `https://podcast.mohrbacher.dev/feeds/fp-digest.xml`
-    - Aaronson: `https://podcast.mohrbacher.dev/feeds/aaronson.xml`
-    - ChinaTalk: `https://podcast.mohrbacher.dev/feeds/chinatalk.xml`
+     - Aaronson: `https://podcast.mohrbacher.dev/feeds/aaronson.xml`
 
 ## Docs TOC
 
@@ -71,7 +70,7 @@ Quick start and navigation for humans and coding agents.
 
 ## The Rundown Pipeline
 
-Daily current-affairs digest covering business, technology, AI, law, media, science, and culture (excluding foreign policy). Fully automated, no human-in-the-loop. Triggered by systemd timer Mon-Fri at 5 PM ET.
+Daily current-affairs digest covering business, technology, AI, law, media, science, and culture (excluding foreign policy). Fully automated, no human-in-the-loop. Triggered by systemd timer Mon-Fri at 4:30 AM ET.
 
 **Sources (all co-equal, read from persistent caches with adaptive lookback):**
 - Matt Levine's "Things Happen" links (extracted from email, cached to `/persist/my-podcasts/levine-cache/`)
@@ -111,7 +110,7 @@ Daily foreign policy podcast. Fully automated, no human-in-the-loop.
 - Routed FP links from The Rundown (via `/persist/my-podcasts/fp-routed-links/`)
 
 **Flow:**
-1. Systemd timer triggers daily at 6 PM EST (23:00 UTC)
+1. Systemd timer triggers daily at 4:30 AM ET (08:30 UTC)
 2. `fp_collector.py` reads homepage articles, RSS articles, Semafor FP articles from persistent caches (with adaptive lookback window) + routed Levine FP links
 4. `fp_editor.py` (Gemini Flash-Lite) triages into 3-5 themes, selects 8-12 stories
 5. Exa enrichment for paywalled articles
@@ -141,7 +140,7 @@ Foreign policy content is exclusively routed to FP Digest, not The Rundown:
 
 ## Source Caching
 
-All external sources are cached daily to persistent storage by the `sync-sources` timer (noon ET daily). Podcasts read from caches instead of fetching live, with an adaptive lookback window based on days since the last episode (min 2, max 14 days).
+All external sources are cached daily to persistent storage by the `sync-sources` timer (4:00 AM ET daily). Podcasts read from caches instead of fetching live, with an adaptive lookback window based on days since the last episode (min 2, max 14 days).
 
 **Caches:**
 - Zvi: `/persist/my-podcasts/zvi-cache/` (also synced on-demand by The Rundown collector)
@@ -155,7 +154,7 @@ All caches use 180-day retention (cleaned up by `_cleanup_old_work_dirs` in cons
 
 **CLI:** `uv run python -m pipeline sync-sources`
 
-**Timer:** `sync-sources.timer` — daily at noon ET
+**Timer:** `sync-sources.timer` — daily at 4:00 AM ET
 
 **Adaptive lookback:** `pipeline/db.py:days_since_last_episode()` queries the latest episode date per feed. `pipeline/consumer.py:_compute_lookback()` computes `min(max(2, days_since + 1), 14)`.
 
