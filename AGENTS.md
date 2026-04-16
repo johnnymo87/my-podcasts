@@ -21,7 +21,8 @@ Quick start and navigation for humans and coding agents.
    - Silver Bulletin: `https://podcast.mohrbacher.dev/feeds/silver.xml`
    - The Rundown: `https://podcast.mohrbacher.dev/feeds/the-rundown.xml` (created on first episode)
    - FP Digest: `https://podcast.mohrbacher.dev/feeds/fp-digest.xml`
-     - Aaronson: `https://podcast.mohrbacher.dev/feeds/aaronson.xml`
+   - Aaronson: `https://podcast.mohrbacher.dev/feeds/aaronson.xml`
+   - ChinaTalk: `https://podcast.mohrbacher.dev/feeds/chinatalk.xml`
 
 ## Docs TOC
 
