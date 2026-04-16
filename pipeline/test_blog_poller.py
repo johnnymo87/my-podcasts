@@ -158,7 +158,7 @@ def test_process_blog_post_publishes_episode(tmp_path, monkeypatch) -> None:
     # Episode should be inserted
     episodes = store.list_episodes(feed_slug="aaronson")
     assert len(episodes) == 1
-    assert episodes[0].title == "Test Post Title"
+    assert episodes[0].title == "Mar 29 - Test Post Title"
     assert episodes[0].source_url == "https://example.com/post1"
     assert episodes[0].feed_slug == "aaronson"
     assert episodes[0].category == "Technology"
