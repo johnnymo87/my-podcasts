@@ -56,10 +56,23 @@ def build_report_prompt(*, body: str, subject: str) -> str:
     return PROMPT_TEMPLATE.format(subject=subject, body=body)
 
 
-def _extract_tag(text: str, tag: str) -> str | None:
-    """Return the content inside <tag>...</tag>, or None if tag not found."""
-    m = re.search(rf"<{tag}>\s*(.*?)\s*</{tag}>", text, re.DOTALL)
-    return m.group(1).strip() if m else None
+def _extract_script(text: str) -> str:
+    """Extract the spoken script from ``<script>...</script>`` tags.
+
+    If the tag is absent (model didn't follow the format), the full
+    response is returned as-is. The empty-script guard in
+    ``generate_report`` will reject the result if it is whitespace only.
+    """
+    m = re.search(r"<script>\s*(.*?)\s*</script>", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return text
+
+
+def _extract_summary(text: str) -> str:
+    """Extract the ``<summary>`` block, returning an empty string if absent."""
+    m = re.search(r"<summary>\s*(.*?)\s*</summary>", text, re.DOTALL)
+    return m.group(1).strip() if m else ""
 
 
 def generate_report(*, body: str, subject: str) -> ReportOutput:
@@ -82,9 +95,8 @@ def generate_report(*, body: str, subject: str) -> ReportOutput:
             )
         messages = get_messages(session_id)
         full_text = get_last_assistant_text(messages).strip()
-        extracted_script = _extract_tag(full_text, "script")
-        script = extracted_script if extracted_script is not None else full_text
-        summary = _extract_tag(full_text, "summary") or ""
+        script = _extract_script(full_text)
+        summary = _extract_summary(full_text)
         if not script.strip():
             raise RuntimeError("chinatalk report writer returned empty script")
         return ReportOutput(script=script, summary=summary)

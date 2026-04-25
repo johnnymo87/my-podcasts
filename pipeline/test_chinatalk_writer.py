@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from pipeline.chinatalk_writer import ReportOutput, build_report_prompt, generate_report
+from pipeline.chinatalk_writer import (
+    ReportOutput,
+    _extract_script,
+    _extract_summary,
+    build_report_prompt,
+    generate_report,
+)
 
 
 def test_build_prompt_includes_subject_and_body():
@@ -88,3 +94,49 @@ def test_generate_report_rejects_empty_script(
         assert "empty script" in str(e)
 
     mock_delete.assert_called_once_with("ses_empty")
+
+
+def test_extract_script_with_tags():
+    raw = "Reasoning here.\n\n<script>The briefing text.</script>"
+    assert _extract_script(raw) == "The briefing text."
+
+
+def test_extract_script_no_tags_returns_full_text():
+    """Without <script> tags, full response passes through.
+
+    The empty-script guard in generate_report handles real emptiness.
+    """
+    raw = "The briefing without any tags."
+    assert _extract_script(raw) == raw
+
+
+def test_extract_summary_with_tags():
+    raw = "<summary>Brief.</summary>\n\nThe rest."
+    assert _extract_summary(raw) == "Brief."
+
+
+def test_extract_summary_no_tags_returns_empty():
+    raw = "No summary tags here."
+    assert _extract_summary(raw) == ""
+
+
+@patch("pipeline.chinatalk_writer.delete_session")
+@patch("pipeline.chinatalk_writer.get_last_assistant_text")
+@patch("pipeline.chinatalk_writer.get_messages")
+@patch("pipeline.chinatalk_writer.wait_for_idle")
+@patch("pipeline.chinatalk_writer.send_prompt_async")
+@patch("pipeline.chinatalk_writer.create_session")
+def test_generate_report_no_script_tags_uses_full_text(
+    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete
+):
+    """When the model omits <script> tags, full response becomes the script."""
+    mock_create.return_value = "ses_no_tags"
+    mock_wait.return_value = True
+    mock_messages.return_value = [{"role": "assistant", "parts": []}]
+    mock_text.return_value = "The model just emitted prose without tags."
+
+    result = generate_report(body="x", subject="y")
+
+    assert result.script == "The model just emitted prose without tags."
+    assert result.summary == ""
+    mock_delete.assert_called_once_with("ses_no_tags")
