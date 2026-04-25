@@ -25,6 +25,9 @@ def maybe_rewrite_chinatalk(
     if feed_slug != "chinatalk":
         return body, title
 
+    # The classifier already swallows internally; this catch defends
+    # against future refactors that might leak exceptions from either
+    # the classifier or the writer.
     try:
         if not is_transcript(body, subject_raw):
             return body, title

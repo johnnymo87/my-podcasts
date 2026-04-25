@@ -45,6 +45,10 @@ def test_chinatalk_transcript_is_rewritten(mock_classify, mock_writer):
     )
     assert body.startswith("Today on ChinaTalk")
     assert title == "Report: 2026-04-25 - ChinaTalk - Episode 42"
+    mock_writer.assert_called_once_with(
+        body="Speaker A: Hi\nSpeaker B: Hello",
+        subject="ChinaTalk: Episode 42",
+    )
 
 
 @patch("pipeline.chinatalk_report.generate_report", side_effect=RuntimeError("boom"))
