@@ -79,3 +79,14 @@ def test_classifier_failure_falls_back_to_reading(mock_classify):
     )
     assert body == "Speaker A: Hi"
     assert title == "2026-04-25 - ChinaTalk - Episode 42"
+
+
+def test_processor_calls_maybe_rewrite_chinatalk():
+    """processor.process_email_bytes wires through maybe_rewrite_chinatalk."""
+    import inspect
+
+    from pipeline import processor
+
+    source = inspect.getsource(processor.process_email_bytes)
+    assert "maybe_rewrite_chinatalk" in source
+    assert "preset.feed_slug" in source

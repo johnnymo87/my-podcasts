@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from email_processor.api import EmailProcessor
+from pipeline.chinatalk_report import maybe_rewrite_chinatalk
 from pipeline.db import Episode, StateStore
 from pipeline.feed import regenerate_and_upload_feed
 from pipeline.presets import resolve_preset
@@ -115,6 +116,12 @@ def process_email_bytes(
         subject_raw=subject_raw,
     )
     body = adapter.clean_body(raw_email=raw_email, body=body)
+    body, episode_title = maybe_rewrite_chinatalk(
+        body=body,
+        title=episode_title,
+        feed_slug=preset.feed_slug,
+        subject_raw=subject_raw,
+    )
 
     with tempfile.TemporaryDirectory(prefix="my-podcasts-") as tmp_dir:
         tmp = Path(tmp_dir)
