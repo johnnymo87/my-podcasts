@@ -1,6 +1,16 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+from pipeline.opencode_client import (
+    create_session,
+    delete_session,
+    get_last_assistant_text,
+    get_messages,
+    send_prompt_async,
+    wait_for_idle,
+)
 
 
 PROMPT_TEMPLATE = """\
@@ -44,3 +54,37 @@ class ReportOutput:
 
 def build_report_prompt(*, body: str, subject: str) -> str:
     return PROMPT_TEMPLATE.format(subject=subject, body=body)
+
+
+def _extract_tag(text: str, tag: str) -> str:
+    m = re.search(rf"<{tag}>\s*(.*?)\s*</{tag}>", text, re.DOTALL)
+    return m.group(1).strip() if m else ""
+
+
+def generate_report(*, body: str, subject: str) -> ReportOutput:
+    """Generate a spoken-briefing report on a chinatalk transcript."""
+    prompt = build_report_prompt(body=body, subject=subject)
+    instruction = (
+        "Read the following transcript and produce the spoken briefing. "
+        "First write a 2-3 sentence summary wrapped in <summary>...</summary> "
+        "tags. Then write the full spoken script wrapped in "
+        "<script>...</script> tags. Output nothing outside these tags.\n\n"
+        + prompt
+    )
+
+    session_id = create_session()
+    try:
+        send_prompt_async(session_id, instruction)
+        if not wait_for_idle(session_id, timeout=300):
+            raise RuntimeError(
+                "chinatalk report writer did not complete within 300 seconds"
+            )
+        messages = get_messages(session_id)
+        full_text = get_last_assistant_text(messages).strip()
+        script = _extract_tag(full_text, "script") or full_text
+        summary = _extract_tag(full_text, "summary")
+        if not script.strip():
+            raise RuntimeError("chinatalk report writer returned empty script")
+        return ReportOutput(script=script, summary=summary)
+    finally:
+        delete_session(session_id)
