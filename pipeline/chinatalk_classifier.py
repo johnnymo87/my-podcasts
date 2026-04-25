@@ -34,14 +34,18 @@ def is_transcript(body: str, subject: str) -> bool:
         logger.warning("GEMINI_API_KEY not set; skipping chinatalk classification")
         return False
 
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model="gemini-3.1-flash-lite-preview",
-        contents=f"Subject: {subject}\n\n{body}",
-        config=types.GenerateContentConfig(
-            system_instruction=_SYSTEM_PROMPT,
-            temperature=0.0,
-        ),
-    )
-    text = (response.text or "").strip().upper()
-    return text == "YES"
+    try:
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=f"Subject: {subject}\n\n{body}",
+            config=types.GenerateContentConfig(
+                system_instruction=_SYSTEM_PROMPT,
+                temperature=0.0,
+            ),
+        )
+        text = (response.text or "").strip().upper()
+        return text == "YES"
+    except Exception:
+        logger.exception("chinatalk classifier failed; defaulting to NO")
+        return False

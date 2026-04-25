@@ -52,3 +52,11 @@ def test_is_transcript_returns_false_on_empty_response(monkeypatch):
     with patch("pipeline.chinatalk_classifier.genai") as mock_genai:
         mock_genai.Client.return_value.models.generate_content.return_value = mock_response
         assert is_transcript("body", "subject") is False
+
+
+def test_is_transcript_swallows_exceptions(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+    with patch("pipeline.chinatalk_classifier.genai") as mock_genai:
+        mock_genai.Client.side_effect = RuntimeError("boom")
+        # Must not raise; must return False.
+        assert is_transcript("body", "subject") is False
