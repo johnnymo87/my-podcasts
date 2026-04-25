@@ -56,9 +56,10 @@ def build_report_prompt(*, body: str, subject: str) -> str:
     return PROMPT_TEMPLATE.format(subject=subject, body=body)
 
 
-def _extract_tag(text: str, tag: str) -> str:
+def _extract_tag(text: str, tag: str) -> str | None:
+    """Return the content inside <tag>...</tag>, or None if tag not found."""
     m = re.search(rf"<{tag}>\s*(.*?)\s*</{tag}>", text, re.DOTALL)
-    return m.group(1).strip() if m else ""
+    return m.group(1).strip() if m else None
 
 
 def generate_report(*, body: str, subject: str) -> ReportOutput:
@@ -81,8 +82,9 @@ def generate_report(*, body: str, subject: str) -> ReportOutput:
             )
         messages = get_messages(session_id)
         full_text = get_last_assistant_text(messages).strip()
-        script = _extract_tag(full_text, "script") or full_text
-        summary = _extract_tag(full_text, "summary")
+        extracted_script = _extract_tag(full_text, "script")
+        script = extracted_script if extracted_script is not None else full_text
+        summary = _extract_tag(full_text, "summary") or ""
         if not script.strip():
             raise RuntimeError("chinatalk report writer returned empty script")
         return ReportOutput(script=script, summary=summary)
