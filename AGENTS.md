@@ -60,6 +60,7 @@ Quick start and navigation for humans and coding agents.
 - Email ingest worker: `workers/email-ingest/`
 - Podcast serving worker: `workers/podcast-serve/`
 - The Rundown pipeline: `pipeline/rundown_writer.py` (script generator), `pipeline/exa_client.py` (Exa wrapper)
+- ChinaTalk transcript report path: `pipeline/chinatalk_classifier.py`, `pipeline/chinatalk_writer.py`, `pipeline/chinatalk_report.py` (called from `pipeline/processor.py`)
 
 ## Where To Start
 
@@ -173,6 +174,16 @@ WordPress and other blog sources are polled via RSS for new posts. Each new post
 **Key module:** `pipeline/blog_poller.py` -- RSS fetch, AI adaptation, TTS + publish
 
 **Source definitions:** `pipeline/blog_sources.py` -- `BlogSource` dataclass, `BLOG_SOURCES` tuple
+
+## ChinaTalk Transcript Report Path
+
+ChinaTalk newsletters are sometimes podcast transcripts rather than essays. For transcripts, the pipeline replaces the TTS body with an AI-written spoken briefing about the conversation, and prefixes the episode title with "Report: ". Essays and articles are read normally.
+
+**Detection:** `pipeline/chinatalk_classifier.py` (Gemini Flash-Lite YES/NO classifier). Conservative: any failure returns NO and the listener gets the standard reading.
+
+**Generation:** `pipeline/chinatalk_writer.py` (opencode-serve, mirrors `rundown_writer.py`, 300-second timeout, rejects empty output).
+
+**Wiring:** `pipeline/chinatalk_report.maybe_rewrite_chinatalk` is called from `pipeline/processor.process_email_bytes` between body cleaning and TTS. Any exception in classification or report generation falls back silently to the standard reading.
 
 ## Landing the Plane (Session Completion)
 
