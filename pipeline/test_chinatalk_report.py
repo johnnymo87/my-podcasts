@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import inspect
 from unittest.mock import patch
 
+from pipeline import processor
 from pipeline.chinatalk_report import maybe_rewrite_chinatalk
 from pipeline.chinatalk_writer import ReportOutput
 
@@ -83,10 +85,6 @@ def test_classifier_failure_falls_back_to_reading(mock_classify):
 
 def test_processor_calls_maybe_rewrite_chinatalk():
     """processor.process_email_bytes wires through maybe_rewrite_chinatalk."""
-    import inspect
-
-    from pipeline import processor
-
     source = inspect.getsource(processor.process_email_bytes)
     assert "maybe_rewrite_chinatalk" in source
     assert "preset.feed_slug" in source
