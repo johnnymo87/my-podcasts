@@ -163,43 +163,67 @@ def generate_rundown_script(
     context_scripts: list[str] | None = None,
     work_dir: Path | None = None,
 ) -> WriterOutput:
-    """Generate a Rundown podcast script via the shared opencode server."""
-    # work_dir is accepted for API compatibility; persistence is added in
-    # the next task.
-    _ = work_dir
-    prompt = build_rundown_prompt(themes, articles_by_theme, date_str, context_scripts)
+    """Generate a Rundown podcast script via the shared opencode server.
 
-    instruction = (
-        "Read the following prompt and generate the podcast briefing script. "
-        "First, write a 2-3 sentence summary of today's episode wrapped in "
-        "<summary>...</summary> tags. "
-        "Then list the headlines of the stories you actually cover in the script, "
-        "wrapped in <covered>...</covered> tags, one headline per line prefixed "
-        "with a dash. Use the exact headlines from the source material. "
-        "Then write the full spoken script wrapped in "
-        "<script>...</script> tags. Do NOT include any analysis, reasoning, or "
-        "meta-commentary outside these tags — only the summary, covered list, "
-        "and the script that will be read aloud.\n\n" + prompt
-    )
+    If ``work_dir`` is provided, the model's raw output is persisted to
+    ``work_dir/raw_writer_output.txt`` the moment it's available. Subsequent
+    calls with the same ``work_dir`` skip the model call entirely and reuse
+    the persisted text. If parsing the persisted text fails, the file is
+    deleted so the next retry regenerates instead of looping on the same
+    broken content.
+    """
+    raw_path = work_dir / "raw_writer_output.txt" if work_dir else None
 
-    session_id = create_session()
+    if raw_path is not None and raw_path.exists():
+        full_text = raw_path.read_text(encoding="utf-8")
+    else:
+        prompt = build_rundown_prompt(
+            themes, articles_by_theme, date_str, context_scripts
+        )
+        instruction = (
+            "Read the following prompt and generate the podcast briefing script. "
+            "First, write a 2-3 sentence summary of today's episode wrapped in "
+            "<summary>...</summary> tags. "
+            "Then list the headlines of the stories you actually cover in the script, "
+            "wrapped in <covered>...</covered> tags, one headline per line prefixed "
+            "with a dash. Use the exact headlines from the source material. "
+            "Then write the full spoken script wrapped in "
+            "<script>...</script> tags. Do NOT include any analysis, reasoning, or "
+            "meta-commentary outside these tags — only the summary, covered list, "
+            "and the script that will be read aloud.\n\n" + prompt
+        )
+
+        session_id = create_session()
+        try:
+            send_prompt_async(session_id, instruction)
+            if not wait_for_idle(session_id, timeout=900):
+                raise RuntimeError(
+                    "opencode session did not complete within 900 seconds"
+                )
+            messages = get_messages(session_id)
+            full_text = get_last_assistant_text(messages).strip()
+            if raw_path is not None:
+                raw_path.parent.mkdir(parents=True, exist_ok=True)
+                raw_path.write_text(full_text, encoding="utf-8")
+        finally:
+            delete_session(session_id)
+
     try:
-        send_prompt_async(session_id, instruction)
-
-        if not wait_for_idle(session_id, timeout=900):
-            raise RuntimeError("opencode session did not complete within 900 seconds")
-
-        messages = get_messages(session_id)
-        full_text = get_last_assistant_text(messages).strip()
         covered = parse_covered(full_text)
         summary_result = parse_summary(full_text)
         script = _extract_script(summary_result.script)
         if not script.strip():
             raise RuntimeError("Rundown writer returned empty script")
-        return WriterOutput(
-            script=script,
-            summary=summary_result.summary,
-            covered_headlines=covered,
-        )
-    finally:
-        delete_session(session_id)
+    except RuntimeError:
+        if raw_path is not None:
+            try:
+                raw_path.unlink()
+            except FileNotFoundError:
+                pass
+        raise
+
+    return WriterOutput(
+        script=script,
+        summary=summary_result.summary,
+        covered_headlines=covered,
+    )

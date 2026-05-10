@@ -372,6 +372,134 @@ def test_rundown_editor_uses_coverage_ledger_over_scripts(monkeypatch):
         assert "Old script text here" not in prompt_used
 
 
+@patch("pipeline.rundown_writer.delete_session")
+@patch("pipeline.rundown_writer.get_last_assistant_text")
+@patch("pipeline.rundown_writer.get_messages")
+@patch("pipeline.rundown_writer.wait_for_idle")
+@patch("pipeline.rundown_writer.send_prompt_async")
+@patch("pipeline.rundown_writer.create_session")
+def test_persists_raw_output_before_parsing(
+    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete,
+    tmp_path,
+):
+    """The raw assistant text is written to raw_writer_output.txt the moment
+    it's available, before any parsing happens."""
+    mock_create.return_value = "ses_persist"
+    mock_wait.return_value = True
+    mock_messages.return_value = [{"role": "assistant", "parts": []}]
+    mock_text.return_value = (
+        "<summary>Today's summary.</summary>\n\n<script>Today's script.</script>"
+    )
+
+    result = generate_rundown_script(
+        themes=["Tech"],
+        articles_by_theme={"Tech": ["Article"]},
+        date_str="2026-03-10",
+        work_dir=tmp_path,
+    )
+
+    raw_path = tmp_path / "raw_writer_output.txt"
+    assert raw_path.exists()
+    assert raw_path.read_text(encoding="utf-8") == (
+        "<summary>Today's summary.</summary>\n\n<script>Today's script.</script>"
+    )
+    assert result.script == "Today's script."
+    assert result.summary == "Today's summary."
+
+
+@patch("pipeline.rundown_writer.delete_session")
+@patch("pipeline.rundown_writer.get_last_assistant_text")
+@patch("pipeline.rundown_writer.get_messages")
+@patch("pipeline.rundown_writer.wait_for_idle")
+@patch("pipeline.rundown_writer.send_prompt_async")
+@patch("pipeline.rundown_writer.create_session")
+def test_reuses_persisted_output_when_present(
+    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete,
+    tmp_path,
+):
+    """If raw_writer_output.txt already exists, the model is not called."""
+    raw_path = tmp_path / "raw_writer_output.txt"
+    raw_path.write_text(
+        "<summary>Cached summary.</summary>\n\n<script>Cached script.</script>",
+        encoding="utf-8",
+    )
+
+    result = generate_rundown_script(
+        themes=["Tech"],
+        articles_by_theme={"Tech": ["Article"]},
+        date_str="2026-03-10",
+        work_dir=tmp_path,
+    )
+
+    assert result.script == "Cached script."
+    assert result.summary == "Cached summary."
+    mock_create.assert_not_called()
+    mock_send.assert_not_called()
+    mock_wait.assert_not_called()
+    mock_messages.assert_not_called()
+    mock_delete.assert_not_called()
+
+
+@patch("pipeline.rundown_writer.delete_session")
+@patch("pipeline.rundown_writer.get_last_assistant_text")
+@patch("pipeline.rundown_writer.get_messages")
+@patch("pipeline.rundown_writer.wait_for_idle")
+@patch("pipeline.rundown_writer.send_prompt_async")
+@patch("pipeline.rundown_writer.create_session")
+def test_deletes_persisted_output_on_parse_failure(
+    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete,
+    tmp_path,
+):
+    """If a persisted file parses to an empty script, the file is deleted
+    so the next retry regenerates."""
+    raw_path = tmp_path / "raw_writer_output.txt"
+    raw_path.write_text(
+        "<summary>Empty body.</summary>\n\n<script>   </script>",
+        encoding="utf-8",
+    )
+
+    try:
+        generate_rundown_script(
+            themes=["Tech"],
+            articles_by_theme={"Tech": ["Article"]},
+            date_str="2026-03-10",
+            work_dir=tmp_path,
+        )
+        raise AssertionError("Should have raised RuntimeError")
+    except RuntimeError as e:
+        assert "empty script" in str(e)
+
+    assert not raw_path.exists()
+    mock_create.assert_not_called()
+
+
+@patch("pipeline.rundown_writer.delete_session")
+@patch("pipeline.rundown_writer.wait_for_idle")
+@patch("pipeline.rundown_writer.send_prompt_async")
+@patch("pipeline.rundown_writer.create_session")
+def test_does_not_persist_when_wait_for_idle_times_out(
+    mock_create, mock_send, mock_wait, mock_delete, tmp_path
+):
+    """If wait_for_idle returns False, no raw_writer_output.txt is written."""
+    mock_create.return_value = "ses_timeout_persist"
+    mock_wait.return_value = False
+
+    try:
+        generate_rundown_script(
+            themes=["Tech"],
+            articles_by_theme={"Tech": ["Article"]},
+            date_str="2026-03-10",
+            work_dir=tmp_path,
+        )
+        raise AssertionError("Should have raised RuntimeError")
+    except RuntimeError as e:
+        assert "900 seconds" in str(e)
+
+    raw_path = tmp_path / "raw_writer_output.txt"
+    assert not raw_path.exists()
+    mock_delete.assert_called_once_with("ses_timeout_persist")
+
+
 def test_rundown_editor_falls_back_to_scripts(monkeypatch):
     """When no coverage_ledger, context_scripts are used."""
     from unittest.mock import patch, MagicMock
