@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from pipeline.opencode_client import (
     create_session,
@@ -160,8 +161,12 @@ def generate_rundown_script(
     articles_by_theme: dict[str, list[str]],
     date_str: str,
     context_scripts: list[str] | None = None,
+    work_dir: Path | None = None,
 ) -> WriterOutput:
     """Generate a Rundown podcast script via the shared opencode server."""
+    # work_dir is accepted for API compatibility; persistence is added in
+    # the next task.
+    _ = work_dir
     prompt = build_rundown_prompt(themes, articles_by_theme, date_str, context_scripts)
 
     instruction = (
