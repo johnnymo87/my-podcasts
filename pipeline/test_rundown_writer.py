@@ -84,7 +84,9 @@ def test_generate_script(
 @patch("pipeline.rundown_writer.wait_for_idle")
 @patch("pipeline.rundown_writer.send_prompt_async")
 @patch("pipeline.rundown_writer.create_session")
-def test_generate_script_timeout_raises(mock_create, mock_send, mock_wait, mock_delete, tmp_path):
+def test_generate_script_timeout_raises(
+    mock_create, mock_send, mock_wait, mock_delete, tmp_path
+):
     mock_create.return_value = "ses_timeout"
     mock_wait.return_value = False
 
