@@ -387,6 +387,7 @@ def _fp_digest_dry_run(date_str: str, lookback_override: int | None = None) -> N
         articles_by_theme=articles_by_theme,
         date_str=date_str,
         context_scripts=context_scripts,
+        work_dir=work_dir,
     )
 
     script_file = work_dir / "script.txt"
@@ -481,6 +482,7 @@ def _fp_digest_full_run(date_str: str, lookback_override: int | None = None) -> 
             articles_by_theme=articles_by_theme,
             date_str=date_str,
             context_scripts=context_scripts,
+            work_dir=work_dir,
         )
 
         script_file = work_dir / "script.txt"
@@ -602,6 +604,7 @@ def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) ->
         articles_by_theme=articles_by_theme,
         date_str=date_str,
         context_scripts=context_scripts,
+        work_dir=work_dir,
     )
 
     script_file = work_dir / "script.txt"
@@ -695,6 +698,7 @@ def _the_rundown_full_run(date_str: str, lookback_override: int | None = None) -
             articles_by_theme=articles_by_theme,
             date_str=date_str,
             context_scripts=context_scripts,
+            work_dir=work_dir,
         )
 
         script_file = work_dir / "script.txt"

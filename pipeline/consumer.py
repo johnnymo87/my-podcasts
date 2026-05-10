@@ -390,6 +390,7 @@ def consume_forever(
                             articles_by_theme=rundown_articles_by_theme,
                             date_str=job["date_str"],
                             context_scripts=context_scripts,
+                            work_dir=work_dir,
                         )
                         script_file.parent.mkdir(parents=True, exist_ok=True)
                         script_file.write_text(writer_output.script, encoding="utf-8")
@@ -534,6 +535,7 @@ def consume_forever(
                             articles_by_theme=articles_by_theme,
                             date_str=job["date_str"],
                             context_scripts=context_scripts,
+                            work_dir=work_dir,
                         )
                         script_file.parent.mkdir(parents=True, exist_ok=True)
                         script_file.write_text(writer_output.script, encoding="utf-8")
