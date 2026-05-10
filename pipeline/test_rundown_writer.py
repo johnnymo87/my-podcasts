@@ -158,6 +158,8 @@ def test_generate_rundown_script_rejects_empty_output(
     except RuntimeError as e:
         assert "empty script" in str(e)
 
+    assert not (tmp_path / "raw_writer_output.txt").exists()
+
 
 def test_extract_script_with_tags():
     """<script> tags extract the spoken script."""
