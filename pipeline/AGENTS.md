@@ -25,9 +25,11 @@ Quick start and incident-response guide for the two daily podcasts: The Rundown 
 - `pipeline/rundown_writer.py`
   - 900-second opencode writer timeout
   - empty script output rejected at writer boundary
+  - raw model output persisted to `work_dir/raw_writer_output.txt` before parsing; retries reuse this file and skip the model call
 - `pipeline/fp_writer.py`
   - 900-second opencode writer timeout
   - empty script output rejected at writer boundary
+  - raw model output persisted to `work_dir/raw_writer_output.txt` before parsing; retries reuse this file and skip the model call
 - `pipeline/things_happen_collector.py`, `pipeline/fp_collector.py`
   - successful collection writes `collection_done.json`
 - `pipeline/consumer.py`
