@@ -198,3 +198,134 @@ def test_generate_fp_script_rejects_empty_output(monkeypatch, tmp_path) -> None:
             date_str="2026-03-06",
             work_dir=tmp_path,
         )
+    assert not (tmp_path / "raw_writer_output.txt").exists()
+
+
+def test_persists_fp_raw_output_before_parsing(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        "pipeline.fp_writer.create_session", lambda directory=None: "ses_persist"
+    )
+    monkeypatch.setattr("pipeline.fp_writer.send_prompt_async", lambda sid, t: None)
+    monkeypatch.setattr(
+        "pipeline.fp_writer.wait_for_idle", lambda sid, timeout=900: True
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_writer.get_messages",
+        lambda sid: [
+            {
+                "role": "assistant",
+                "parts": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "<summary>FP summary.</summary>\n\n"
+                            "<script>FP script.</script>"
+                        ),
+                    }
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr("pipeline.fp_writer.delete_session", lambda sid: None)
+
+    result = generate_fp_script(
+        themes=["Iran"],
+        articles_by_theme={"Iran": ["Article"]},
+        date_str="2026-03-06",
+        work_dir=tmp_path,
+    )
+
+    raw_path = tmp_path / "raw_writer_output.txt"
+    assert raw_path.exists()
+    assert raw_path.read_text(encoding="utf-8") == (
+        "<summary>FP summary.</summary>\n\n<script>FP script.</script>"
+    )
+    assert result.script == "FP script."
+    assert result.summary == "FP summary."
+
+
+def test_reuses_fp_persisted_output_when_present(monkeypatch, tmp_path) -> None:
+    raw_path = tmp_path / "raw_writer_output.txt"
+    raw_path.write_text(
+        "<summary>Cached.</summary>\n\n<script>Cached FP script.</script>",
+        encoding="utf-8",
+    )
+
+    called = {"create": 0}
+    monkeypatch.setattr(
+        "pipeline.fp_writer.create_session",
+        lambda directory=None: (
+            called.__setitem__("create", called["create"] + 1) or "ses"
+        ),
+    )
+    monkeypatch.setattr("pipeline.fp_writer.send_prompt_async", lambda sid, t: None)
+    monkeypatch.setattr(
+        "pipeline.fp_writer.wait_for_idle", lambda sid, timeout=900: True
+    )
+    monkeypatch.setattr("pipeline.fp_writer.get_messages", lambda sid: [])
+    monkeypatch.setattr("pipeline.fp_writer.delete_session", lambda sid: None)
+
+    result = generate_fp_script(
+        themes=["Iran"],
+        articles_by_theme={"Iran": ["Article"]},
+        date_str="2026-03-06",
+        work_dir=tmp_path,
+    )
+
+    assert result.script == "Cached FP script."
+    assert result.summary == "Cached."
+    assert called["create"] == 0
+
+
+def test_deletes_fp_persisted_output_on_parse_failure(monkeypatch, tmp_path) -> None:
+    raw_path = tmp_path / "raw_writer_output.txt"
+    raw_path.write_text(
+        "<summary>Empty.</summary>\n\n<script>   </script>",
+        encoding="utf-8",
+    )
+
+    called = {"create": 0}
+    monkeypatch.setattr(
+        "pipeline.fp_writer.create_session",
+        lambda directory=None: (
+            called.__setitem__("create", called["create"] + 1) or "ses"
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="empty script"):
+        generate_fp_script(
+            themes=["Iran"],
+            articles_by_theme={"Iran": ["Article"]},
+            date_str="2026-03-06",
+            work_dir=tmp_path,
+        )
+
+    assert not raw_path.exists()
+    assert called["create"] == 0
+
+
+def test_does_not_persist_fp_when_wait_for_idle_times_out(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(
+        "pipeline.fp_writer.create_session", lambda directory=None: "ses_timeout"
+    )
+    monkeypatch.setattr("pipeline.fp_writer.send_prompt_async", lambda sid, t: None)
+    monkeypatch.setattr(
+        "pipeline.fp_writer.wait_for_idle", lambda sid, timeout=900: False
+    )
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        "pipeline.fp_writer.delete_session", lambda sid: deleted.append(sid)
+    )
+
+    with pytest.raises(RuntimeError, match="900 seconds"):
+        generate_fp_script(
+            themes=["Iran"],
+            articles_by_theme={"Iran": ["Article"]},
+            date_str="2026-03-06",
+            work_dir=tmp_path,
+        )
+
+    assert not (tmp_path / "raw_writer_output.txt").exists()
+    assert "ses_timeout" in deleted
