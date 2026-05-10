@@ -50,7 +50,7 @@ def test_generate_report_happy_path(
     assert result.summary == "Brief on the conversation."
     mock_create.assert_called_once()
     mock_send.assert_called_once()
-    mock_wait.assert_called_once_with("ses_chinatalk", timeout=300)
+    mock_wait.assert_called_once_with("ses_chinatalk", timeout=900)
     mock_delete.assert_called_once_with("ses_chinatalk")
 
 
@@ -68,7 +68,7 @@ def test_generate_report_timeout_raises_and_deletes_session(
         generate_report(body="x", subject="y")
         raise AssertionError("Should have raised RuntimeError")
     except RuntimeError as e:
-        assert "300 seconds" in str(e)
+        assert "900 seconds" in str(e)
 
     mock_delete.assert_called_once_with("ses_timeout")
 

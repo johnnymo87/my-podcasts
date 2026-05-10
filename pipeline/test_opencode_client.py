@@ -153,61 +153,179 @@ class TestGetLastAssistantText:
 
 
 class TestWaitForIdle:
+    """`wait_for_idle` polls `/session/{id}/message` for the assistant
+    message's `step-finish` part. SSE on opencode-serve 1.14.x does not emit
+    `session.status: idle` reliably, so polling is the source of truth.
+    """
+
+    @patch("pipeline.opencode_client.time.sleep")
     @patch("pipeline.opencode_client.requests.get")
-    def test_returns_true_on_idle_event(self, mock_get: MagicMock) -> None:
-        from pipeline.opencode_client import wait_for_idle
-
-        # Simulate SSE stream with session.status idle event
-        sse_lines = [
-            b'data: {"type": "session.status", "properties": {"sessionID": "sess-abc", "status": {"type": "idle"}}}',  # noqa: E501
-            b"",
-        ]
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.ok = True
-        mock_resp.iter_lines.return_value = iter(sse_lines)
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_get.return_value = mock_resp
-
-        assert wait_for_idle("sess-abc", timeout=5) is True
-
-    @patch("pipeline.opencode_client.requests.get")
-    def test_ignores_other_session_idle(self, mock_get: MagicMock) -> None:
-        from pipeline.opencode_client import wait_for_idle
-
-        # Idle event for a different session, then our session
-        sse_lines = [
-            b'data: {"type": "session.status", "properties": {"sessionID": "sess-OTHER", "status": {"type": "idle"}}}',  # noqa: E501
-            b"",
-            b'data: {"type": "session.status", "properties": {"sessionID": "sess-abc", "status": {"type": "idle"}}}',  # noqa: E501
-            b"",
-        ]
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.ok = True
-        mock_resp.iter_lines.return_value = iter(sse_lines)
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_get.return_value = mock_resp
-
-        assert wait_for_idle("sess-abc", timeout=5) is True
-
-    @patch("pipeline.opencode_client.time.sleep")  # Don't actually sleep
-    @patch("pipeline.opencode_client.requests.get")
-    def test_falls_back_to_polling_on_sse_failure(
+    def test_returns_true_when_assistant_has_step_finish(
         self, mock_get: MagicMock, mock_sleep: MagicMock
     ) -> None:
         from pipeline.opencode_client import wait_for_idle
 
-        # First call (SSE) raises, second call (polling) returns idle status
-        poll_resp = MagicMock()
-        poll_resp.ok = True
-        poll_resp.json.return_value = {}  # Session not in statuses = idle
+        # First poll: assistant message exists but only step-start
+        # Second poll: assistant message has step-finish — done.
+        in_progress = _mock_response(
+            200,
+            [
+                {"role": "user", "parts": [{"type": "text", "text": "hi"}]},
+                {
+                    "info": {"role": "assistant"},
+                    "parts": [{"type": "step-start", "id": "s1"}],
+                },
+            ],
+        )
+        finished = _mock_response(
+            200,
+            [
+                {"role": "user", "parts": [{"type": "text", "text": "hi"}]},
+                {
+                    "info": {"role": "assistant"},
+                    "parts": [
+                        {"type": "step-start", "id": "s1"},
+                        {"type": "text", "text": "hello"},
+                        {"type": "step-finish", "reason": "stop"},
+                    ],
+                },
+            ],
+        )
+        mock_get.side_effect = [in_progress, finished]
 
+        assert wait_for_idle("sess-abc", timeout=10) is True
+
+    @patch("pipeline.opencode_client.time.sleep")
+    @patch("pipeline.opencode_client.time.time")
+    @patch("pipeline.opencode_client.requests.get")
+    def test_returns_false_on_timeout(
+        self, mock_get: MagicMock, mock_time: MagicMock, mock_sleep: MagicMock
+    ) -> None:
+        from pipeline.opencode_client import wait_for_idle
+
+        # Time progresses 0, 1, 2, ... then exceeds deadline
+        mock_time.side_effect = [0.0, 1.0, 2.0, 3.0, 100.0]
+
+        # All polls show no step-finish (still generating)
+        in_progress = _mock_response(
+            200,
+            [
+                {
+                    "info": {"role": "assistant"},
+                    "parts": [{"type": "step-start", "id": "s1"}],
+                },
+            ],
+        )
+        mock_get.return_value = in_progress
+
+        assert wait_for_idle("sess-abc", timeout=10) is False
+
+    @patch("pipeline.opencode_client.time.sleep")
+    @patch("pipeline.opencode_client.requests.get")
+    def test_tolerates_transient_polling_errors(
+        self, mock_get: MagicMock, mock_sleep: MagicMock
+    ) -> None:
+        from pipeline.opencode_client import wait_for_idle
+
+        finished = _mock_response(
+            200,
+            [
+                {
+                    "info": {"role": "assistant"},
+                    "parts": [
+                        {"type": "text", "text": "hello"},
+                        {"type": "step-finish", "reason": "stop"},
+                    ],
+                },
+            ],
+        )
+
+        # First poll raises a connection error, second succeeds with finish.
         mock_get.side_effect = [
-            requests.RequestException("SSE connection failed"),
-            poll_resp,
+            requests.RequestException("transient"),
+            finished,
         ]
+
+        assert wait_for_idle("sess-abc", timeout=10) is True
+
+    @patch("pipeline.opencode_client.time.sleep")
+    @patch("pipeline.opencode_client.requests.get")
+    def test_only_treats_assistant_step_finish_as_done(
+        self, mock_get: MagicMock, mock_sleep: MagicMock
+    ) -> None:
+        """A user message with step-finish must not be treated as session done.
+
+        The session is only "done" when the *assistant's* message has finished.
+        """
+        from pipeline.opencode_client import wait_for_idle
+
+        # User message with a stray step-finish (shouldn't happen, but defensive)
+        # and an assistant message still in progress.
+        in_progress = _mock_response(
+            200,
+            [
+                {
+                    "info": {"role": "user"},
+                    "parts": [
+                        {"type": "text", "text": "hi"},
+                        {"type": "step-finish", "reason": "stop"},
+                    ],
+                },
+                {
+                    "info": {"role": "assistant"},
+                    "parts": [{"type": "step-start", "id": "s1"}],
+                },
+            ],
+        )
+        finished = _mock_response(
+            200,
+            [
+                {
+                    "info": {"role": "user"},
+                    "parts": [
+                        {"type": "text", "text": "hi"},
+                        {"type": "step-finish", "reason": "stop"},
+                    ],
+                },
+                {
+                    "info": {"role": "assistant"},
+                    "parts": [
+                        {"type": "text", "text": "hello"},
+                        {"type": "step-finish", "reason": "stop"},
+                    ],
+                },
+            ],
+        )
+        mock_get.side_effect = [in_progress, finished]
+
+        # First poll must return False-equivalent (continue), second must finish.
+        assert wait_for_idle("sess-abc", timeout=10) is True
+
+    @patch("pipeline.opencode_client.time.sleep")
+    @patch("pipeline.opencode_client.requests.get")
+    def test_handles_no_assistant_message_yet(
+        self, mock_get: MagicMock, mock_sleep: MagicMock
+    ) -> None:
+        from pipeline.opencode_client import wait_for_idle
+
+        # First poll: no assistant message at all (only user)
+        no_asst = _mock_response(
+            200,
+            [{"info": {"role": "user"}, "parts": [{"type": "text", "text": "hi"}]}],
+        )
+        finished = _mock_response(
+            200,
+            [
+                {"info": {"role": "user"}, "parts": [{"type": "text", "text": "hi"}]},
+                {
+                    "info": {"role": "assistant"},
+                    "parts": [
+                        {"type": "text", "text": "hello"},
+                        {"type": "step-finish", "reason": "stop"},
+                    ],
+                },
+            ],
+        )
+        mock_get.side_effect = [no_asst, finished]
 
         assert wait_for_idle("sess-abc", timeout=10) is True

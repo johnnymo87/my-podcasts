@@ -181,7 +181,7 @@ ChinaTalk newsletters are sometimes podcast transcripts rather than essays. For 
 
 **Detection:** `pipeline/chinatalk_classifier.py` (Gemini Flash-Lite YES/NO classifier). Conservative: any failure returns NO and the listener gets the standard reading.
 
-**Generation:** `pipeline/chinatalk_writer.py` (opencode-serve, mirrors `rundown_writer.py`, 300-second timeout, rejects empty output).
+**Generation:** `pipeline/chinatalk_writer.py` (opencode-serve, mirrors `rundown_writer.py`, 900-second timeout, rejects empty output).
 
 **Wiring:** `pipeline/chinatalk_report.maybe_rewrite_chinatalk` is called from `pipeline/processor.process_email_bytes` between body cleaning and TTS. Any exception in classification or report generation falls back silently to the standard reading.
 

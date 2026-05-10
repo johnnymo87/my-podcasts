@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import time
 from pathlib import Path
@@ -89,68 +88,48 @@ def get_last_assistant_text(messages: list[dict]) -> str:
 
 
 def wait_for_idle(session_id: str, timeout: int = 120) -> bool:
-    """Subscribe to SSE events and wait for the session to become idle.
+    """Wait until the session's last assistant message has finished generating.
 
-    Returns True if idle was detected, False on timeout.
-    Falls back to polling if SSE connection fails.
+    Polls ``/session/{id}/message`` and returns True when the most recent
+    assistant message contains a ``step-finish`` part — opencode's reliable
+    completion marker. Returns False on timeout.
+
+    Why polling, not SSE: opencode-serve 1.14.x's ``/event`` stream emits
+    ``server.connected`` and ``server.heartbeat`` only — it does not emit
+    ``session.status: idle`` events. ``/session/status`` returns ``{}`` for
+    completed sessions, so neither stream-based detection works. The
+    assistant message itself is the source of truth.
+
+    Tolerates transient connection errors during polling.
     """
     deadline = time.time() + timeout
+    poll_interval = 5.0
 
-    try:
-        with requests.get(
-            f"{_base_url()}/event",
-            stream=True,
-            timeout=(5, timeout + 5),
-        ) as resp:
-            if not resp.ok:
-                return _poll_until_idle(session_id, deadline)
-
-            for line in resp.iter_lines():
-                if time.time() > deadline:
-                    return False
-
-                if not line:
-                    continue
-
-                decoded = line.decode("utf-8") if isinstance(line, bytes) else line
-                if not decoded.startswith("data: "):
-                    continue
-
-                try:
-                    event = json.loads(decoded[6:])
-                except (json.JSONDecodeError, ValueError):
-                    continue
-
-                props = event.get("properties", {})
-                status_type = props.get("status", {}).get("type")
-                if (
-                    event.get("type") == "session.status"
-                    and props.get("sessionID") == session_id
-                    and status_type == "idle"
-                ):
-                    return True
-
-    except requests.RequestException:
-        pass
-
-    # SSE stream ended (exception or natural close) — fall back to polling.
-    return _poll_until_idle(session_id, deadline)
-
-
-def _poll_until_idle(session_id: str, deadline: float) -> bool:
-    """Fallback: poll session status until idle or deadline."""
     while time.time() < deadline:
         try:
             resp = requests.get(
-                f"{_base_url()}/session/status",
-                timeout=5,
+                f"{_base_url()}/session/{session_id}/message",
+                timeout=10,
             )
-            if resp.ok:
-                statuses = resp.json()
-                session_status = statuses.get(session_id, {})
-                if session_status.get("type") == "idle" or session_id not in statuses:
-                    return True
+            if resp.ok and _is_assistant_done(resp.json()):
+                return True
         except requests.RequestException:
             pass
-        time.sleep(2)
+        time.sleep(poll_interval)
+    return False
+
+
+def _is_assistant_done(messages: list[dict]) -> bool:
+    """Return True if the most recent assistant message has finished generating.
+
+    The marker is a ``step-finish`` part on the latest message whose role is
+    ``assistant``. User messages are ignored even if they happen to carry a
+    ``step-finish`` part.
+    """
+    for msg in reversed(messages):
+        role = msg.get("role") or msg.get("info", {}).get("role")
+        if role != "assistant":
+            continue
+        parts = msg.get("parts", [])
+        return any(p.get("type") == "step-finish" for p in parts)
     return False

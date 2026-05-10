@@ -10,7 +10,7 @@ description: Use when debugging The Rundown writer and collection path, especial
 The Rundown daily job collects Levine, Semafor, and Zvi content into a work dir, writes `plan.json`, enriches selected stories, then generates a script through the shared `opencode-serve` daemon. On success, the consumer writes `script.txt`, `summary.txt`, and optional `covered.json`, then hands the script to TTS + publish.
 
 Recent hardening changed the operational behavior:
-- Rundown writer timeout is now 300 seconds
+- Rundown writer timeout is now 900 seconds
 - successful collection writes `collection_done.json`
 - retries reuse prior collection when `collection_done.json` and `plan.json` exist
 - empty script output is rejected at the writer boundary
@@ -104,7 +104,7 @@ print('All pending jobs marked as due now')
 - The consumer will log errors and retry on the next poll cycle.
 
 ### Writer times out or returns empty output
-- Check logs: `journalctl -u my-podcasts-consumer --since today --no-pager | rg "Failed Rundown job|retry #|empty script|300 seconds"`
+- Check logs: `journalctl -u my-podcasts-consumer --since today --no-pager | rg "Failed Rundown job|retry #|empty script|900 seconds"`
 - Check opencode-serve logs: `journalctl -u opencode-serve.service -n 50 --no-pager`
 - Retries now back off automatically and preserve collection artifacts for reuse.
 

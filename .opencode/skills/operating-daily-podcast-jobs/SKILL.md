@@ -20,7 +20,7 @@ for table, feed in [('pending_fp_digest', 'fp-digest'), ('pending_the_rundown', 
     print(feed)
     for r in rows: print(dict(r))
 "
-journalctl -u my-podcasts-consumer --since today --no-pager | rg "FP digest|Rundown|retry #|errored|empty script|300 seconds|Failed"
+journalctl -u my-podcasts-consumer --since today --no-pager | rg "FP digest|Rundown|retry #|errored|empty script|900 seconds|Failed"
 uv run python -c "
 import sqlite3
 conn = sqlite3.connect('/persist/my-podcasts/state.sqlite3')
@@ -47,7 +47,7 @@ for r in rows: print(dict(r))
 
 ## Current hardening behavior
 
-- FP Digest and The Rundown writers now wait up to 300 seconds
+- FP Digest and The Rundown writers now wait up to 900 seconds
 - successful collection writes `collection_done.json`
 - retries reuse prior collection instead of rerunning expensive collection every time
 - empty script output is rejected at the writer boundary

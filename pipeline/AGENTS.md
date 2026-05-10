@@ -23,10 +23,10 @@ Quick start and incident-response guide for the two daily podcasts: The Rundown 
 ## Current Hardening
 
 - `pipeline/rundown_writer.py`
-  - 300-second opencode writer timeout
+  - 900-second opencode writer timeout
   - empty script output rejected at writer boundary
 - `pipeline/fp_writer.py`
-  - 300-second opencode writer timeout
+  - 900-second opencode writer timeout
   - empty script output rejected at writer boundary
 - `pipeline/things_happen_collector.py`, `pipeline/fp_collector.py`
   - successful collection writes `collection_done.json`

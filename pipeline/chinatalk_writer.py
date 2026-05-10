@@ -89,9 +89,9 @@ def generate_report(*, body: str, subject: str) -> ReportOutput:
     session_id = create_session()
     try:
         send_prompt_async(session_id, instruction)
-        if not wait_for_idle(session_id, timeout=300):
+        if not wait_for_idle(session_id, timeout=900):
             raise RuntimeError(
-                "chinatalk report writer did not complete within 300 seconds"
+                "chinatalk report writer did not complete within 900 seconds"
             )
         messages = get_messages(session_id)
         full_text = get_last_assistant_text(messages).strip()
