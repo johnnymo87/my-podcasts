@@ -47,7 +47,7 @@ def test_build_fp_prompt_no_context_scripts() -> None:
     assert "2026-03-06" in prompt
 
 
-def test_generate_fp_script(monkeypatch) -> None:
+def test_generate_fp_script(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "pipeline.fp_writer.create_session",
         lambda directory=None: "sess-fp",
@@ -82,13 +82,15 @@ def test_generate_fp_script(monkeypatch) -> None:
 
     themes = ["Iran Nuclear Deal"]
     articles_by_theme = {"Iran Nuclear Deal": ["Iran talks resumed in Vienna."]}
-    result = generate_fp_script(themes, articles_by_theme, date_str="2026-03-06")
+    result = generate_fp_script(
+        themes, articles_by_theme, date_str="2026-03-06", work_dir=tmp_path
+    )
 
     assert "foreign policy briefing" in result.script
     assert result.summary == ""
 
 
-def test_generate_fp_returns_writer_output_with_summary(monkeypatch) -> None:
+def test_generate_fp_returns_writer_output_with_summary(monkeypatch, tmp_path) -> None:
     """generate_fp_script returns WriterOutput with summary when tags present."""
     from pipeline.rundown_writer import WriterOutput
 
@@ -119,13 +121,14 @@ def test_generate_fp_returns_writer_output_with_summary(monkeypatch) -> None:
         themes=["Iran"],
         articles_by_theme={"Iran": ["Article"]},
         date_str="2026-03-06",
+        work_dir=tmp_path,
     )
     assert isinstance(result, WriterOutput)
     assert result.summary == "FP summary."
     assert result.script == "The FP script."
 
 
-def test_generate_fp_script_timeout(monkeypatch) -> None:
+def test_generate_fp_script_timeout(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "pipeline.fp_writer.create_session",
         lambda directory=None: "sess-fp-timeout",
@@ -148,13 +151,15 @@ def test_generate_fp_script_timeout(monkeypatch) -> None:
     articles_by_theme = {"Iran Nuclear Deal": ["Iran talks resumed."]}
 
     with pytest.raises(RuntimeError, match="900 seconds"):
-        generate_fp_script(themes, articles_by_theme, date_str="2026-03-06")
+        generate_fp_script(
+            themes, articles_by_theme, date_str="2026-03-06", work_dir=tmp_path
+        )
 
     # delete_session must be called in finally block even on error
     assert "sess-fp-timeout" in deleted
 
 
-def test_generate_fp_script_rejects_empty_output(monkeypatch) -> None:
+def test_generate_fp_script_rejects_empty_output(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "pipeline.fp_writer.create_session",
         lambda directory=None: "sess-fp-empty",
@@ -191,4 +196,5 @@ def test_generate_fp_script_rejects_empty_output(monkeypatch) -> None:
             themes=["Iran Nuclear Deal"],
             articles_by_theme={"Iran Nuclear Deal": ["Iran talks resumed in Vienna."]},
             date_str="2026-03-06",
+            work_dir=tmp_path,
         )

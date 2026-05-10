@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from pipeline.rundown_writer import (
     WriterOutput,
     _extract_script,
@@ -109,8 +111,12 @@ def generate_fp_script(
     articles_by_theme: dict[str, list[str]],
     date_str: str,
     context_scripts: list[str] | None = None,
+    work_dir: Path | None = None,
 ) -> WriterOutput:
     """Generate a FP podcast script via the shared opencode server."""
+    # work_dir is accepted for API compatibility; persistence is added in
+    # the next task.
+    _ = work_dir
     prompt = build_fp_prompt(themes, articles_by_theme, date_str, context_scripts)
 
     instruction = (
