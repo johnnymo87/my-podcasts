@@ -267,6 +267,10 @@ def process_command(input_file: Path, route_tag: str | None) -> None:
             store=store,
             r2_client=r2_client,
         )
+        if result.skipped:
+            click.echo(f"Skipped (filter): {result.title}")
+            click.echo(f"Feed: {result.feed_slug}")
+            return
         click.echo(f"Uploaded episode: {result.r2_key}")
         click.echo(f"Title: {result.title}")
         click.echo(f"Route tag: {result.route_tag or 'none'}")

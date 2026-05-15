@@ -185,6 +185,14 @@ ChinaTalk newsletters are sometimes podcast transcripts rather than essays. For 
 
 **Wiring:** `pipeline/chinatalk_report.maybe_rewrite_chinatalk` is called from `pipeline/processor.process_email_bytes` between body cleaning and TTS. Any exception in classification or report generation falls back silently to the standard reading.
 
+## Yglesias Podcast Filter
+
+Slow Boring occasionally publishes the newsletter form of Yglesias's Argument podcast with Jerusalem Demsas: show notes + timestamps + paywalled transcript. Those posts run ~80 minutes of TTS but add no value over listening to the podcast directly, so the pipeline drops them entirely (no audio, no feed entry).
+
+**Detection:** `pipeline/yglesias_filter.is_demsas_podcast` matches the cleaned body against five deterministic boilerplate strings (`WATCH THE EPISODE HERE`, `TheArgumentMag.com`, `Subscribe: Apple Podcasts | Spotify | YouTube | Overcast | Pocket Casts`, `Time stamps:`, `New episodes post every Thursday.`) and requires at least two hits. No LLM call.
+
+**Wiring:** `pipeline/yglesias_filter.should_skip` is called from `pipeline/processor.process_email_bytes` immediately after body cleaning. When it fires, the processor marks the source email processed (so the queue does not retry) and returns a `ProcessResult` with `skipped=True` and `r2_key=""`. TTS, R2 upload, episode insert, and feed regeneration are all bypassed. Any exception in the matcher falls back to "do not skip" (safer to let one long episode through than silently drop a real essay).
+
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.

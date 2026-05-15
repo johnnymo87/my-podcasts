@@ -18,6 +18,7 @@ from pipeline.feed import regenerate_and_upload_feed
 from pipeline.presets import resolve_preset
 from pipeline.source_adapters import get_source_adapter
 from pipeline.things_happen_extractor import extract_things_happen
+from pipeline.yglesias_filter import should_skip
 
 
 if TYPE_CHECKING:
@@ -35,6 +36,10 @@ class ProcessResult:
     source_url: str | None
     size_bytes: int
     duration_seconds: int | None
+    # True when the email was intentionally dropped (e.g. a Yglesias podcast
+    # show-notes post). All other fields hold placeholder/blank values in
+    # that case; callers should branch on this rather than reading them.
+    skipped: bool = False
 
 
 def _parse_duration_seconds(mp3_path: Path) -> int | None:
@@ -116,6 +121,27 @@ def process_email_bytes(
         subject_raw=subject_raw,
     )
     body = adapter.clean_body(raw_email=raw_email, body=body)
+
+    # Some Yglesias newsletters are really the show notes + transcript for
+    # his Argument podcast with Jerusalem Demsas. We can't usefully turn
+    # those into audio (they're already audio), so drop them entirely.
+    # Mark the source email as processed so the queue does not retry it.
+    if should_skip(body=body, feed_slug=preset.feed_slug):
+        print(f"Skipping Yglesias podcast post: {episode_title}")
+        store.mark_processed(source_r2_key)
+        return ProcessResult(
+            r2_key="",
+            title=episode_title,
+            route_tag=route_tag,
+            feed_slug=preset.feed_slug,
+            category=preset.category,
+            preset_name=preset.name,
+            source_url=None,
+            size_bytes=0,
+            duration_seconds=None,
+            skipped=True,
+        )
+
     body, episode_title = maybe_rewrite_chinatalk(
         body=body,
         title=episode_title,
