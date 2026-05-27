@@ -248,7 +248,7 @@ def test_classify_semafor_articles_returns_routing(monkeypatch):
 
     assert result == {0: "fp", 1: "th", 2: "fp"}
     call_args = mock_client.models.generate_content.call_args
-    assert "gemini-3.1-flash-lite-preview" in str(call_args)
+    assert "gemini-3.1-flash-lite" in str(call_args)
 
 
 def test_classify_semafor_articles_fallback_no_api_key(monkeypatch):

@@ -38,7 +38,7 @@ def is_transcript(body: str, subject: str) -> bool:
     try:
         client = genai.Client(api_key=api_key)
         response = client.models.generate_content(
-            model="gemini-3.1-flash-lite-preview",
+            model="gemini-3.1-flash-lite",
             contents=f"Subject: {subject}\n\n{body}",
             config=types.GenerateContentConfig(
                 system_instruction=_SYSTEM_PROMPT,

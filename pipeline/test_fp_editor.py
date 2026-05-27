@@ -57,7 +57,7 @@ def test_success(mock_client_class, monkeypatch) -> None:
     # Verify the client was called correctly
     mock_client.models.generate_content.assert_called_once()
     kwargs = mock_client.models.generate_content.call_args[1]
-    assert kwargs["model"] == "gemini-3.1-flash-lite-preview"
+    assert kwargs["model"] == "gemini-3.1-flash-lite"
     assert "Iran strikes Israel" in kwargs["contents"]
 
 

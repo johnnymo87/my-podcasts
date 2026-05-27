@@ -71,7 +71,7 @@ def test_generate_plan_success(mock_client_class, monkeypatch) -> None:
 
     mock_client.models.generate_content.assert_called_once()
     kwargs = mock_client.models.generate_content.call_args[1]
-    assert kwargs["model"] == "gemini-3.1-flash-lite-preview"
+    assert kwargs["model"] == "gemini-3.1-flash-lite"
     assert "Tech Company IPO" in kwargs["contents"]
     assert "War Breaks Out" in kwargs["contents"]
 

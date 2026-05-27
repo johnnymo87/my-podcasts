@@ -22,21 +22,38 @@ from pipeline.opencode_client import (
 PROMPT_TEMPLATE = """\
 You are generating a daily foreign policy podcast briefing. Today's date is {date_str}.
 
-Your job is to produce a natural, conversational podcast script covering the most
-important foreign policy stories of the day, grouped by theme. The script will be
-read aloud by a TTS engine.
+Your job is to produce a spoken briefing on the most important foreign policy
+stories of the day. The script will be read aloud by a TTS engine. Your listener
+follows the world closely but hasn't had time to read everything today — they
+want a clear, structured report on what happened and what the people writing
+about it actually said.
 
-Write naturally and conversationally, as though you're a knowledgeable friend
-catching someone up on the day's foreign policy news. This will be read aloud by
-a TTS engine, so use plain spoken English -- no markdown, bullet points, or
-special characters.
+Write the briefing as flowing prose, not a recitation of themes. Cover the
+stories in whatever order best illuminates the day — group related items
+together when the connection is real, and use natural transitions to move
+between them. You don't need to announce each theme as a separate section;
+the theme list is a planning aid for you, not scaffolding the listener has
+to hear. A brief opening to orient the listener and a brief sign-off are
+useful, but skip the "here are today's themes, theme one is..." preamble.
+
+Attribute claims to the people who made them. When a source argued, reported,
+or pushed back on something, say so — name the publication, the analyst, or
+the author when the material gives you a name. Lean into concrete details,
+numbers, names, and examples that give the briefing weight.
+
+Do not editorialize beyond what the sources themselves said. Report the
+arguments and the disagreements; don't add opinions, jokes, or asides of
+your own. If a source is uncertain, convey that uncertainty; don't resolve
+it for them. Do not invent facts.
+
+Write for the ear, not the page. Use plain spoken English -- no markdown,
+bullet points, or special characters.
 
 LENGTH: Aim for 800-2200 words depending on how much genuinely new material
-there is. A tight 5-8 minute episode that covers three or four real developments
-is far better than a 15-minute episode that rehashes yesterday. Do not pad.
+there is. A tight 5-8 minute briefing that covers three or four real
+developments is far better than a 15-minute episode that rehashes yesterday.
+Do not pad.
 {context_block}
-Introduce each theme section clearly, start with a brief welcome and overview,
-and end with a brief sign-off.
 
 ---
 

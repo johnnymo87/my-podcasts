@@ -99,7 +99,7 @@ def adapt_for_audio(html_content: str, title: str) -> str | None:
 
     client = genai.Client(api_key=api_key)
     response = client.models.generate_content(
-        model="gemini-3.1-flash-lite-preview",
+        model="gemini-3.1-flash-lite",
         contents=f"Blog post title: {title}\n\n{html_content}",
         config=types.GenerateContentConfig(
             system_instruction=_ADAPT_SYSTEM_PROMPT,
