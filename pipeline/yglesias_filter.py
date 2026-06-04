@@ -22,11 +22,17 @@ from collections import Counter
 
 
 # A transcript turn is a line that begins with a speaker label: one to four
-# capitalized words (allowing internal '.', "'", "'", '-') followed by a colon
-# and whitespace. Matches "Jerusalem Demsas:", "Kelsey Piper:", "Announcer:",
-# "Q:". Timestamp lines like "0:00-..." start with a digit and never match.
+# capitalized words (allowing internal '.', '-', and a straight or
+# typographic apostrophe) followed by a colon and whitespace. Matches
+# "Jerusalem Demsas:", "Kelsey Piper:", "Announcer:", "O'Brien:", "Q:".
+# Timestamp lines like "0:00-..." start with a digit and never match.
+#
+# The apostrophe chars are injected via an escape (not a literal curly
+# character) so the source survives editor/copy-paste normalization.
+_APOS = "'" + "\u2019"  # straight (U+0027) + typographic (U+2019)
+_NAME = r"[A-Z][\w." + _APOS + r"\-]*"
 _SPEAKER_TURN_RE = re.compile(
-    r"^[ \t]*([A-Z][\w.''\-]*(?:[ \t]+[A-Z][\w.''\-]*){0,3}):\s",
+    rf"^[ \t]*({_NAME}(?:[ \t]+{_NAME}){{0,3}}):\s",
     re.MULTILINE,
 )
 
