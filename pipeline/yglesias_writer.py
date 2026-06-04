@@ -53,6 +53,7 @@ TRANSCRIPT:
 @dataclass(frozen=True)
 class ReportOutput:
     script: str
+    # Parsed for structural parity with chinatalk_writer; not stored/surfaced.
     summary: str
 
 

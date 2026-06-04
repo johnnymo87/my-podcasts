@@ -68,10 +68,29 @@ def test_timestamp_and_label_lines_do_not_trigger():
 
 
 def test_repeated_structural_labels_still_below_threshold():
-    # 'Note:' matches the speaker-label regex but appears only 4 times,
-    # so the >=5-turns-per-speaker threshold blocks it. This makes the
-    # threshold (not the regex) the explicit line of defense.
+    # 'Note:' matches the speaker-label regex (the regex deliberately accepts
+    # single-word labels like 'Announcer:' / 'Q:'), so the per-speaker turn
+    # threshold -- not the regex -- is the primary line of defense. Four
+    # 'Note:' lines stay under the >=5 floor.
     body = "\n".join(f"Note: aside number {i}." for i in range(4))
+    assert is_argument_transcript(body) is False
+
+
+def test_two_single_word_labels_each_below_threshold_are_not_a_transcript():
+    # The threshold needs >=2 distinct labels EACH at >=5 turns. Four 'Note:'
+    # and four 'Update:' lines are two distinct labels but both under the
+    # floor, so this essay-shaped body is not treated as a transcript.
+    #
+    # Known benign limitation: if a single post somehow had >=5 'Note:' AND
+    # >=5 'Update:' line-starts, the detector would fire. That is extremely
+    # unlikely in a Slow Boring essay, and the consequence under the report
+    # path is a spoken briefing instead of a long reading -- never a dropped
+    # episode -- so we accept it rather than tighten the regex and risk
+    # missing real single-word speaker labels.
+    body = "\n".join(
+        [f"Note: aside {i}." for i in range(4)]
+        + [f"Update: item {i}." for i in range(4)]
+    )
     assert is_argument_transcript(body) is False
 
 
