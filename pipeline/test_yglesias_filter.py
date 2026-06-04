@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import inspect
 
-import pytest
-
 from pipeline import processor
 from pipeline.yglesias_filter import is_argument_transcript
 
@@ -80,10 +78,6 @@ def test_repeated_structural_labels_still_below_threshold():
 # --- Wiring check ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Task 4 wires maybe_rewrite_yglesias into processor.py; that task removes this marker",
-)
 def test_processor_calls_maybe_rewrite_yglesias():
     source = inspect.getsource(processor.process_email_bytes)
     assert "maybe_rewrite_yglesias" in source

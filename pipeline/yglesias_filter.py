@@ -60,16 +60,3 @@ def is_argument_transcript(body: str) -> bool:
     ]
     return len(speakers) >= _MIN_SPEAKERS
 
-
-# ---------------------------------------------------------------------------
-# Backward-compatibility shim — to be removed when processor.py is rewired
-# in a later task to call ``maybe_rewrite_yglesias`` instead.
-# ---------------------------------------------------------------------------
-
-def should_skip(*, body: str, feed_slug: str) -> bool:  # noqa: ARG001
-    """Deprecated stub kept only so processor.py can import without error.
-
-    The processor wiring task will replace this call site with
-    ``maybe_rewrite_yglesias``; at that point this function is deleted.
-    """
-    return False
