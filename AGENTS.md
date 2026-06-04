@@ -185,13 +185,15 @@ ChinaTalk newsletters are sometimes podcast transcripts rather than essays. For 
 
 **Wiring:** `pipeline/chinatalk_report.maybe_rewrite_chinatalk` is called from `pipeline/processor.process_email_bytes` between body cleaning and TTS. Any exception in classification or report generation falls back silently to the standard reading.
 
-## Yglesias Podcast Filter
+## Yglesias Argument Transcript Reports
 
-Slow Boring occasionally publishes the newsletter form of Yglesias's Argument podcast with Jerusalem Demsas: show notes + timestamps + paywalled transcript. Those posts run ~80 minutes of TTS but add no value over listening to the podcast directly, so the pipeline drops them entirely (no audio, no feed entry).
+Slow Boring publishes the newsletter form of Matt Yglesias's *The Argument* podcast with Jerusalem Demsas (regular weekly episodes, plus one-off live events with guests). For paying subscribers the email body carries the full verbatim transcript (~80 minutes of TTS). Rather than read that aloud — or drop it, as the pipeline used to — these posts are rewritten into a spoken briefing, mirroring the ChinaTalk transcript report path, and published to the `yglesias` feed with a `Report: ` title prefix.
 
-**Detection:** `pipeline/yglesias_filter.is_demsas_podcast` matches the cleaned body against five deterministic boilerplate strings (`WATCH THE EPISODE HERE`, `TheArgumentMag.com`, `Subscribe: Apple Podcasts | Spotify | YouTube | Overcast | Pocket Casts`, `Time stamps:`, `New episodes post every Thursday.`) and requires at least two hits. No LLM call.
+**Detection:** `pipeline/yglesias_filter.is_argument_transcript` is a deterministic, content-only transcript-shape detector. It counts line-start speaker labels and fires only when at least two distinct speakers each take five or more turns. No LLM call. This survives Substack footer/boilerplate changes (the old marker-based detector missed live-event posts entirely) and is near-impossible to trigger on a normal essay.
 
-**Wiring:** `pipeline/yglesias_filter.should_skip` is called from `pipeline/processor.process_email_bytes` immediately after body cleaning. When it fires, the processor marks the source email processed (so the queue does not retry) and returns a `ProcessResult` with `skipped=True` and `r2_key=""`. TTS, R2 upload, episode insert, and feed regeneration are all bypassed. Any exception in the matcher falls back to "do not skip" (safer to let one long episode through than silently drop a real essay).
+**Generation:** `pipeline/yglesias_writer.generate_report` (opencode-serve, mirrors `chinatalk_writer.py`, 900-second timeout, rejects empty output) with a prompt tuned for *The Argument*.
+
+**Wiring:** `pipeline/yglesias_report.maybe_rewrite_yglesias` is called from `pipeline/processor.process_email_bytes` after body cleaning, before TTS (alongside the ChinaTalk hook; the two are mutually exclusive by `feed_slug`). It is yglesias-only and fails safe: any exception in detection or generation falls back to the standard reading, so the listener always gets an episode (a long reading rather than a silently dropped essay).
 
 ## Landing the Plane (Session Completion)
 
