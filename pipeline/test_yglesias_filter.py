@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import inspect
 
+import pytest
+
 from pipeline import processor
 from pipeline.yglesias_filter import is_argument_transcript
 
 
-# A real Argument transcript: 2+ named speakers each taking many turns.
+# A real Argument transcript: 2 named speakers, each with 1 seed + 6 loop
+# = 7 turns, comfortably above _MIN_TURNS_PER_SPEAKER (5).
 _TRANSCRIPT_BODY = "\n".join(
     [
         "Jerusalem Demsas: Welcome to the show.",
@@ -66,9 +69,21 @@ def test_timestamp_and_label_lines_do_not_trigger():
     assert is_argument_transcript(body) is False
 
 
+def test_repeated_structural_labels_still_below_threshold():
+    # 'Note:' matches the speaker-label regex but appears only 4 times,
+    # so the >=5-turns-per-speaker threshold blocks it. This makes the
+    # threshold (not the regex) the explicit line of defense.
+    body = "\n".join(f"Note: aside number {i}." for i in range(4))
+    assert is_argument_transcript(body) is False
+
+
 # --- Wiring check ---
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="Task 4 wires maybe_rewrite_yglesias into processor.py; that task removes this marker",
+)
 def test_processor_calls_maybe_rewrite_yglesias():
     source = inspect.getsource(processor.process_email_bytes)
     assert "maybe_rewrite_yglesias" in source

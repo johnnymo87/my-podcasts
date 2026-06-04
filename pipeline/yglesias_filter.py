@@ -35,6 +35,9 @@ _SPEAKER_TURN_RE = re.compile(
     rf"^[ \t]*({_NAME}(?:[ \t]+{_NAME}){{0,3}}):\s",
     re.MULTILINE,
 )
+# Import-time guard: the regex is assembled from parts (_NAME/_APOS), so a
+# sanity check catches construction errors immediately if those are edited.
+assert _SPEAKER_TURN_RE.match("Jerusalem Demsas: hi"), "speaker-turn regex is broken"
 
 # A genuine conversation has at least this many distinct speakers, each taking
 # at least this many turns. A normal essay never has two different "Name:"
