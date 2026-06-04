@@ -1,74 +1,66 @@
-"""Detect and skip Slow Boring posts that are really podcast show notes.
+"""Detect Slow Boring posts that are *The Argument* podcast transcripts.
 
-Matt Yglesias's Slow Boring publishes a weekly podcast with Jerusalem Demsas
-(for The Argument). The newsletter form of those episodes is the show notes
-+ timestamps + paywalled transcript -- ~80 minutes of TTS that the user can
-just listen to as a podcast directly. We detect those posts via deterministic
-body markers and skip episode generation entirely.
+Matt Yglesias's Slow Boring publishes the newsletter form of *The Argument*,
+a debate/conversation podcast hosted by Jerusalem Demsas (regular weekly
+episodes with Matt, plus one-off live events with guests). For paying
+subscribers the email body carries the full verbatim transcript -- ~80
+minutes of TTS. Rather than read that aloud (or drop it, as we used to), we
+report on it: see ``pipeline.yglesias_report``.
 
-The detector is conservative on two axes:
-
-* It only runs for ``feed_slug == "yglesias"``. Same phrases appearing in any
-  other feed are passed through.
-* It requires at least two distinct podcast-boilerplate markers in the cleaned
-  body. One marker can show up incidentally in a normal essay (e.g. an essay
-  that quotes Spotify). Two markers from this set together is a very strong
-  signal -- and we'd rather let one ~80-minute episode through than silently
-  drop a real essay.
-
-The wiring point in ``pipeline.processor.process_email_bytes`` mirrors the
-ChinaTalk transcript hook: it runs after body cleaning, before TTS / R2 /
-DB insert.
+Detection is deterministic and content-only: a transcript is structurally a
+run of named speaker turns. We fire only when at least two distinct speaker
+labels each recur at least five times as line-starts. This survives Substack
+footer/boilerplate changes and is near-impossible to trigger on a normal
+essay. The wiring point in ``pipeline.processor.process_email_bytes`` mirrors
+the ChinaTalk transcript hook: it runs after body cleaning, before TTS.
 """
 
 from __future__ import annotations
 
-import logging
+import re
+from collections import Counter
 
 
-logger = logging.getLogger(__name__)
-
-
-# Each of these strings is boilerplate that appears verbatim in Slow Boring
-# Conversations posts (the Yglesias + Demsas Argument podcast). They were
-# verified against the 2026-05-14 "What the Spirit debate is really about"
-# email body fetched from R2. None of them appear in a normal Slow Boring
-# essay.
-_PODCAST_MARKERS: tuple[str, ...] = (
-    "WATCH THE EPISODE HERE",
-    "TheArgumentMag.com",
-    "Subscribe: Apple Podcasts | Spotify | YouTube | Overcast | Pocket Casts",
-    "Time stamps:",
-    "New episodes post every Thursday.",
+# A transcript turn is a line that begins with a speaker label: one to four
+# capitalized words (allowing internal '.', "'", "'", '-') followed by a colon
+# and whitespace. Matches "Jerusalem Demsas:", "Kelsey Piper:", "Announcer:",
+# "Q:". Timestamp lines like "0:00-..." start with a digit and never match.
+_SPEAKER_TURN_RE = re.compile(
+    r"^[ \t]*([A-Z][\w.''\-]*(?:[ \t]+[A-Z][\w.''\-]*){0,3}):\s",
+    re.MULTILINE,
 )
 
+# A genuine conversation has at least this many distinct speakers, each taking
+# at least this many turns. A normal essay never has two different "Name:"
+# labels each repeated five times at line starts.
+_MIN_SPEAKERS = 2
+_MIN_TURNS_PER_SPEAKER = 5
 
-# Require this many marker hits before we treat the body as a podcast post.
-# Two is enough to be near-zero false positives while staying robust to
-# Substack tweaking any one boilerplate string in the future.
-_MIN_MARKER_HITS: int = 2
 
+def is_argument_transcript(body: str) -> bool:
+    """Return True if the body looks like a multi-speaker podcast transcript.
 
-def is_demsas_podcast(body: str) -> bool:
-    """Return True if the cleaned body looks like a Slow Boring podcast post."""
+    Pure and deterministic. Feed gating (yglesias-only) happens in
+    ``pipeline.yglesias_report.maybe_rewrite_yglesias``.
+    """
     if not body:
         return False
-    hits = sum(1 for marker in _PODCAST_MARKERS if marker in body)
-    return hits >= _MIN_MARKER_HITS
+    counts = Counter(m.group(1) for m in _SPEAKER_TURN_RE.finditer(body))
+    speakers = [
+        label for label, n in counts.items() if n >= _MIN_TURNS_PER_SPEAKER
+    ]
+    return len(speakers) >= _MIN_SPEAKERS
 
 
-def should_skip(*, body: str, feed_slug: str) -> bool:
-    """Return True if this email should be dropped without producing an episode.
+# ---------------------------------------------------------------------------
+# Backward-compatibility shim — to be removed when processor.py is rewired
+# in a later task to call ``maybe_rewrite_yglesias`` instead.
+# ---------------------------------------------------------------------------
 
-    Safe-by-default: any unexpected exception in the matcher falls back to
-    ``False`` so we never silently drop a normal essay.
+def should_skip(*, body: str, feed_slug: str) -> bool:  # noqa: ARG001
+    """Deprecated stub kept only so processor.py can import without error.
+
+    The processor wiring task will replace this call site with
+    ``maybe_rewrite_yglesias``; at that point this function is deleted.
     """
-    if feed_slug != "yglesias":
-        return False
-    try:
-        return is_demsas_podcast(body)
-    except Exception:
-        logger.exception(
-            "yglesias filter matcher crashed; falling back to no-skip"
-        )
-        return False
+    return False
