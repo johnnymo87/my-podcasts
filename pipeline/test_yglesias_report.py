@@ -3,6 +3,8 @@ from __future__ import annotations
 import inspect
 from unittest.mock import patch
 
+import pytest
+
 from pipeline import processor
 from pipeline.yglesias_report import maybe_rewrite_yglesias
 from pipeline.yglesias_writer import ReportOutput
@@ -58,30 +60,16 @@ def test_yglesias_transcript_is_rewritten(mock_detect, mock_writer):
     side_effect=RuntimeError("boom"),
 )
 @patch("pipeline.yglesias_report.is_argument_transcript", return_value=True)
-def test_writer_failure_falls_back_to_reading(mock_detect, mock_writer):
-    body, title = maybe_rewrite_yglesias(
-        body="Jerusalem Demsas: Hi",
-        title="2026-06-04 - Slow Boring - Episode",
-        feed_slug="yglesias",
-        subject_raw="Episode",
-    )
-    assert body == "Jerusalem Demsas: Hi"
-    assert title == "2026-06-04 - Slow Boring - Episode"
-
-
-@patch(
-    "pipeline.yglesias_report.is_argument_transcript",
-    side_effect=RuntimeError("detector crashed"),
-)
-def test_detector_failure_falls_back_to_reading(mock_detect):
-    body, title = maybe_rewrite_yglesias(
-        body="Jerusalem Demsas: Hi",
-        title="2026-06-04 - Slow Boring - Episode",
-        feed_slug="yglesias",
-        subject_raw="Episode",
-    )
-    assert body == "Jerusalem Demsas: Hi"
-    assert title == "2026-06-04 - Slow Boring - Episode"
+def test_yglesias_writer_failure_propagates(mock_detect, mock_writer):
+    # For a confirmed transcript, a generation failure must NOT silently fall
+    # back to a literal read; it propagates so the queue redelivers the email.
+    with pytest.raises(RuntimeError):
+        maybe_rewrite_yglesias(
+            body="Jerusalem Demsas: Hi",
+            title="2026-06-04 - Slow Boring - Episode",
+            feed_slug="yglesias",
+            subject_raw="Episode",
+        )
 
 
 def test_processor_calls_maybe_rewrite_yglesias():
