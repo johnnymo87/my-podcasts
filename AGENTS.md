@@ -60,7 +60,7 @@ Quick start and navigation for humans and coding agents.
 - Email ingest worker: `workers/email-ingest/`
 - Podcast serving worker: `workers/podcast-serve/`
 - The Rundown pipeline: `pipeline/rundown_writer.py` (script generator), `pipeline/exa_client.py` (Exa wrapper)
-- ChinaTalk transcript report path: `pipeline/chinatalk_classifier.py`, `pipeline/chinatalk_writer.py`, `pipeline/chinatalk_report.py` (called from `pipeline/processor.py`)
+- ChinaTalk transcript report path: `pipeline/transcript_detect.py` (shared detector), `pipeline/chinatalk_writer.py`, `pipeline/chinatalk_report.py` (called from `pipeline/processor.py`)
 
 ## Where To Start
 
@@ -179,11 +179,11 @@ WordPress and other blog sources are polled via RSS for new posts. Each new post
 
 ChinaTalk newsletters are sometimes podcast transcripts rather than essays. For transcripts, the pipeline replaces the TTS body with an AI-written spoken briefing about the conversation, and prefixes the episode title with "Report: ". Essays and articles are read normally.
 
-**Detection:** `pipeline/chinatalk_classifier.py` (Gemini Flash-Lite YES/NO classifier). Conservative: any failure returns NO and the listener gets the standard reading.
+**Detection:** `pipeline/transcript_detect.looks_like_transcript` — a deterministic, content-only transcript-shape detector (shared with the Yglesias path). It counts line-start speaker labels and fires only when at least two distinct speakers each take five or more turns. No LLM call, so detection never depends on a remote API (the previous Gemini classifier silently returned NO during a 2026-05-26 endpoint outage, shipping an 80-minute transcript as a literal read).
 
 **Generation:** `pipeline/chinatalk_writer.py` (opencode-serve, mirrors `rundown_writer.py`, 900-second timeout, rejects empty output).
 
-**Wiring:** `pipeline/chinatalk_report.maybe_rewrite_chinatalk` is called from `pipeline/processor.process_email_bytes` between body cleaning and TTS. Any exception in classification or report generation falls back silently to the standard reading.
+**Wiring:** `pipeline/chinatalk_report.maybe_rewrite_chinatalk` is called from `pipeline/processor.process_email_bytes` between body cleaning and TTS. Essays (detection returns False) are read normally. For a *confirmed* transcript, a report-generation failure is logged and re-raised rather than silently degrading to a literal read — it propagates out of `process_email_bytes`, the consumer leaves the queue message unacked, and the email is reprocessed on redelivery.
 
 ## Yglesias Argument Transcript Reports
 
