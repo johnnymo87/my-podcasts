@@ -21,3 +21,6 @@ workers/*/node_modules/
 .dolt/
 *.db
 .beads-credential-key
+
+# beads tracker (git-free/stealth dolt)
+.beads/
