@@ -85,6 +85,7 @@ def test_read_mode_uses_adapter_and_plain_title(
     mock_adapt.assert_called_once()
     kwargs = mock_publish.call_args.kwargs
     assert kwargs["title"] == "David Reich – Bronze Age"
+    assert kwargs["source_url"] == "https://www.dwarkesh.com/p/david-reich-2"
 
 
 @patch("pipeline.script_processor.publish_script")

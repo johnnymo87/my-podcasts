@@ -897,6 +897,8 @@ def substack_command(
     else:  # read
         from pipeline.blog_poller import adapt_for_audio
 
+        # adapt_for_audio takes raw HTML (Gemini converts it to spoken prose and
+        # strips tags/images), so no pre-cleaning is applied here, unlike report mode.
         click.echo("Adapting post for audio...")
         adapted = adapt_for_audio(post.body_html, post.title)
         if not adapted:
@@ -907,7 +909,10 @@ def substack_command(
         episode_title = title or post.title
 
     if dry_run:
-        out_path = Path(tempfile.gettempdir()) / f"substack-{post.slug or 'post'}.txt"
+        out_path = (
+            Path(tempfile.gettempdir())
+            / f"substack-{post.slug or 'post'}-{date_str}.txt"
+        )
         out_path.write_text(script_text, encoding="utf-8")
         click.echo("Dry run complete. No episode published.")
         click.echo(f"Script: {out_path}")
