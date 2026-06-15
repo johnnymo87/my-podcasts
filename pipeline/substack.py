@@ -59,8 +59,12 @@ def resolve_post(url_or_id: str, *, timeout: int = 30) -> SubstackPost:
     api_url = _api_url(url_or_id)
     resp = requests.get(api_url, timeout=timeout)
     resp.raise_for_status()
-    # Substack's JSON API wraps the post under a top-level "post" key.
-    post = resp.json()["post"]
+    payload = resp.json()
+    # The by-id endpoint wraps the post under {"post": {...}}; the custom-domain
+    # by-slug endpoint returns the post object at the top level. Handle both.
+    post = (
+        payload["post"] if isinstance(payload, dict) and "post" in payload else payload
+    )
 
     body_html = post.get("body_html") or ""
     audience = post.get("audience") or ""

@@ -101,6 +101,31 @@ def test_resolve_post_rejects_empty_body(mock_get):
         resolve_post("https://x.substack.com/p/empty")
 
 
+@patch("pipeline.substack.requests.get")
+def test_resolve_post_handles_unwrapped_response(mock_get):
+    # The custom-domain by-slug endpoint returns the post at the TOP LEVEL,
+    # with no {"post": {...}} wrapper (unlike the by-id endpoint).
+    resp = MagicMock()
+    resp.json.return_value = {
+        "title": "Unwrapped",
+        "subtitle": "sub",
+        "description": "desc",
+        "audience": "everyone",
+        "body_html": "<p>Body.</p>",
+        "canonical_url": "https://www.dwarkesh.com/p/x",
+        "slug": "x",
+        "wordcount": 10,
+    }
+    resp.raise_for_status.return_value = None
+    mock_get.return_value = resp
+
+    post = resolve_post("https://www.dwarkesh.com/p/x")
+
+    assert post.title == "Unwrapped"
+    assert post.body_html == "<p>Body.</p>"
+    assert post.host == "www.dwarkesh.com"
+
+
 _SAMPLE_HTML = (
     '<p>I had no idea how wild human history was, says the <a href="x">host</a>.</p>'
     "<h3>Sponsors</h3>"
