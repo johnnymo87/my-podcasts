@@ -7,6 +7,7 @@ from typing import Any
 
 import click
 
+from pipeline import script_processor
 from pipeline.consumer import consume_forever
 from pipeline.db import StateStore
 from pipeline.feed import regenerate_and_upload_feed
@@ -830,6 +831,118 @@ def publish_script_command(
         click.echo(f"Title: {result.title}")
         click.echo(f"Feed: {result.feed_slug}")
         click.echo(f"Size: {result.size_bytes} bytes")
+        if result.duration_seconds is not None:
+            click.echo(f"Duration: {result.duration_seconds} sec")
+    finally:
+        store.close()
+
+
+@cli.command("substack")
+@click.option("--url", required=True, type=str, help="Substack post URL or id.")
+@click.option(
+    "--mode",
+    type=click.Choice(["report", "read"]),
+    default="report",
+    show_default=True,
+    help="report: spoken briefing; read: faithful full reading.",
+)
+@click.option("--feed-slug", "feed_slug", required=True, type=str)
+@click.option(
+    "--title",
+    default=None,
+    type=str,
+    help="Override episode title (report mode prepends 'Report: ' if not set).",
+)
+@click.option("--voice", default="nova", show_default=True, type=str)
+@click.option("--category", default="Technology", show_default=True, type=str)
+@click.option(
+    "--date", "date_str", default=None, type=str, help="Date (YYYY-MM-DD)."
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Generate the script only; skip TTS and publish.",
+)
+def substack_command(
+    url: str,
+    mode: str,
+    feed_slug: str,
+    title: str | None,
+    voice: str,
+    category: str,
+    date_str: str | None,
+    dry_run: bool,
+) -> None:
+    """Turn a Substack post into a one-off podcast episode."""
+    import tempfile
+    from datetime import UTC, datetime
+
+    from pipeline import substack as substack_mod
+    from pipeline import substack_writer
+
+    if date_str is None:
+        date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+
+    click.echo(f"Fetching {url} ...")
+    post = substack_mod.resolve_post(url)
+    click.echo(f"Title: {post.title} ({post.wordcount} words)")
+
+    if mode == "report":
+        clean = substack_mod.html_to_clean_text(post.body_html)
+        click.echo(f"Normalized transcript: {len(clean)} chars. Generating report...")
+        out = substack_writer.generate_report(body=clean, subject=post.title)
+        script_text = out.script
+        episode_title = title or f"Report: {post.title}"
+    else:  # read
+        from pipeline.blog_poller import adapt_for_audio
+
+        click.echo("Adapting post for audio...")
+        adapted = adapt_for_audio(post.body_html, post.title)
+        if not adapted:
+            raise click.ClickException(
+                "Audio adaptation failed (is GEMINI_API_KEY set?)."
+            )
+        script_text = adapted
+        episode_title = title or post.title
+
+    if dry_run:
+        out_path = Path(tempfile.gettempdir()) / f"substack-{post.slug or 'post'}.txt"
+        out_path.write_text(script_text, encoding="utf-8")
+        click.echo("Dry run complete. No episode published.")
+        click.echo(f"Script: {out_path}")
+        return
+
+    notes_md = (
+        f"## Episode Summary\n\n{post.subtitle or post.description}\n\n"
+        f"---\n\n[Original post]({post.canonical_url})\n"
+    )
+
+    store = StateStore(_default_state_db_path())
+    try:
+        r2_client = R2Client()
+        with tempfile.TemporaryDirectory(prefix="substack-") as tmp_dir:
+            tmp = Path(tmp_dir)
+            script_file = tmp / "script.md"
+            script_file.write_text(script_text, encoding="utf-8")
+            notes_file = tmp / "notes.md"
+            notes_file.write_text(notes_md, encoding="utf-8")
+
+            result = script_processor.publish_script(
+                script_file=script_file,
+                title=episode_title,
+                feed_slug=feed_slug,
+                store=store,
+                r2_client=r2_client,
+                show_notes_file=notes_file,
+                voice=voice,
+                category=category,
+                date_str=date_str,
+                source_url=post.canonical_url or None,
+            )
+        click.echo(f"Published: {result.r2_key}")
+        click.echo(f"Title: {result.title}")
+        click.echo(f"Feed: {result.feed_slug}")
         if result.duration_seconds is not None:
             click.echo(f"Duration: {result.duration_seconds} sec")
     finally:
