@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pipeline.substack import SubstackPost, _api_url, resolve_post
+from pipeline.substack import SubstackPost, _api_url, html_to_clean_text, resolve_post
 
 
 def test_api_url_numeric_id():
@@ -99,3 +99,50 @@ def test_resolve_post_rejects_empty_body(mock_get):
     )
     with pytest.raises(ValueError, match="no body"):
         resolve_post("https://x.substack.com/p/empty")
+
+
+_SAMPLE_HTML = (
+    '<p>I had no idea how wild human history was, says the <a href="x">host</a>.</p>'
+    "<h3>Sponsors</h3>"
+    "<p>This episode is brought to you by Sponsor X.</p>"
+    "<h3>Timestamps</h3>"
+    '<p><a href="#a">(00:00:00) – Topic one</a></p>'
+    '<p><a href="#b">(00:15:45) – Topic two</a></p>'
+    "<h3>Transcript</h3>"
+    "<h3>00:00:00 – Topic one</h3>"
+    "<p><strong>Dwarkesh Patel</strong> <em>00:00:00</em></p>"
+    "<p>Welcome to the show.</p>"
+    "<p><strong>David Reich</strong></p>"
+    "<p>Glad to be here at 3:00 PM.</p>"
+)
+
+
+def test_html_to_clean_text_strips_boilerplate_and_timestamps():
+    out = html_to_clean_text(_SAMPLE_HTML)
+
+    # Intro prose kept (link text kept, URL dropped)
+    assert "I had no idea how wild human history was" in out
+    assert "host" in out
+    assert "href" not in out and "http" not in out
+
+    # Sponsors and Timestamps sections dropped
+    assert "Sponsor X" not in out
+    assert "Sponsors" not in out
+    assert "Timestamps" not in out
+    assert "(00:00:00)" not in out
+
+    # Section header kept but timestamp prefix stripped
+    assert "Topic one" in out
+
+    # Speaker labels and content kept
+    assert "Dwarkesh Patel" in out
+    assert "Welcome to the show." in out
+    assert "David Reich" in out
+    assert "Glad to be here" in out
+
+    # The structural word "Transcript" is dropped
+    assert "Transcript" not in out
+
+    # No leftover HH:MM:SS timestamp tokens (inline em + header prefix removed).
+    import re as _re
+    assert not _re.search(r"\b\d{1,2}:\d{2}:\d{2}\b", out)

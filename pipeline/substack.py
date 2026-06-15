@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import requests
+from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 
 @dataclass(frozen=True)
@@ -87,3 +89,52 @@ def resolve_post(url_or_id: str, *, timeout: int = 30) -> SubstackPost:
         audience=audience,
         wordcount=int(post.get("wordcount") or 0),
     )
+
+
+_TS_PREFIX_RE = re.compile(r"^\(?\d{1,2}:\d{2}(?::\d{2})?\)?\s*[–-]\s*")
+_TS_TOKEN_RE = re.compile(r"^\(?\d{1,2}:\d{2}(?::\d{2})?\)?$")
+_SKIP_HEADERS = {"sponsor", "sponsors", "timestamps"}
+_STRUCTURAL_HEADERS = _SKIP_HEADERS | {"transcript"}
+
+
+def html_to_clean_text(body_html: str) -> str:
+    """Convert Substack post body HTML to clean text for the model.
+
+    Drops the Sponsors and Timestamps (TOC) sections, strips ``HH:MM:SS``
+    timestamps from section headers and inline speaker turns, and renders the
+    intro prose and transcript as plain labeled paragraphs.
+    """
+    soup = BeautifulSoup(body_html, "html.parser")
+
+    # Remove inline timestamp <em> tags
+    # (e.g. "<strong>Name</strong> <em>00:00:00</em>").
+    for em in soup.find_all("em"):
+        if _TS_TOKEN_RE.match(em.get_text(strip=True)):
+            em.decompose()
+
+    lines: list[str] = []
+    skipping = False
+    for el in soup.children:
+        if not isinstance(el, Tag):
+            continue
+
+        if el.name and re.fullmatch(r"h[1-6]", el.name):
+            text = _TS_PREFIX_RE.sub("", el.get_text(" ", strip=True)).strip()
+            lower = text.lower()
+            if lower in _SKIP_HEADERS:
+                skipping = True
+                continue
+            skipping = False
+            if lower not in _STRUCTURAL_HEADERS:
+                lines.append(text)
+            continue
+
+        if skipping:
+            continue
+
+        text = el.get_text(" ", strip=True)
+        text = re.sub(r"\s+", " ", text).strip()
+        if text:
+            lines.append(text)
+
+    return "\n\n".join(lines)
