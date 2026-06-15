@@ -46,12 +46,14 @@ Quick start and navigation for humans and coding agents.
   - `assets/podcast/cover-yglesias.jpg`
   - `assets/podcast/cover-silver.jpg`
   - `assets/podcast/cover-things-happen.jpg`
+  - `assets/podcast/cover-dwarkesh.jpg`
 - Artwork served via worker URLs:
   - `https://podcast.mohrbacher.dev/cover-general.jpg`
   - `https://podcast.mohrbacher.dev/cover-levine.jpg`
   - `https://podcast.mohrbacher.dev/cover-yglesias.jpg`
   - `https://podcast.mohrbacher.dev/cover-silver.jpg`
   - `https://podcast.mohrbacher.dev/cover-things-happen.jpg`
+  - `https://podcast.mohrbacher.dev/cover-dwarkesh.jpg`
 
 ## Core Paths
 
