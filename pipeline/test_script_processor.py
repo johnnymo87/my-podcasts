@@ -431,3 +431,45 @@ def test_publish_script_archives_script_without_show_notes(
     ).exists()
 
     store.close()
+
+
+def test_publish_script_sets_source_url(tmp_path, monkeypatch) -> None:
+    """When source_url is passed, it is stored on the episode (feed <link>)."""
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+
+    script_file = tmp_path / "script.md"
+    script_file.write_text("Plain script.", encoding="utf-8")
+
+    def fake_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "ttsjoin":
+            output_file = cmd[cmd.index("--output-file") + 1]
+            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
+            return subprocess.CompletedProcess(cmd, 0)
+        if cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(cmd, 0, stdout="60.0\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(
+        "pipeline.script_processor.regenerate_and_upload_feed", lambda s, r: None
+    )
+    monkeypatch.setattr(
+        "pipeline.script_processor.SCRIPT_ARCHIVE_ROOT", tmp_path / "arch"
+    )
+
+    publish_script(
+        script_file=script_file,
+        title="Linked Episode",
+        feed_slug="dwarkesh",
+        store=store,
+        r2_client=r2_client,
+        source_url="https://www.dwarkesh.com/p/david-reich-2",
+        date_str="2026-06-15",
+    )
+
+    episodes = store.list_episodes(feed_slug="dwarkesh")
+    assert len(episodes) == 1
+    assert episodes[0].source_url == "https://www.dwarkesh.com/p/david-reich-2"
+
+    store.close()

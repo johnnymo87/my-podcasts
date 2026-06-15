@@ -160,6 +160,7 @@ def publish_script(
     voice: str = DEFAULT_VOICE,
     category: str = DEFAULT_CATEGORY,
     date_str: str | None = None,
+    source_url: str | None = None,
 ) -> PublishResult:
     """Publish a podcast episode from a pre-written script file."""
     from pipeline.db import Episode
@@ -218,7 +219,7 @@ def publish_script(
         category=category,
         source_tag=None,
         preset_name="Script",
-        source_url=None,
+        source_url=source_url,
         size_bytes=size_bytes,
         duration_seconds=duration_seconds,
         summary=summary,
