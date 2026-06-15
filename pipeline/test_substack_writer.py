@@ -48,6 +48,8 @@ def test_generate_report_happy_path(
 
     assert result.script.startswith("On this episode")
     assert result.summary == "Brief on the interview."
+    mock_create.assert_called_once()
+    mock_send.assert_called_once()
     mock_wait.assert_called_once_with("ses_sub", timeout=900)
     mock_delete.assert_called_once_with("ses_sub")
 

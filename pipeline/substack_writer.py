@@ -30,7 +30,7 @@ Below is the transcript. Read it, then produce a spoken briefing
 - The main themes and questions explored, in the order that best
   illuminates the conversation (not necessarily the order they appeared).
 - The key claims, arguments, and evidence each participant offered,
-  with attribution ("Reich argued...", "Dwarkesh pushed back, asking...").
+  with attribution ("the guest argued...", "the host pushed back, asking...").
 - Notable disagreements, uncertainties, or surprising points.
 - Concrete details, numbers, names, and examples that gave the
   conversation weight.
