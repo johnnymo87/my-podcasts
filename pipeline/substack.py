@@ -57,12 +57,16 @@ def resolve_post(url_or_id: str, *, timeout: int = 30) -> SubstackPost:
     api_url = _api_url(url_or_id)
     resp = requests.get(api_url, timeout=timeout)
     resp.raise_for_status()
+    # Substack's JSON API wraps the post under a top-level "post" key.
     post = resp.json()["post"]
 
     body_html = post.get("body_html") or ""
     audience = post.get("audience") or ""
     if not body_html:
         raise ValueError(f"Substack post has no body: {url_or_id!r}")
+    # Require BOTH a non-public audience AND an explicit paywall signal
+    # (preview flag or truncated text): some paid tiers still deliver full
+    # body_html, so checking audience alone would false-positive on those.
     if audience != "everyone" and (
         post.get("should_send_free_preview") or post.get("truncated_body_text")
     ):

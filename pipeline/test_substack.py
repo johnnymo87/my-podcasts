@@ -25,8 +25,14 @@ def test_api_url_canonical_slug():
     )
 
 
+def test_api_url_short_link_without_at_author():
+    assert _api_url("https://substack.com/p-196892360") == (
+        "https://substack.com/api/v1/posts/by-id/196892360"
+    )
+
+
 def test_api_url_rejects_garbage():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Unrecognized"):
         _api_url("https://www.dwarkesh.com/about")
 
 
@@ -58,6 +64,8 @@ def test_resolve_post_happy_path(mock_get):
     assert post.title == "David Reich – Bronze Age"
     assert post.canonical_url == "https://www.dwarkesh.com/p/david-reich-2"
     assert post.body_html == "<p>Hello world.</p>"
+    assert post.host == "www.dwarkesh.com"
+    assert post.wordcount == 21163
     mock_get.assert_called_once()
 
 
