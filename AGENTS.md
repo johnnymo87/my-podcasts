@@ -180,7 +180,9 @@ WordPress and other blog sources are polled via RSS for new posts. Each new post
 
 Turn any Substack post into a one-off episode via the `substack` command. Ingests through the Substack JSON API, normalizes the HTML (stripping timestamps, sponsors, and the Timestamps TOC), then either generates a spoken **report** (briefing, default — for interview/transcript posts) or a faithful **read** (full reading via Gemini adaptation — for essays). Manual/operator-run, not automated.
 
-**CLI:** `uv run python -m pipeline substack --url <post-url-or-id> --mode {report|read} --feed-slug <slug> [--title ...] [--voice nova] [--category Technology] [--date YYYY-MM-DD] [--dry-run]`
+**CLI:** `uv run python -m pipeline substack --url <post-url-or-id> --mode {report|read} --feed-slug <slug> [--title ...] [--voice nova] [--category Technology] [--date YYYY-MM-DD] [--script-file PATH] [--dry-run]`
+
+**Publishing a reviewed script:** `--script-file PATH` publishes a pre-written script verbatim, skipping generation. Metadata (title prefix, source `<link>`, show notes) still comes from `resolve_post(url)`. This is the first-class version of the dry-run-then-publish workflow: review the `--dry-run` artifact, then publish that exact text with `--script-file`.
 
 **Ingestion:** Substack JSON API. Accepts a numeric post id, a short link (`.../p-<id>`), or a canonical slug URL (`.../p/<slug>`). The by-id endpoint wraps the post under `{"post": {...}}`; the custom-domain by-slug endpoint returns it at the top level — `resolve_post` handles both. Paywalled or empty posts are rejected.
 

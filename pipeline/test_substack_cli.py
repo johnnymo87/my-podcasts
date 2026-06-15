@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
@@ -86,6 +86,55 @@ def test_read_mode_uses_adapter_and_plain_title(
     kwargs = mock_publish.call_args.kwargs
     assert kwargs["title"] == "David Reich – Bronze Age"
     assert kwargs["source_url"] == "https://www.dwarkesh.com/p/david-reich-2"
+
+
+@patch("pipeline.script_processor.publish_script")
+@patch("pipeline.substack_writer.generate_report")
+@patch("pipeline.substack.resolve_post")
+def test_script_file_skips_generation_and_publishes_reviewed_text(
+    mock_resolve, mock_report, mock_publish, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "pipeline.__main__._default_state_db_path", lambda: tmp_path / "s.sqlite3"
+    )
+    monkeypatch.setattr("pipeline.__main__.R2Client", lambda: object())
+    mock_resolve.return_value = _post()
+
+    captured = {}
+
+    def _capture(**kwargs):
+        captured["title"] = kwargs["title"]
+        captured["feed_slug"] = kwargs["feed_slug"]
+        captured["source_url"] = kwargs["source_url"]
+        captured["script"] = Path(kwargs["script_file"]).read_text(encoding="utf-8")
+        return MagicMock()
+
+    mock_publish.side_effect = _capture
+
+    reviewed = tmp_path / "reviewed.txt"
+    reviewed.write_text("The exact reviewed briefing.", encoding="utf-8")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "substack",
+            "--url", "https://www.dwarkesh.com/p/david-reich-2",
+            "--mode", "report",
+            "--feed-slug", "dwarkesh",
+            "--script-file", str(reviewed),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    # Generation is skipped entirely when a script file is supplied.
+    mock_report.assert_not_called()
+    mock_resolve.assert_called_once()
+    assert mock_publish.call_count == 1
+    assert captured["title"] == "Report: David Reich – Bronze Age"
+    assert captured["feed_slug"] == "dwarkesh"
+    assert captured["source_url"] == "https://www.dwarkesh.com/p/david-reich-2"
+    assert captured["script"] == "The exact reviewed briefing."
 
 
 @patch("pipeline.script_processor.publish_script")

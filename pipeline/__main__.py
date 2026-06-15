@@ -859,6 +859,16 @@ def publish_script_command(
     "--date", "date_str", default=None, type=str, help="Date (YYYY-MM-DD)."
 )
 @click.option(
+    "--script-file",
+    "script_file_opt",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help=(
+        "Publish this pre-written script verbatim, skipping generation. "
+        "Metadata (title, source link, show notes) still comes from the post."
+    ),
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -872,6 +882,7 @@ def substack_command(
     voice: str,
     category: str,
     date_str: str | None,
+    script_file_opt: Path | None,
     dry_run: bool,
 ) -> None:
     """Turn a Substack post into a one-off podcast episode."""
@@ -888,7 +899,18 @@ def substack_command(
     post = substack_mod.resolve_post(url)
     click.echo(f"Title: {post.title} ({post.wordcount} words)")
 
-    if mode == "report":
+    if script_file_opt is not None:
+        # Publish a reviewed script verbatim: skip generation, but keep all
+        # metadata wiring (title prefix, source link, show notes) from the post.
+        script_text = script_file_opt.read_text(encoding="utf-8")
+        episode_title = title or (
+            f"Report: {post.title}" if mode == "report" else post.title
+        )
+        click.echo(
+            f"Using pre-written script ({len(script_text)} chars) from "
+            f"{script_file_opt}; skipping generation."
+        )
+    elif mode == "report":
         clean = substack_mod.html_to_clean_text(post.body_html)
         click.echo(f"Normalized transcript: {len(clean)} chars. Generating report...")
         out = substack_writer.generate_report(body=clean, subject=post.title)
