@@ -61,6 +61,7 @@ Quick start and navigation for humans and coding agents.
 - Podcast serving worker: `workers/podcast-serve/`
 - The Rundown pipeline: `pipeline/rundown_writer.py` (script generator), `pipeline/exa_client.py` (Exa wrapper)
 - ChinaTalk transcript report path: `pipeline/transcript_detect.py` (shared detector), `pipeline/chinatalk_writer.py`, `pipeline/chinatalk_report.py` (called from `pipeline/processor.py`)
+- One-off Substack episodes: `pipeline/substack.py` (API ingest + HTML normalization), `pipeline/substack_writer.py` (interview report writer)
 
 ## Where To Start
 
@@ -174,6 +175,19 @@ WordPress and other blog sources are polled via RSS for new posts. Each new post
 **Key module:** `pipeline/blog_poller.py` -- RSS fetch, AI adaptation, TTS + publish
 
 **Source definitions:** `pipeline/blog_sources.py` -- `BlogSource` dataclass, `BLOG_SOURCES` tuple
+
+## One-Off Substack Episodes
+
+Turn any Substack post into a one-off episode via the `substack` command. Ingests through the Substack JSON API, normalizes the HTML (stripping timestamps, sponsors, and the Timestamps TOC), then either generates a spoken **report** (briefing, default — for interview/transcript posts) or a faithful **read** (full reading via Gemini adaptation — for essays). Manual/operator-run, not automated.
+
+**CLI:** `uv run python -m pipeline substack --url <post-url-or-id> --mode {report|read} --feed-slug <slug> [--title ...] [--voice nova] [--category Technology] [--date YYYY-MM-DD] [--dry-run]`
+
+**Ingestion:** Substack JSON API. Accepts a numeric post id, a short link (`.../p-<id>`), or a canonical slug URL (`.../p/<slug>`). The by-id endpoint wraps the post under `{"post": {...}}`; the custom-domain by-slug endpoint returns it at the top level — `resolve_post` handles both. Paywalled or empty posts are rejected.
+
+**Key modules:**
+- `pipeline/substack.py` — `resolve_post` (Substack API), `html_to_clean_text` (HTML normalization)
+- `pipeline/substack_writer.py` — interview report writer (opencode-serve, 900s timeout), mirrors `chinatalk_writer.py` / `yglesias_writer.py`
+- Read mode reuses `pipeline/blog_poller.py:adapt_for_audio` (Gemini); publishes via `pipeline/script_processor.py:publish_script` (extended with `source_url`)
 
 ## ChinaTalk Transcript Report Path
 
