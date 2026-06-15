@@ -118,17 +118,26 @@ def html_to_clean_text(body_html: str) -> str:
 
     lines: list[str] = []
     skipping = False
+    skip_level: int | None = None
+    # Substack body_html is a flat sequence of block-level tags; iterate top-level only.
     for el in soup.children:
         if not isinstance(el, Tag):
             continue
 
         if el.name and re.fullmatch(r"h[1-6]", el.name):
+            level = int(el.name[1])
             text = _TS_PREFIX_RE.sub("", el.get_text(" ", strip=True)).strip()
             lower = text.lower()
             if lower in _SKIP_HEADERS:
                 skipping = True
+                skip_level = level
+                continue
+            # A deeper-level header inside a skipped section stays skipped;
+            # a same-or-higher-level header ends the skipped section.
+            if skipping and skip_level is not None and level > skip_level:
                 continue
             skipping = False
+            skip_level = None
             if lower not in _STRUCTURAL_HEADERS:
                 lines.append(text)
             continue

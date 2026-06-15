@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -124,6 +125,7 @@ def test_resolve_post_handles_unwrapped_response(mock_get):
     assert post.title == "Unwrapped"
     assert post.body_html == "<p>Body.</p>"
     assert post.host == "www.dwarkesh.com"
+    assert post.wordcount == 10
 
 
 _SAMPLE_HTML = (
@@ -169,5 +171,20 @@ def test_html_to_clean_text_strips_boilerplate_and_timestamps():
     assert "Transcript" not in out
 
     # No leftover HH:MM:SS timestamp tokens (inline em + header prefix removed).
-    import re as _re
-    assert not _re.search(r"\b\d{1,2}:\d{2}:\d{2}\b", out)
+    assert not re.search(r"\b\d{1,2}:\d{2}:\d{2}\b", out)
+
+
+def test_html_to_clean_text_no_leak_from_sub_header_in_sponsors():
+    html = (
+        "<p>Intro.</p>"
+        "<h3>Sponsors</h3>"
+        "<h4>Advertiser Inc</h4>"
+        "<p>Buy our product.</p>"
+        "<h3>Transcript</h3>"
+        "<p>Real transcript.</p>"
+    )
+    out = html_to_clean_text(html)
+    assert "Advertiser Inc" not in out
+    assert "Buy our product" not in out
+    assert "Real transcript" in out
+    assert "Intro." in out
