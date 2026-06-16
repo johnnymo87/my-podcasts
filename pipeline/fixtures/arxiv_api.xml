@@ -1,0 +1,28 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom" xmlns="http://www.w3.org/2005/Atom">
+  <id>https://arxiv.org/api/huwmUhUjI4x0grqC7R3mU9a9qJ4</id>
+  <title>arXiv Query: search_query=&amp;id_list=2407.16314&amp;start=0&amp;max_results=10</title>
+  <updated>2026-06-16T13:35:33Z</updated>
+  <link href="https://arxiv.org/api/query?search_query=&amp;start=0&amp;max_results=10&amp;id_list=2407.16314" type="application/atom+xml"/>
+  <opensearch:itemsPerPage>10</opensearch:itemsPerPage>
+  <opensearch:totalResults>1</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <entry>
+    <id>http://arxiv.org/abs/2407.16314v1</id>
+    <title>Capital as Artificial Intelligence</title>
+    <updated>2024-07-23T09:05:33Z</updated>
+    <link href="https://arxiv.org/abs/2407.16314v1" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2407.16314v1" rel="related" type="application/pdf" title="pdf"/>
+    <summary>We gather many perspectives on Capital and synthesize their commonalities. We provide a characterization of Capital as a historical agential system and propose a model of Capital using tools from computer science. Our model consists of propositions which, if satisfied by a specific grounding, constitute a valid model of Capital. We clarify the manners in which Capital can evolve. We claim that, when its evolution is driven by quantitative optimization processes, Capital can possess qualities of Artificial Intelligence. We find that Capital may not uniquely represent meaning, in the same way that optimization is not intentionally meaningful. We find that Artificial Intelligences like modern day Large Language Models are a part of Capital. We link our readers to a web-interface where they can interact with a part of Capital.</summary>
+    <category term="cs.CY" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="econ.TH" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2024-07-23T09:05:33Z</published>
+    <arxiv:primary_category term="cs.CY"/>
+    <author>
+      <name>Cesare Carissimo</name>
+    </author>
+    <author>
+      <name>Marcin Korecki</name>
+    </author>
+  </entry>
+</feed>
