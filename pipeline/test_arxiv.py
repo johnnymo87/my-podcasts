@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from pipeline import arxiv
 
@@ -15,7 +16,10 @@ def _resp(text: str, status: int = 200):
     r = MagicMock()
     r.text = text
     r.status_code = status
-    r.raise_for_status = MagicMock()
+    if status >= 400:
+        r.raise_for_status.side_effect = requests.HTTPError(response=r)
+    else:
+        r.raise_for_status = MagicMock()
     return r
 
 
@@ -102,8 +106,9 @@ def test_report_text_quality(mock_get):
         assert heading in t
     assert "Definition 1" in t                       # theorem/definition kept
     assert "The relationship between generating processes" in t  # figure caption kept
-    assert "Barreto" not in t                         # bibliography excluded
-    assert 5000 < len(t.split()) < 8500               # realistic body, no bib blow-up
+    assert "Barreto" not in t  # the actual bibliography-exclusion guard
+    # tightened so a bib/footnote leak causes a failure
+    assert 5000 < len(t.split()) < 7000
 
 
 @patch("pipeline.arxiv.requests.get")
@@ -118,3 +123,10 @@ def test_resolve_no_html_rendering_raises(mock_get):
     mock_get.side_effect = _by_url
     with pytest.raises(ValueError, match="(?i)html"):
         arxiv.resolve("https://arxiv.org/abs/2407.16314")
+
+
+@patch("pipeline.arxiv.requests.get")
+def test_api_server_error_propagates(mock_get):
+    mock_get.return_value = _resp("", status=500)
+    with pytest.raises(requests.HTTPError):
+        arxiv._fetch_metadata("2407.16314", timeout=5)

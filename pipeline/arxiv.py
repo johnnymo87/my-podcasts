@@ -32,7 +32,7 @@ def parse_arxiv_id(url_or_id: str) -> str:
 
 
 def _fetch_metadata(arxiv_id: str, *, timeout: int) -> dict:
-    api_url = f"http://export.arxiv.org/api/query?id_list={arxiv_id}"
+    api_url = f"https://export.arxiv.org/api/query?id_list={arxiv_id}"
     resp = requests.get(api_url, timeout=timeout)
     resp.raise_for_status()
     root = ET.fromstring(resp.text)
@@ -81,7 +81,14 @@ def _html_to_report_text(body_html: str) -> str:
         for n in article.find_all(tag):
             n.decompose()
     # Remove bibliography before extracting text (keeps body clean, no bib blow-up).
+    # Guard: the compound selector can match both a section and its child ul;
+    # decomposing the section detaches the child — skip already-detached nodes.
     for n in article.select("section.ltx_bibliography, ul.ltx_biblist"):
+        if n.parent is not None:
+            n.decompose()
+    # Remove footnotes — LaTeXML renders them inline with triple-repeated markers
+    # (e.g. "1 1 1 …") that leak ~700 words of noise into the report body.
+    for n in article.select(".ltx_note"):
         n.decompose()
     # Remove math and image elements — they don't render as text.
     for n in article.find_all("math"):
