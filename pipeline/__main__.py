@@ -837,118 +837,113 @@ def publish_script_command(
         store.close()
 
 
-@cli.command("substack")
-@click.option("--url", required=True, type=str, help="Substack post URL or id.")
+@cli.command("episode")
+@click.option("--url", required=True, type=str, help="Source URL or id.")
 @click.option(
-    "--mode",
-    type=click.Choice(["report", "read"]),
-    default="report",
-    show_default=True,
-    help="report: spoken briefing; read: faithful full reading.",
+    "--source", default=None, type=click.Choice(["arxiv", "substack"]),
+    help="Force a source adapter (otherwise auto-detected from the URL).",
+)
+@click.option(
+    "--mode", type=click.Choice(["report", "read"]), default="report",
+    show_default=True, help="report: spoken briefing; read: faithful full reading.",
 )
 @click.option("--feed-slug", "feed_slug", required=True, type=str)
 @click.option(
-    "--title",
-    default=None,
-    type=str,
+    "--style", default=None, type=click.Choice(["interview", "paper"]),
+    help="Override the report prompt style (defaults to the source's style).",
+)
+@click.option(
+    "--title", default=None, type=str,
     help="Override episode title (report mode prepends 'Report: ' if not set).",
 )
 @click.option("--voice", default="nova", show_default=True, type=str)
-@click.option("--category", default="Technology", show_default=True, type=str)
 @click.option(
-    "--date", "date_str", default=None, type=str, help="Date (YYYY-MM-DD)."
+    "--category", default=None, type=str,
+    help="Override iTunes category (defaults to the source's category).",
 )
+@click.option("--date", "date_str", default=None, type=str, help="Date (YYYY-MM-DD).")
 @click.option(
-    "--script-file",
-    "script_file_opt",
-    default=None,
+    "--script-file", "script_file_opt", default=None,
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    help=(
-        "Publish this pre-written script verbatim, skipping generation. "
-        "Metadata (title, source link, show notes) still comes from the post."
-    ),
+    help=("Publish this pre-written script verbatim, skipping generation. "
+          "Metadata (title, source link, show notes) still comes from the source."),
 )
 @click.option(
-    "--dry-run",
-    is_flag=True,
-    default=False,
+    "--dry-run", is_flag=True, default=False,
     help="Generate the script only; skip TTS and publish.",
 )
-def substack_command(
-    url: str,
-    mode: str,
-    feed_slug: str,
-    title: str | None,
-    voice: str,
-    category: str,
-    date_str: str | None,
-    script_file_opt: Path | None,
-    dry_run: bool,
+def episode_command(
+    url: str, source: str | None, mode: str, feed_slug: str, style: str | None,
+    title: str | None, voice: str, category: str | None, date_str: str | None,
+    script_file_opt: Path | None, dry_run: bool,
 ) -> None:
-    """Turn a Substack post into a one-off podcast episode."""
+    """Turn a source URL (Substack post, arXiv paper, ...) into a one-off episode."""
     import tempfile
     from datetime import UTC, datetime
 
-    from pipeline import substack as substack_mod
-    from pipeline import substack_writer
+    from pipeline import report_writer, sources
 
     if date_str is None:
         date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
 
-    click.echo(f"Fetching {url} ...")
-    post = substack_mod.resolve_post(url)
-    click.echo(f"Title: {post.title} ({post.wordcount} words)")
+    click.echo(f"Resolving {url} ...")
+    try:
+        doc = sources.resolve_document(url, source=source)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Title: {doc.title} ({doc.wordcount} words, style={doc.style})")
+
+    if mode == "read" and doc.read_html is None:
+        raise click.ClickException(
+            f"read mode is not supported for this source (style={doc.style}); "
+            "use --mode report."
+        )
 
     if script_file_opt is not None:
-        # Publish a reviewed script verbatim: skip generation, but keep all
-        # metadata wiring (title prefix, source link, show notes) from the post.
         script_text = script_file_opt.read_text(encoding="utf-8")
         episode_title = title or (
-            f"Report: {post.title}" if mode == "report" else post.title
+            f"Report: {doc.title}" if mode == "report" else doc.title
         )
         click.echo(
-            f"Using pre-written script ({len(script_text)} chars) from "
-            f"{script_file_opt}; skipping generation."
+            f"Using pre-written script ({len(script_text)} chars); skipping generation."
         )
     elif mode == "report":
-        clean = substack_mod.html_to_clean_text(post.body_html)
-        click.echo(f"Normalized transcript: {len(clean)} chars. Generating report...")
-        out = substack_writer.generate_report(body=clean, subject=post.title)
+        out = report_writer.generate_report(
+            body=doc.report_text, subject=doc.title,
+            style=style or doc.style, byline=doc.byline,
+        )
         script_text = out.script
-        episode_title = title or f"Report: {post.title}"
+        episode_title = title or f"Report: {doc.title}"
     else:  # read
         from pipeline.blog_poller import adapt_for_audio
 
-        # adapt_for_audio takes raw HTML (Gemini converts it to spoken prose and
-        # strips tags/images), so no pre-cleaning is applied here, unlike report mode.
-        click.echo("Adapting post for audio...")
-        adapted = adapt_for_audio(post.body_html, post.title)
+        click.echo("Adapting source for audio...")
+        adapted = adapt_for_audio(doc.read_html, doc.title)
         if not adapted:
             raise click.ClickException(
                 "Audio adaptation failed (is GEMINI_API_KEY set?)."
             )
         script_text = adapted
-        episode_title = title or post.title
+        episode_title = title or doc.title
 
     if dry_run:
         out_path = (
-            Path(tempfile.gettempdir())
-            / f"substack-{post.slug or 'post'}-{date_str}.txt"
+            Path(tempfile.gettempdir()) / f"episode-{doc.slug or 'post'}-{date_str}.txt"
         )
         out_path.write_text(script_text, encoding="utf-8")
         click.echo("Dry run complete. No episode published.")
         click.echo(f"Script: {out_path}")
         return
 
-    notes_md = (
-        f"## Episode Summary\n\n{post.subtitle or post.description}\n\n"
-        f"---\n\n[Original post]({post.canonical_url})\n"
-    )
+    notes_md = f"## Episode Summary\n\n{doc.description}\n\n"
+    if doc.byline:
+        notes_md += f"By {doc.byline}\n\n"
+    notes_md += f"---\n\n[Original source]({doc.canonical_url})\n"
 
     store = StateStore(_default_state_db_path())
     try:
         r2_client = R2Client()
-        with tempfile.TemporaryDirectory(prefix="substack-") as tmp_dir:
+        with tempfile.TemporaryDirectory(prefix="episode-") as tmp_dir:
             tmp = Path(tmp_dir)
             script_file = tmp / "script.md"
             script_file.write_text(script_text, encoding="utf-8")
@@ -956,16 +951,10 @@ def substack_command(
             notes_file.write_text(notes_md, encoding="utf-8")
 
             result = script_processor.publish_script(
-                script_file=script_file,
-                title=episode_title,
-                feed_slug=feed_slug,
-                store=store,
-                r2_client=r2_client,
-                show_notes_file=notes_file,
-                voice=voice,
-                category=category,
-                date_str=date_str,
-                source_url=post.canonical_url or None,
+                script_file=script_file, title=episode_title, feed_slug=feed_slug,
+                store=store, r2_client=r2_client, show_notes_file=notes_file,
+                voice=voice, category=(category or doc.default_category),
+                date_str=date_str, source_url=doc.canonical_url or None,
             )
         click.echo(f"Published: {result.r2_key}")
         click.echo(f"Title: {result.title}")
