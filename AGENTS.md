@@ -63,7 +63,7 @@ Quick start and navigation for humans and coding agents.
 - Podcast serving worker: `workers/podcast-serve/`
 - The Rundown pipeline: `pipeline/rundown_writer.py` (script generator), `pipeline/exa_client.py` (Exa wrapper)
 - ChinaTalk transcript report path: `pipeline/transcript_detect.py` (shared detector), `pipeline/chinatalk_writer.py`, `pipeline/chinatalk_report.py` (called from `pipeline/processor.py`)
-- One-off Substack episodes: `pipeline/substack.py` (API ingest + HTML normalization), `pipeline/substack_writer.py` (interview report writer)
+- One-off episodes (source adapters): `pipeline/sources.py` (adapter registry + dispatch), `pipeline/document.py` (`Document` model), `pipeline/substack.py` (Substack API ingest + HTML normalization), `pipeline/arxiv.py` (arXiv paper adapter), `pipeline/report_writer.py` (style-keyed report writer)
 
 ## Where To Start
 
@@ -178,19 +178,26 @@ WordPress and other blog sources are polled via RSS for new posts. Each new post
 
 **Source definitions:** `pipeline/blog_sources.py` -- `BlogSource` dataclass, `BLOG_SOURCES` tuple
 
-## One-Off Substack Episodes
+## One-Off Episodes (Source Adapters)
 
-Turn any Substack post into a one-off episode via the `substack` command. Ingests through the Substack JSON API, normalizes the HTML (stripping timestamps, sponsors, and the Timestamps TOC), then either generates a spoken **report** (briefing, default — for interview/transcript posts) or a faithful **read** (full reading via Gemini adaptation — for essays). Manual/operator-run, not automated.
+Turn any supported source URL (Substack post, arXiv paper, ...) into a one-off episode via the generic `episode` command. The command resolves the URL through a source-adapter registry into a normalized `Document`, then either generates a spoken **report** (briefing, default) or a faithful **read** (full reading via Gemini adaptation). Manual/operator-run, not automated. This **replaces** the old `substack` command — Substack URLs and bare numeric Substack post ids are auto-detected and routed to the substack adapter.
 
-**CLI:** `uv run python -m pipeline substack --url <post-url-or-id> --mode {report|read} --feed-slug <slug> [--title ...] [--voice nova] [--category Technology] [--date YYYY-MM-DD] [--script-file PATH] [--dry-run]`
+**CLI:** `uv run python -m pipeline episode --url <url-or-id> [--source {arxiv,substack}] --mode {report|read} --feed-slug <slug> [--style {interview,paper}] [--title ...] [--voice nova] [--category ...] [--date YYYY-MM-DD] [--script-file PATH] [--dry-run]`
 
-**Publishing a reviewed script:** `--script-file PATH` publishes a pre-written script verbatim, skipping generation. Metadata (title prefix, source `<link>`, show notes) still comes from `resolve_post(url)`. This is the first-class version of the dry-run-then-publish workflow: review the `--dry-run` artifact, then publish that exact text with `--script-file`.
+**Adapter model:** `pipeline/sources.py:resolve_document(url, source=None)` dispatches to the first adapter whose `matches(url)` returns True (or to an explicitly forced `--source`). Each adapter returns a `pipeline/document.py:Document` carrying `report_text`, `read_html`, `style`, `byline`, `default_category`, etc.
+- **substack adapter** (`pipeline/substack.py`): style `interview`, **read supported**, default category `Technology`. Ingests via the Substack JSON API (numeric id, short link `.../p-<id>`, or canonical slug URL `.../p/<slug>`); paywalled/empty posts rejected. Auto-matches `substack.com`, `/p/`, `/p-`, `.dwarkesh.com`, and bare numeric ids.
+- **arXiv adapter** (`pipeline/arxiv.py`): style `paper`, **report-only** (`read_html=None`; `--mode read` errors), default category `Science`. Metadata via the arXiv Atom API using the **versioned** id derived from the Atom entry; body via the `/html` LaTeXML rendering (drops references/math/image bodies and footnotes, collapses figures/tables to their captions). Auto-matches `arxiv.org` hosts and bare/`arXiv:`-prefixed modern ids.
 
-**Ingestion:** Substack JSON API. Accepts a numeric post id, a short link (`.../p-<id>`), or a canonical slug URL (`.../p/<slug>`). The by-id endpoint wraps the post under `{"post": {...}}`; the custom-domain by-slug endpoint returns it at the top level — `resolve_post` handles both. Paywalled or empty posts are rejected.
+**Report writer:** `pipeline/report_writer.py:generate_report(body, subject, style, byline)` selects a prompt by `style` (`interview` vs `paper`); `--style` overrides the source default. opencode-serve, 900s timeout, rejects empty output; mirrors `chinatalk_writer.py` / `yglesias_writer.py`.
+
+**Publishing a reviewed script:** `--script-file PATH` publishes a pre-written script verbatim, skipping generation. Metadata (title prefix, source `<link>`, show notes) still comes from the resolved `Document`. This is the first-class version of the dry-run-then-publish workflow: review the `--dry-run` artifact, then publish that exact text with `--script-file`.
 
 **Key modules:**
+- `pipeline/sources.py` — adapter registry (`Adapter`, `ADAPTERS`) + `resolve_document` dispatch
+- `pipeline/document.py` — `Document` model (`byline`, `default_category`, `style`, `report_text`, `read_html`, ...)
+- `pipeline/arxiv.py` — arXiv adapter (`matches`, `parse_arxiv_id`, `resolve`)
 - `pipeline/substack.py` — `resolve_post` (Substack API), `html_to_clean_text` (HTML normalization)
-- `pipeline/substack_writer.py` — interview report writer (opencode-serve, 900s timeout), mirrors `chinatalk_writer.py` / `yglesias_writer.py`
+- `pipeline/report_writer.py` — style-keyed report writer (interview + paper, with byline)
 - Read mode reuses `pipeline/blog_poller.py:adapt_for_audio` (Gemini); publishes via `pipeline/script_processor.py:publish_script` (extended with `source_url`)
 
 ## ChinaTalk Transcript Report Path
