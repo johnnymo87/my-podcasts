@@ -937,7 +937,7 @@ def episode_command(
         return
 
     notes_md = f"## Episode Summary\n\n{doc.description}\n\n"
-    if doc.byline:
+    if doc.byline and doc.byline != doc.description:
         notes_md += f"By {doc.byline}\n\n"
     notes_md += f"---\n\n[Original source]({doc.canonical_url})\n"
 

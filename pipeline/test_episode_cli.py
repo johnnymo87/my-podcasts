@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -205,3 +206,53 @@ def test_source_flag_forces_adapter(
         "--feed-slug", "test", "--source", "substack"])
     assert res.exit_code == 0, res.output
     mock_resolve.assert_called_once_with("https://example.com/post", source="substack")
+
+
+@patch("pipeline.script_processor.publish_script")
+@patch("pipeline.report_writer.generate_report")
+@patch("pipeline.sources.resolve_document")
+def test_show_notes_dedupes_byline_equal_to_description(
+    mock_resolve, mock_report, mock_publish, tmp_path, monkeypatch
+):
+    _patch_env(monkeypatch, tmp_path)
+    # Substack-like doc where byline == description (both the subtitle).
+    doc = replace(_interview_doc(), byline="Same subtitle", description="Same subtitle")
+    mock_resolve.return_value = doc
+    mock_report.return_value = ReportOutput(script="Briefing.", summary="B.")
+    captured = {}
+
+    def _cap(**kw):
+        captured["notes"] = Path(kw["show_notes_file"]).read_text("utf-8")
+        return MagicMock()
+
+    mock_publish.side_effect = _cap
+    res = CliRunner().invoke(cli, [
+        "episode", "--url", "https://www.dwarkesh.com/p/x",
+        "--feed-slug", "dwarkesh"])
+    assert res.exit_code == 0, res.output
+    notes = captured["notes"]
+    assert notes.count("Same subtitle") == 1   # not duplicated as a "By" line
+    assert "By Same subtitle" not in notes
+
+
+@patch("pipeline.script_processor.publish_script")
+@patch("pipeline.report_writer.generate_report")
+@patch("pipeline.sources.resolve_document")
+def test_show_notes_includes_byline_when_distinct(
+    mock_resolve, mock_report, mock_publish, tmp_path, monkeypatch
+):
+    _patch_env(monkeypatch, tmp_path)
+    mock_resolve.return_value = _paper_doc()  # byline != description
+    mock_report.return_value = ReportOutput(script="Paper briefing.", summary="B.")
+    captured = {}
+
+    def _cap(**kw):
+        captured["notes"] = Path(kw["show_notes_file"]).read_text("utf-8")
+        return MagicMock()
+
+    mock_publish.side_effect = _cap
+    res = CliRunner().invoke(cli, [
+        "episode", "--url", "https://arxiv.org/html/2407.16314v1",
+        "--feed-slug", "papers"])
+    assert res.exit_code == 0, res.output
+    assert "By Cesare Carissimo, Marcin Korecki" in captured["notes"]
