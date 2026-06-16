@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -18,6 +17,15 @@ class Adapter:
 
 # Wrappers defer attribute lookup to call time so tests can patch
 # pipeline.arxiv.resolve / pipeline.sources._substack_resolve.
+#
+# Arxiv: _arxiv_resolve calls arxiv.resolve via module-attribute lookup, which
+# @patch("pipeline.arxiv.resolve") intercepts naturally.
+#
+# Substack: _substack_resolve is defined in *this* module, so storing it
+# directly in Adapter would freeze the reference at import time and bypass
+# @patch. _substack_resolve_dispatch does a call-time globals() lookup instead.
+# Any future adapter whose resolve function lives in sources.py needs the same
+# dispatch pattern; adapters backed by an external module (like arxiv) do not.
 def _arxiv_matches(url: str) -> bool:
     return arxiv.matches(url)
 
@@ -30,6 +38,8 @@ def _substack_matches(url: str) -> bool:
     ref = url.strip().lower()
     if ref.isdigit():  # bare Substack post id (legacy substack-command behavior)
         return True
+    # /p/<slug> and /p-<id> are Substack path conventions,
+    # present on custom domains too.
     return (
         "substack.com" in ref
         or "/p/" in ref
@@ -56,7 +66,7 @@ def _substack_resolve(url: str) -> Document:
 
 def _substack_resolve_dispatch(url: str) -> Document:
     """Indirection so @patch('pipeline.sources._substack_resolve') is intercepted."""
-    return sys.modules[__name__]._substack_resolve(url)  # type: ignore[attr-defined]
+    return globals()["_substack_resolve"](url)
 
 
 # Order: arxiv first (specific), substack last (permissive fallback).

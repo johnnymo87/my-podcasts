@@ -3,8 +3,6 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse
 
-from pipeline.document import Document  # noqa: F401  (used in Task 3)
-
 
 _ID_RE = re.compile(r"(\d{4}\.\d{4,5}(?:v\d+)?)")
 

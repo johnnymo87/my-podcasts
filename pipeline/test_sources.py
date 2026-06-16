@@ -48,6 +48,13 @@ def test_explicit_source_override(mock_arxiv_resolve):
     mock_arxiv_resolve.assert_called_once()
 
 
+@patch("pipeline.sources._substack_resolve")
+def test_explicit_substack_source_override(mock_sub_resolve):
+    mock_sub_resolve.return_value = _doc(style="interview")
+    resolve_document("anything", source="substack")
+    mock_sub_resolve.assert_called_once()
+
+
 def test_no_match_raises():
     with pytest.raises(ValueError):
         resolve_document("https://example.com/random")
