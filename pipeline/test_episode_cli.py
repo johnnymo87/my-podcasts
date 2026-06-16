@@ -189,3 +189,19 @@ def test_dry_run_writes_and_does_not_publish(
     printed = res.output.strip().splitlines()[-1]
     path = Path(printed.split(": ", 1)[1])
     assert path.exists() and "The briefing." in path.read_text("utf-8")
+
+
+@patch("pipeline.script_processor.publish_script")
+@patch("pipeline.report_writer.generate_report")
+@patch("pipeline.sources.resolve_document")
+def test_source_flag_forces_adapter(
+    mock_resolve, mock_report, mock_publish, tmp_path, monkeypatch
+):
+    _patch_env(monkeypatch, tmp_path)
+    mock_resolve.return_value = _interview_doc()
+    mock_report.return_value = ReportOutput(script="x", summary="y")
+    res = CliRunner().invoke(cli, [
+        "episode", "--url", "https://example.com/post",
+        "--feed-slug", "test", "--source", "substack"])
+    assert res.exit_code == 0, res.output
+    mock_resolve.assert_called_once_with("https://example.com/post", source="substack")

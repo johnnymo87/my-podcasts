@@ -917,6 +917,7 @@ def episode_command(
     else:  # read
         from pipeline.blog_poller import adapt_for_audio
 
+        assert doc.read_html is not None  # guaranteed by the read-mode guard above
         click.echo("Adapting source for audio...")
         adapted = adapt_for_audio(doc.read_html, doc.title)
         if not adapted:
