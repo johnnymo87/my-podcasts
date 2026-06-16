@@ -23,6 +23,7 @@ Quick start and navigation for humans and coding agents.
    - FP Digest: `https://podcast.mohrbacher.dev/feeds/fp-digest.xml`
    - Aaronson: `https://podcast.mohrbacher.dev/feeds/aaronson.xml`
    - ChinaTalk: `https://podcast.mohrbacher.dev/feeds/chinatalk.xml`
+   - Papers (one-off arXiv reports): `https://podcast.mohrbacher.dev/feeds/papers.xml`
 
 ## Docs TOC
 
