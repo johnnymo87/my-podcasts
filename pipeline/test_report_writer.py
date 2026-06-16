@@ -47,8 +47,18 @@ def test_extract_script_without_tags_returns_full_text():
     assert _extract_script("no tags here") == "no tags here"
 
 
+def test_extract_script_with_tags_returns_inner_text():
+    result = _extract_script("<summary>s</summary><script>The briefing.</script>")
+    assert result == "The briefing."
+
+
 def test_extract_summary_absent_returns_empty():
     assert _extract_summary("<script>x</script>") == ""
+
+
+def test_extract_summary_with_tags_returns_inner_text():
+    result = _extract_summary("<summary>Two sentences.</summary><script>x</script>")
+    assert result == "Two sentences."
 
 
 @patch("pipeline.report_writer.delete_session")

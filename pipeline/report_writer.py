@@ -80,7 +80,8 @@ _TEMPLATES = {"interview": _INTERVIEW_TEMPLATE, "paper": _PAPER_TEMPLATE}
 @dataclass(frozen=True)
 class ReportOutput:
     script: str
-    summary: str  # structural parity with chinatalk_writer; not surfaced.
+    # Parsed for structural parity with chinatalk_writer; not stored/surfaced.
+    summary: str
 
 
 def build_report_prompt(
@@ -95,11 +96,18 @@ def build_report_prompt(
 
 
 def _extract_script(text: str) -> str:
+    """Extract the spoken script from ``<script>...</script>`` tags.
+
+    If the tag is absent (model didn't follow the format), the full
+    response is returned as-is. The empty-script guard in
+    ``generate_report`` will reject the result if it is whitespace only.
+    """
     m = re.search(r"<script>\s*(.*?)\s*</script>", text, re.DOTALL)
     return m.group(1).strip() if m else text
 
 
 def _extract_summary(text: str) -> str:
+    """Extract the ``<summary>`` block, returning an empty string if absent."""
     m = re.search(r"<summary>\s*(.*?)\s*</summary>", text, re.DOTALL)
     return m.group(1).strip() if m else ""
 
