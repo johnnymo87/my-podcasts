@@ -8,11 +8,47 @@ import requests
 
 
 OPENCODE_URL = os.environ.get("OPENCODE_URL", "http://127.0.0.1:4096")
+# Pigeon daemon discovery endpoint. In a K-serve pool each opencode serve runs
+# its own agent loop, so a session's prompt/poll must reach the serve that OWNS
+# it. After creating a session we ask pigeon GET /route?session_id which serve
+# that is and cache it. Matches the opencode-launch / opencode-send convention.
+PIGEON_DAEMON_URL = os.environ.get("PIGEON_DAEMON_URL", "http://127.0.0.1:4731")
 PROJECT_DIR = str(Path(__file__).resolve().parent.parent)
 
+# session_id -> owning serve base URL, resolved once at create time via /route.
+_session_serve: dict[str, str] = {}
 
-def _base_url() -> str:
+
+def _fallback_base() -> str:
     return OPENCODE_URL.rstrip("/")
+
+
+def resolve_serve_url(session_id: str) -> str:
+    """Resolve the serve that owns ``session_id`` via pigeon's ``GET /route``.
+
+    Returns the owning serve's base URL (``.apiBase``). Degrades to
+    ``OPENCODE_URL`` (serve-0) whenever pigeon is unreachable, returns non-200,
+    or omits ``apiBase`` — so any routing hiccup is never worse than the
+    pre-pool single-serve behavior.
+    """
+    try:
+        resp = requests.get(
+            f"{PIGEON_DAEMON_URL.rstrip('/')}/route",
+            params={"session_id": session_id},
+            timeout=3,
+        )
+        if resp.ok:
+            api = (resp.json() or {}).get("apiBase")
+            if api:
+                return str(api).rstrip("/")
+    except (requests.RequestException, ValueError):
+        pass
+    return _fallback_base()
+
+
+def _serve_for(session_id: str) -> str:
+    """Owning-serve base URL for a session (cached), else the serve-0 fallback."""
+    return _session_serve.get(session_id, _fallback_base())
 
 
 def _headers(directory: str | None = None) -> dict[str, str]:
@@ -26,18 +62,22 @@ def create_session(directory: str | None = None) -> str:
     """Create a new opencode session. Returns the session ID."""
     dir_value = directory or PROJECT_DIR
     resp = requests.post(
-        f"{_base_url()}/session",
+        f"{_fallback_base()}/session",
         headers=_headers(dir_value),
         timeout=10,
     )
     resp.raise_for_status()
-    return resp.json()["id"]
+    session_id = resp.json()["id"]
+    # Pin the session to its owning serve so every subsequent prompt/poll/delete
+    # call below reaches the serve that runs its agent loop (pool-aware routing).
+    _session_serve[session_id] = resolve_serve_url(session_id)
+    return session_id
 
 
 def send_prompt_async(session_id: str, text: str) -> None:
     """Send a prompt to a session (fire-and-forget)."""
     resp = requests.post(
-        f"{_base_url()}/session/{session_id}/prompt_async",
+        f"{_serve_for(session_id)}/session/{session_id}/prompt_async",
         json={"parts": [{"type": "text", "text": text}]},
         timeout=10,
     )
@@ -48,7 +88,7 @@ def is_session_active(session_id: str) -> bool:
     """Check if a session exists and is accessible."""
     try:
         resp = requests.get(
-            f"{_base_url()}/session/{session_id}",
+            f"{_serve_for(session_id)}/session/{session_id}",
             timeout=5,
         )
         return resp.ok
@@ -59,7 +99,7 @@ def is_session_active(session_id: str) -> bool:
 def delete_session(session_id: str) -> None:
     """Delete a session. Ignores 404 (already gone)."""
     resp = requests.delete(
-        f"{_base_url()}/session/{session_id}",
+        f"{_serve_for(session_id)}/session/{session_id}",
         timeout=10,
     )
     if resp.status_code != 404:
@@ -69,7 +109,7 @@ def delete_session(session_id: str) -> None:
 def get_messages(session_id: str) -> list[dict]:
     """Get all messages for a session."""
     resp = requests.get(
-        f"{_base_url()}/session/{session_id}/message",
+        f"{_serve_for(session_id)}/session/{session_id}/message",
         timeout=10,
     )
     resp.raise_for_status()
@@ -108,7 +148,7 @@ def wait_for_idle(session_id: str, timeout: int = 120) -> bool:
     while time.time() < deadline:
         try:
             resp = requests.get(
-                f"{_base_url()}/session/{session_id}/message",
+                f"{_serve_for(session_id)}/session/{session_id}/message",
                 timeout=10,
             )
             if resp.ok and _is_assistant_done(resp.json()):
