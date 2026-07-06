@@ -233,7 +233,7 @@ Slow Boring publishes the newsletter form of Matt Yglesias's *The Argument* podc
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
+   bd dolt push   # sync bead DB to DoltHub (git-free; beads is NOT in git)
    git push
    git status  # MUST show "up to date with origin"
    ```
