@@ -98,3 +98,61 @@ def test_feed_without_show_notes_unchanged(tmp_path, monkeypatch) -> None:
     assert encoded is None
 
     store.close()
+
+
+def _make_store(tmp_path, feed_slug: str) -> StateStore:
+    store = StateStore(tmp_path / f"{feed_slug}.sqlite3")
+    store.insert_episode(
+        Episode(
+            id=f"ep-{feed_slug}",
+            title=f"2026-03-10 - {feed_slug}",
+            slug=f"2026-03-10-{feed_slug}",
+            pub_date="Mon, 10 Mar 2026 22:00:00 +0000",
+            r2_key=f"episodes/{feed_slug}/2026-03-10-{feed_slug}.mp3",
+            feed_slug=feed_slug,
+            category="News",
+            source_tag=feed_slug,
+            preset_name="Script",
+            source_url=None,
+            size_bytes=1000,
+            duration_seconds=300,
+        )
+    )
+    return store
+
+
+def _channel_image(xml: bytes) -> str:
+    ns = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
+    channel = ET.fromstring(xml).find("channel")
+    return channel.find("itunes:image", ns).attrib["href"]
+
+
+def test_feed_uses_per_show_artwork_when_it_exists(tmp_path, monkeypatch) -> None:
+    """A feed with published artwork keeps its own cover image."""
+    monkeypatch.setenv("PODCAST_BASE_URL", "https://podcast.test")
+    store = _make_store(tmp_path, "levine")
+    assert (
+        _channel_image(generate_feed_xml(store, feed_slug="levine"))
+        == "https://podcast.test/cover-levine.jpg"
+    )
+
+
+def test_feed_falls_back_to_general_artwork_when_absent(tmp_path, monkeypatch) -> None:
+    """A feed with no published artwork must not emit a 404 cover URL."""
+    monkeypatch.setenv("PODCAST_BASE_URL", "https://podcast.test")
+    store = _make_store(tmp_path, "fp-digest")
+    assert (
+        _channel_image(generate_feed_xml(store, feed_slug="fp-digest"))
+        == "https://podcast.test/cover-general.jpg"
+    )
+
+
+def test_per_show_artwork_env_override_still_wins(tmp_path, monkeypatch) -> None:
+    """An explicit env override beats the fallback."""
+    monkeypatch.setenv("PODCAST_BASE_URL", "https://podcast.test")
+    monkeypatch.setenv("PODCAST_IMAGE_URL_FP_DIGEST", "https://cdn.test/fp.jpg")
+    store = _make_store(tmp_path, "fp-digest")
+    assert (
+        _channel_image(generate_feed_xml(store, feed_slug="fp-digest"))
+        == "https://cdn.test/fp.jpg"
+    )

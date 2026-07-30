@@ -69,6 +69,20 @@ def _duration_to_hms(seconds: int | None) -> str:
     return f"{minutes:02}:{rem_seconds:02}"
 
 
+# Feed slugs with per-show cover art published to R2 (see assets/podcast/).
+# Any slug not listed here falls back to the general cover so the feed never
+# advertises an <itunes:image> that 404s.
+FEEDS_WITH_ARTWORK = frozenset(
+    {
+        "levine",
+        "yglesias",
+        "silver",
+        "things-happen",
+        "dwarkesh",
+    }
+)
+
+
 def generate_feed_xml(store: StateStore, feed_slug: str | None = None) -> bytes:
     base_url = os.getenv("PODCAST_BASE_URL", "https://podcast.mohrbacher.dev")
     base_title = os.getenv("PODCAST_TITLE", "My Podcasts")
@@ -99,7 +113,16 @@ def generate_feed_xml(store: StateStore, feed_slug: str | None = None) -> bytes:
         else:
             title = f"{base_title} - {feed_slug.title()}"
         image_env_key = f"PODCAST_IMAGE_URL_{feed_slug.upper().replace('-', '_')}"
-        image_url = os.getenv(image_env_key, f"{base_url}/cover-{feed_slug}.jpg")
+        # Only point at per-show artwork that has actually been published to R2.
+        # Emitting cover-<slug>.jpg unconditionally yields a 404 <itunes:image>
+        # for every show whose art was never uploaded, which some clients treat
+        # as an invalid feed.
+        default_image = (
+            f"{base_url}/cover-{feed_slug}.jpg"
+            if feed_slug in FEEDS_WITH_ARTWORK
+            else image_url
+        )
+        image_url = os.getenv(image_env_key, default_image)
     else:
         title = base_title
 
