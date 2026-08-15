@@ -190,6 +190,13 @@ def test_prior_urls_are_not_fetched(tmp_path, monkeypatch):
     assert len(art_files) == 1
     assert "Fresh Story" in art_files[0].read_text()
 
+    # The sentinel records the dedup that just happened, so a later run can be
+    # told apart from a run that simply had nothing to collect.
+    sentinel = json.loads((work_dir / "collection_done.json").read_text())
+    assert sentinel["levine_candidates"] == 2
+    assert sentinel["levine_deduped"] == 1
+    assert sentinel["levine_articles"] == 1
+
 
 def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
     """FP-flagged links are written to fp-routed-links dir, not enriched."""

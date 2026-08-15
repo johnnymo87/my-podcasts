@@ -112,7 +112,7 @@ def collect_all_artifacts(
         articles = fetch_all_articles(links_raw, delay_between=1.0)
     else:
         levine_candidates = 0
-        levine_deduped = 0  # noqa: F841 -- consumed by the funnel-report task
+        levine_deduped = 0
         articles = []
 
     headlines_with_snippets = []
@@ -330,6 +330,13 @@ def collect_all_artifacts(
         "job_id": job_id,
         "completed_at": datetime.now(tz=_et).isoformat(),
         "lookback_days": lookback_days,
+        # levine_candidates is every link found in the cache window;
+        # levine_deduped is how many were dropped as already-covered before
+        # any HTTP fetch. levine_articles counts what survived BOTH the dedup
+        # and the fetch, so it is not comparable to sentinels written before
+        # the dedup moved ahead of the fetch.
+        "levine_candidates": levine_candidates,
+        "levine_deduped": levine_deduped,
         "levine_articles": len(articles),
         "directives": len(plan.directives),
         "fp_routed": len(fp_directives),
