@@ -340,7 +340,14 @@ def collect_all_artifacts(
         "levine_articles": len(articles),
         "directives": len(plan.directives),
         "fp_routed": len(fp_directives),
+        # "enriched" counts every non-FP directive, including ones that never
+        # asked for Exa, so it does not equal the number of Exa files written.
         "enriched": len(non_fp_directives),
+        # Per-slug Exa status, so a miss is legible from the archived sentinel
+        # rather than only from a work dir that /tmp reaps after 10 days. Note
+        # a slug collision overwrites, so this can hold fewer entries than
+        # there were Exa-flagged directives.
+        "exa_outcomes": exa_outcomes,
     }
     (work_dir / "collection_done.json").write_text(
         json.dumps(sentinel, indent=2), encoding="utf-8"

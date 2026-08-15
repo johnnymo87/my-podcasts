@@ -854,6 +854,11 @@ def test_exa_empty_writes_file_with_status(tmp_path, monkeypatch):
     assert expected.exists()
     assert "Result: empty" in expected.read_text()
 
+    # The status also survives in the sentinel, which is archived; the work dir
+    # holding the file above is reaped from /tmp after 10 days.
+    sentinel = json.loads((work_dir / "collection_done.json").read_text())
+    assert sentinel["exa_outcomes"] == {_slugify(headline): "empty"}
+
 
 def test_exa_error_writes_file_with_status(tmp_path, monkeypatch):
     """An Exa exception becomes data in the file rather than a swallowed error."""
