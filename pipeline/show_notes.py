@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path
 
-from pipeline.things_happen_collector import exa_text_if_hit
+from pipeline.exa_client import exa_file_path, exa_text_if_hit
 
 
 logger = logging.getLogger(__name__)
@@ -78,9 +78,8 @@ def _find_article_file(headline: str, source: str, work_dir: Path) -> Path | Non
         return routed_file
 
     # Exa enrichment
-    exa_file = work_dir / "enrichment" / "exa" / f"{slug}.md"
-    if exa_text_if_hit(exa_file):
-        return exa_file
+    if exa_text_if_hit(work_dir, slug):
+        return exa_file_path(work_dir, slug)
 
     return None
 

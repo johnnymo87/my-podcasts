@@ -6,7 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pipeline.article_fetcher import fetch_all_articles
-from pipeline.exa_client import search_related_status
+from pipeline.exa_client import exa_file_path, search_related_status
 from pipeline.freshness import (
     annotate_headlines,
     classify_headlines,
@@ -25,27 +25,6 @@ def _slugify(text: str) -> str:
     while "--" in safe:
         safe = safe.replace("--", "-")
     return safe.strip("-")[:50]
-
-
-def exa_text_if_hit(exa_file: Path) -> str:
-    """Exa file contents, but only when the search actually returned results.
-
-    Task 1.2 writes this file unconditionally so that misses are observable.
-    That makes gating the readers mandatory: a `Result: empty` stub is not
-    article text and must never reach the writer or the show notes.
-    """
-    if not exa_file.exists():
-        return ""
-    text = exa_file.read_text(encoding="utf-8")
-    for line in text.split("\n")[:5]:
-        if line.startswith("Result: "):
-            return text if line[8:].strip() == "hit" else ""
-    # No Result header: an FP-written file. This branch is PERMANENT, not a
-    # migration shim -- show_notes._find_article_file is shared with the FP
-    # path, whose collector (fp_collector.py:396-398) writes no header and is
-    # deliberately not being changed. Deleting this branch as "legacy" would
-    # silently break FP show notes.
-    return text
 
 
 def collect_all_artifacts(
@@ -323,7 +302,7 @@ def collect_all_artifacts(
         )
         for exa_r in exa_results:
             out += f"## [{exa_r.title}]({exa_r.url})\n{exa_r.text}\n\n"
-        (exa_dir / f"{slug}.md").write_text(out, encoding="utf-8")
+        exa_file_path(work_dir, slug).write_text(out, encoding="utf-8")
 
     # Write sentinel — collection completed successfully
     sentinel = {

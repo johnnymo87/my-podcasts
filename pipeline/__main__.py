@@ -33,7 +33,8 @@ def _find_rundown_article_text(directive: Any, work_dir: Path) -> str:
     """
     import json as _json
 
-    from pipeline.things_happen_collector import _slugify, exa_text_if_hit
+    from pipeline.exa_client import exa_text_if_hit
+    from pipeline.things_happen_collector import _slugify
 
     headline = directive.headline
     slug = _slugify(headline)
@@ -98,7 +99,7 @@ def _find_rundown_article_text(directive: Any, work_dir: Path) -> str:
             return match.read_text(encoding="utf-8")
 
     # Exa enrichment
-    exa_text = exa_text_if_hit(work_dir / "enrichment" / "exa" / f"{slug}.md")
+    exa_text = exa_text_if_hit(work_dir, slug)
     if exa_text:
         return exa_text
 
