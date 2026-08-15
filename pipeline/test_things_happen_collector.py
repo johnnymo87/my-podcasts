@@ -23,7 +23,7 @@ def test_slugify() -> None:
 @patch("pipeline.things_happen_collector.fetch_all_articles")
 @patch("pipeline.things_happen_collector.resolve_redirect_url")
 @patch("pipeline.things_happen_collector.generate_rundown_research_plan")
-@patch("pipeline.things_happen_collector.search_related")
+@patch("pipeline.things_happen_collector.search_related_status")
 @patch("pipeline.things_happen_collector.sync_zvi_cache")
 def test_collect_all_artifacts(
     mock_zvi,
@@ -59,7 +59,10 @@ def test_collect_all_artifacts(
         ],
     )
 
-    mock_exa.return_value = [ExaResult(title="Exa", url="http://exa", text="Exa text")]
+    mock_exa.return_value = (
+        [ExaResult(title="Exa", url="http://exa", text="Exa text")],
+        "hit",
+    )
 
     # Setup fake context scripts
     scripts_dir = tmp_path / "scripts" / "the-rundown"
@@ -148,7 +151,8 @@ def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
         "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
     )
     monkeypatch.setattr(
-        "pipeline.things_happen_collector.search_related", lambda *a, **kw: []
+        "pipeline.things_happen_collector.search_related_status",
+        lambda *a, **kw: ([], "empty"),
     )
 
     # Editor returns one FP link and one non-FP link
@@ -685,6 +689,219 @@ def test_semafor_routing_header_preferred_over_category(tmp_path, monkeypatch):
     assert "Gulf Story With TH Routing" in content
     assert "FP Only Article" not in content
     assert "Skipped Article" not in content
+
+
+def _run_collector_with_exa(
+    tmp_path,
+    monkeypatch,
+    exa_status: str = "hit",
+    headline: str = "Paywalled Story",
+):
+    """Run the collector with search_related_status stubbed to a given outcome.
+
+    Mirrors the monkeypatch style already used in this file for
+    fetch_all_articles / resolve_redirect_url / generate_rundown_research_plan
+    / sync_zvi_cache. Produces a plan with exactly one non-FP directive that
+    needs Exa. Returns work_dir.
+    """
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(
+            themes=["Tech"],
+            directives=[
+                RundownStoryDirective(
+                    headline=headline,
+                    source="levine",
+                    priority=1,
+                    theme="Tech",
+                    needs_exa=True,
+                    exa_query="exa test query",
+                    is_foreign_policy=False,
+                    fp_query="",
+                    include_in_episode=True,
+                )
+            ],
+        ),
+    )
+
+    exa_results = (
+        [ExaResult(title="Exa", url="http://exa", text="Exa text")]
+        if exa_status == "hit"
+        else []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.search_related_status",
+        lambda *a, **kw: (exa_results, exa_status),
+    )
+
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    zvi_cache = tmp_path / "zvi-cache"
+    zvi_cache.mkdir()
+    work_dir = tmp_path / "work"
+
+    collect_all_artifacts(
+        "job-exa-test",
+        work_dir,
+        levine_cache_dir=levine_cache,
+        semafor_cache_dir=semafor_cache,
+        zvi_cache_dir=zvi_cache,
+    )
+    return work_dir
+
+
+def test_exa_hit_writes_bare_slug_filename(tmp_path, monkeypatch):
+    """The write path must use the bare slug the readers look up -- no index prefix."""
+    headline = "Paywalled Story"
+    work_dir = _run_collector_with_exa(
+        tmp_path, monkeypatch, exa_status="hit", headline=headline
+    )
+    expected = work_dir / "enrichment" / "exa" / f"{_slugify(headline)}.md"
+    assert expected.exists()
+    assert "Result: hit" in expected.read_text()
+
+
+def test_exa_empty_writes_file_with_status(tmp_path, monkeypatch):
+    """A miss is still written to disk, so it's observable rather than absent."""
+    headline = "Quiet Story"
+    work_dir = _run_collector_with_exa(
+        tmp_path, monkeypatch, exa_status="empty", headline=headline
+    )
+    expected = work_dir / "enrichment" / "exa" / f"{_slugify(headline)}.md"
+    assert expected.exists()
+    assert "Result: empty" in expected.read_text()
+
+
+def test_exa_error_writes_file_with_status(tmp_path, monkeypatch):
+    """An Exa exception becomes data in the file rather than a swallowed error."""
+    headline = "Broken Story"
+    work_dir = _run_collector_with_exa(
+        tmp_path, monkeypatch, exa_status="error:RuntimeError", headline=headline
+    )
+    expected = work_dir / "enrichment" / "exa" / f"{_slugify(headline)}.md"
+    assert expected.exists()
+    assert "Result: error:RuntimeError" in expected.read_text()
+
+
+def test_exa_reader_e2e_fallback_matches_writer(tmp_path, monkeypatch):
+    """Collector's write path and __main__ reader's lookup path agree.
+
+    Runs the real collector with an Exa hit, then calls the real reader with a
+    directive whose headline is absent from headline_index.json and has no
+    matching article file -- forcing control through the index exact match,
+    the fuzzy word-overlap match, and the legacy slug fallback before it can
+    reach the Exa fallback. This is the test that would have caught the
+    original bug: each half wrote/read `{slug}.md` independently and the two
+    conventions had silently drifted apart.
+    """
+    # A real Levine article populates headline_index.json with genuine
+    # content, so the fuzzy-match loop actually runs (not vacuously, over an
+    # empty index) and must correctly find no overlap with our Exa headline.
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles",
+        lambda *a, **kw: [
+            Article(
+                headline="Local Bakery Wins Award",
+                url="http://resolved.example/bakery",
+                content="A neighborhood bakery took home a regional pastry prize.",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
+    )
+
+    exa_headline = "Quantum Sensor Startup Raises Funding Round"
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(
+            themes=["Tech"],
+            directives=[
+                RundownStoryDirective(
+                    headline=exa_headline,
+                    source="levine",
+                    priority=1,
+                    theme="Tech",
+                    needs_exa=True,
+                    exa_query="quantum sensor startup funding",
+                    is_foreign_policy=False,
+                    fp_query="",
+                    include_in_episode=True,
+                )
+            ],
+        ),
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.search_related_status",
+        lambda *a, **kw: (
+            [
+                ExaResult(
+                    title="Coverage",
+                    url="http://exa/quantum",
+                    text="Exa recovered body text.",
+                )
+            ],
+            "hit",
+        ),
+    )
+
+    _et = ZoneInfo("America/New_York")
+    today = datetime.now(tz=_et).strftime("%Y-%m-%d")
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+    (levine_cache / f"{today}.json").write_text(
+        json.dumps([{"raw_url": "http://raw.example/bakery", "headline": "bakery"}])
+    )
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    zvi_cache = tmp_path / "zvi-cache"
+    zvi_cache.mkdir()
+    work_dir = tmp_path / "work"
+
+    collect_all_artifacts(
+        "job-exa-e2e",
+        work_dir,
+        levine_cache_dir=levine_cache,
+        semafor_cache_dir=semafor_cache,
+        zvi_cache_dir=zvi_cache,
+    )
+
+    # Sanity: the bakery article populated the index; our Exa headline did not.
+    index = json.loads((work_dir / "headline_index.json").read_text())
+    assert exa_headline not in index
+    assert "Local Bakery Wins Award" in index
+
+    from pipeline.__main__ import _find_rundown_article_text
+
+    class FakeDirective:
+        headline = exa_headline
+        source = "levine"
+
+    text = _find_rundown_article_text(FakeDirective(), work_dir)
+    assert "Exa recovered body text." in text
+
+    # Prove this isn't a tautology: remove the Exa file the collector wrote
+    # and confirm the reader now finds nothing -- i.e. the fallback really was
+    # reached rather than short-circuiting on an earlier lookup.
+    exa_file = work_dir / "enrichment" / "exa" / f"{_slugify(exa_headline)}.md"
+    assert exa_file.exists()
+    exa_file.unlink()
+    text_after_removal = _find_rundown_article_text(FakeDirective(), work_dir)
+    assert text_after_removal == ""
 
 
 def test_collector_works_without_levine_links(tmp_path, monkeypatch):

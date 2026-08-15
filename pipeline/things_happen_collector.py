@@ -6,7 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pipeline.article_fetcher import fetch_all_articles
-from pipeline.exa_client import search_related
+from pipeline.exa_client import search_related_status
 from pipeline.freshness import (
     annotate_headlines,
     classify_headlines,
@@ -295,20 +295,29 @@ def collect_all_artifacts(
         routed_path.write_text(json.dumps(routed_data, indent=2), encoding="utf-8")
 
     # Phase 3: Deep Enrichment (non-FP only)
-    for i, directive in enumerate(non_fp_directives):
-        slug = f"{i:02d}-{_slugify(directive.headline)}"
+    # The filename must be the bare slug: __main__._find_rundown_article_text
+    # and show_notes._find_article_file both look up `{slug}.md` exactly. An
+    # index prefix here is how enrichment silently went undelivered for months.
+    exa_outcomes: dict[str, str] = {}
+    for directive in non_fp_directives:
+        if not (directive.needs_exa and directive.exa_query):
+            continue
 
-        # Exa search
-        if directive.needs_exa and directive.exa_query:
-            try:
-                exa_results = search_related(directive.exa_query)
-                if exa_results:
-                    out = f"# Exa Results for: {directive.headline}\nQuery: {directive.exa_query}\n\n"
-                    for exa_r in exa_results:
-                        out += f"## [{exa_r.title}]({exa_r.url})\n{exa_r.text}\n\n"
-                    (exa_dir / f"{slug}.md").write_text(out, encoding="utf-8")
-            except Exception as e:
-                print(f"[collector] Exa search failed for '{directive.exa_query}': {e}")
+        slug = _slugify(directive.headline)
+        exa_results, status = search_related_status(directive.exa_query)
+        exa_outcomes[slug] = status
+
+        # Written unconditionally: an absent file cannot distinguish "we never
+        # asked" from "we asked and got nothing", and that ambiguity is what the
+        # funnel report exists to remove. Readers gate on `Result: hit`.
+        out = (
+            f"# Exa Results for: {directive.headline}\n"
+            f"Result: {status}\n"
+            f"Query: {directive.exa_query}\n\n"
+        )
+        for exa_r in exa_results:
+            out += f"## [{exa_r.title}]({exa_r.url})\n{exa_r.text}\n\n"
+        (exa_dir / f"{slug}.md").write_text(out, encoding="utf-8")
 
     # Write sentinel — collection completed successfully
     sentinel = {
