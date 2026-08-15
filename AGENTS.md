@@ -27,6 +27,10 @@ Quick start and navigation for humans and coding agents.
 
 ## Docs TOC
 
+- **Roadmap (start here for "what's next"): `docs/ROADMAP.md`** — ordered work
+  spine, the per-piece execution discipline, and the facts that must survive a
+  context compaction. Beads hold issue detail; the roadmap holds order and
+  rationale.
 - Domain guides:
   - `pipeline/AGENTS.md`
 - Agent skills:
