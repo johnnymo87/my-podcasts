@@ -197,6 +197,71 @@ def test_extract_orders_by_theme_then_priority(tmp_path) -> None:
     assert titles == ["B1", "B2", "A1"]
 
 
+def test_extract_articles_exa_empty_result_not_used_as_source(tmp_path) -> None:
+    """A `Result: empty` Exa stub must not be surfaced as a show-note source."""
+    plan = {
+        "themes": ["Markets"],
+        "directives": [
+            {
+                "headline": "No Results Story",
+                "source": "levine",
+                "priority": 1,
+                "theme": "Markets",
+                "needs_exa": True,
+                "exa_query": "no results story",
+                "is_foreign_policy": False,
+                "fp_query": "",
+                "include_in_episode": True,
+            },
+        ],
+    }
+    (tmp_path / "plan.json").write_text(json.dumps(plan))
+
+    exa_dir = tmp_path / "enrichment" / "exa"
+    exa_dir.mkdir(parents=True)
+    (exa_dir / "no-results-story.md").write_text(
+        "Result: empty\n\nNo results found for query."
+    )
+
+    result = extract_show_notes_articles(tmp_path)
+
+    assert len(result) == 1
+    assert result[0]["title"] == "No Results Story"
+    assert result[0]["url"] is None
+
+
+def test_extract_articles_exa_headerless_still_used_as_source(tmp_path) -> None:
+    """Headerless Exa files (FP format) are still trusted as a show-note source."""
+    plan = {
+        "themes": ["World"],
+        "directives": [
+            {
+                "headline": "Legacy Format Story",
+                "source": "homepage",
+                "priority": 1,
+                "theme": "World",
+                "needs_exa": True,
+                "exa_query": "legacy format story",
+                "is_foreign_policy": True,
+                "fp_query": "",
+                "include_in_episode": True,
+            },
+        ],
+    }
+    (tmp_path / "plan.json").write_text(json.dumps(plan))
+
+    exa_dir = tmp_path / "enrichment" / "exa"
+    exa_dir.mkdir(parents=True)
+    (exa_dir / "legacy-format-story.md").write_text(
+        "# Legacy Format Story\n\nURL: https://example.com/legacy\n\nArticle text."
+    )
+
+    result = extract_show_notes_articles(tmp_path)
+
+    assert len(result) == 1
+    assert result[0]["url"] == "https://example.com/legacy"
+
+
 # --- filter_show_notes_by_coverage tests ---
 
 

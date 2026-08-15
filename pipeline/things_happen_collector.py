@@ -6,7 +6,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pipeline.article_fetcher import fetch_all_articles
-from pipeline.exa_client import search_related
+from pipeline.exa_client import exa_file_path, search_related_status
 from pipeline.freshness import (
     annotate_headlines,
     classify_headlines,
@@ -80,8 +80,18 @@ def collect_all_artifacts(
     if links_raw:
         for link in links_raw:
             link["resolved_url"] = resolve_redirect_url(link["raw_url"])
+        # Dedup before fetching. The key is available pre-fetch, and every
+        # skipped article we fetch anyway costs an HTTP round trip plus a
+        # one-second politeness delay for a result we then throw away.
+        levine_candidates = len(links_raw)
+        links_raw = [
+            link for link in links_raw if link.get("resolved_url") not in _prior
+        ]
+        levine_deduped = levine_candidates - len(links_raw)
         articles = fetch_all_articles(links_raw, delay_between=1.0)
     else:
+        levine_candidates = 0
+        levine_deduped = 0
         articles = []
 
     headlines_with_snippets = []
@@ -89,10 +99,6 @@ def collect_all_artifacts(
     headline_index: dict[str, str] = {}
 
     for i, art in enumerate(articles):
-        # Skip articles already used in prior episodes
-        if art.url and art.url in _prior:
-            continue
-
         slug = f"{i:02d}-{_slugify(art.headline)}"
         art_path = articles_dir / f"{slug}.md"
 
@@ -274,30 +280,53 @@ def collect_all_artifacts(
         routed_path.write_text(json.dumps(routed_data, indent=2), encoding="utf-8")
 
     # Phase 3: Deep Enrichment (non-FP only)
-    for i, directive in enumerate(non_fp_directives):
-        slug = f"{i:02d}-{_slugify(directive.headline)}"
+    # The filename must be the bare slug: __main__._find_rundown_article_text
+    # and show_notes._find_article_file both look up `{slug}.md` exactly. An
+    # index prefix here is how enrichment silently went undelivered for months.
+    exa_outcomes: dict[str, str] = {}
+    for directive in non_fp_directives:
+        if not (directive.needs_exa and directive.exa_query):
+            continue
 
-        # Exa search
-        if directive.needs_exa and directive.exa_query:
-            try:
-                exa_results = search_related(directive.exa_query)
-                if exa_results:
-                    out = f"# Exa Results for: {directive.headline}\nQuery: {directive.exa_query}\n\n"
-                    for exa_r in exa_results:
-                        out += f"## [{exa_r.title}]({exa_r.url})\n{exa_r.text}\n\n"
-                    (exa_dir / f"{slug}.md").write_text(out, encoding="utf-8")
-            except Exception as e:
-                print(f"[collector] Exa search failed for '{directive.exa_query}': {e}")
+        slug = _slugify(directive.headline)
+        exa_results, status = search_related_status(directive.exa_query)
+        exa_outcomes[slug] = status
+
+        # Written unconditionally: an absent file cannot distinguish "we never
+        # asked" from "we asked and got nothing", and that ambiguity is what the
+        # funnel report exists to remove. Readers gate on `Result: hit`.
+        out = (
+            f"# Exa Results for: {directive.headline}\n"
+            f"Result: {status}\n"
+            f"Query: {directive.exa_query}\n\n"
+        )
+        for exa_r in exa_results:
+            out += f"## [{exa_r.title}]({exa_r.url})\n{exa_r.text}\n\n"
+        exa_file_path(work_dir, slug).write_text(out, encoding="utf-8")
 
     # Write sentinel — collection completed successfully
     sentinel = {
         "job_id": job_id,
         "completed_at": datetime.now(tz=_et).isoformat(),
         "lookback_days": lookback_days,
+        # levine_candidates is every link found in the cache window;
+        # levine_deduped is how many were dropped as already-covered before
+        # any HTTP fetch. levine_articles counts what survived BOTH the dedup
+        # and the fetch, so it is not comparable to sentinels written before
+        # the dedup moved ahead of the fetch.
+        "levine_candidates": levine_candidates,
+        "levine_deduped": levine_deduped,
         "levine_articles": len(articles),
         "directives": len(plan.directives),
         "fp_routed": len(fp_directives),
+        # "enriched" counts every non-FP directive, including ones that never
+        # asked for Exa, so it does not equal the number of Exa files written.
         "enriched": len(non_fp_directives),
+        # Per-slug Exa status, so a miss is legible from the archived sentinel
+        # rather than only from a work dir that /tmp reaps after 10 days. Note
+        # a slug collision overwrites, so this can hold fewer entries than
+        # there were Exa-flagged directives.
+        "exa_outcomes": exa_outcomes,
     }
     (work_dir / "collection_done.json").write_text(
         json.dumps(sentinel, indent=2), encoding="utf-8"
