@@ -372,7 +372,8 @@ def render_report(stats: RunStats) -> str:
     """
     lines: list[str] = []
 
-    header = f"The Rundown {stats.date_str} (job {stats.job_id}) - script stage"
+    date_token = f" {stats.date_str}" if stats.date_str else ""
+    header = f"The Rundown{date_token} (job {stats.job_id}) - script stage"
     duration = _fmt_duration(stats.collect_duration_seconds)
     tail_bits = []
     if duration:
@@ -399,7 +400,8 @@ def render_report(stats: RunStats) -> str:
 
     dedup_total = sum(stats.deduped.values())
     dedup_breakdown = ", ".join(f"{k} {v}" for k, v in stats.deduped.items() if v)
-    dedup_line = f"DEDUP  -{dedup_total}"
+    dedup_sign = "-" if dedup_total else ""
+    dedup_line = f"DEDUP  {dedup_sign}{dedup_total}"
     if dedup_breakdown:
         dedup_line += f" ({dedup_breakdown})"
     lines.append(dedup_line)
@@ -408,9 +410,9 @@ def render_report(stats: RunStats) -> str:
     if fetch_count is None:
         fetch_count = sum(stats.fetch_tiers.values())
     fetch_breakdown = ", ".join(f"{k} {v}" for k, v in stats.fetch_tiers.items() if v)
-    fetch_line = f"FETCH  levine {fetch_count}:"
+    fetch_line = f"FETCH  levine {fetch_count}"
     if fetch_breakdown:
-        fetch_line += f" {fetch_breakdown}"
+        fetch_line += f": {fetch_breakdown}"
     lines.append(fetch_line)
 
     lines.append(

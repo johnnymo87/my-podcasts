@@ -285,6 +285,30 @@ def test_collection_done_json_empty_object_does_not_crash(tmp_path):
     assert len(report) < 4000
 
 
+def test_render_report_cosmetics_empty_date_fetch_and_dedup(tmp_path):
+    """Finding 7: three visible-in-every-manual-report cosmetics.
+
+    - An empty date_str (the CLI's `run-stats` command always passes one)
+      must not leave a doubled space in the header.
+    - An empty FETCH breakdown must not leave a dangling colon.
+    - A zero DEDUP total must not render as "-0".
+    """
+    work_dir = tmp_path / "the-rundown-cosmetics"
+    work_dir.mkdir()
+    # No collection_done.json/tiers.json/writer_inputs.json at all -- every
+    # dict-valued field defaults to its zero shape.
+
+    stats = collect_run_stats(work_dir, job_id="job-cosmetic", date_str="")
+    report = render_report(stats)
+
+    assert "The Rundown (job job-cosmetic) - script stage" in report
+    assert "The Rundown  (job" not in report
+    assert "FETCH  levine 0\n" in report
+    assert "FETCH  levine 0:" not in report
+    assert "DEDUP  0" in report
+    assert "DEDUP  -0" not in report
+
+
 def test_missing_plan_json_yields_partial_stats(tmp_path):
     work_dir = tmp_path / "the-rundown-no-plan"
     work_dir.mkdir()
@@ -355,7 +379,7 @@ def test_missing_tiers_json_lands_in_unknown_bucket(tmp_path):
     assert stats.writer_with_text == 1
 
     report = render_report(stats)
-    assert "FETCH  levine 5: unknown 5" in report or "unknown 5" in report
+    assert "FETCH  levine 5: unknown 5" in report
 
 
 def test_work_dir_does_not_exist(tmp_path):
