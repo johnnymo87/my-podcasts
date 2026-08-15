@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -164,6 +165,65 @@ def _stale_daily_jobs(store: StateStore, feed_slug: str, today: str) -> list[dic
             if row["date_str"] < today
         )
     return sorted(stale, key=lambda r: r["date_str"])
+
+
+_DAILY_FEED_LABELS: dict[str, str] = {
+    "the-rundown": "The Rundown",
+    "fp-digest": "FP Digest",
+}
+
+
+def _enqueue_daily_job(store: StateStore, feed_slug: str, date_str: str) -> str | None:
+    """Insert a pending daily job and report the outcome. Returns the job id.
+
+    Returns None when a row for *date_str* already exists, which is a normal,
+    successful outcome: date_str is UNIQUE, so a Persistent=true timer catch-up
+    fire is idempotent for free.
+    """
+    label = _DAILY_FEED_LABELS.get(feed_slug)
+    if label is None:
+        raise ValueError(f"Unknown feed_slug: {feed_slug!r}")
+
+    # Reject a malformed date here rather than letting the consumer retry a
+    # garbage row for ~12h. The old inline CLI failed loudly in the operator's
+    # terminal; enqueue-only would otherwise make the same typo silent.
+    datetime.strptime(date_str, "%Y-%m-%d")
+
+    if feed_slug == "the-rundown":
+        job_id = store.insert_pending_the_rundown(date_str)
+    else:
+        job_id = store.insert_pending_fp_digest(date_str)
+
+    if job_id is not None:
+        click.echo(f"Queued {label} job {job_id} for {date_str}.")
+        click.echo("The consumer will pick it up within ~10s. Follow it with:")
+        click.echo("  journalctl -fu my-podcasts-consumer")
+        return job_id
+
+    # A row already exists. Report its ACTUAL status: 'errored' rows are NOT
+    # eligible for execution (list_due_* filters status='pending'), so a bare
+    # "already exists" would leave the operator believing work was queued when
+    # nothing will ever run.
+    existing = next(
+        (
+            row
+            for status in ("pending", "errored", "completed")
+            for row in store.list_daily_jobs(feed_slug, status)
+            if row["date_str"] == date_str
+        ),
+        None,
+    )
+    status = existing["status"] if existing else "unknown"
+    click.echo(f"{label} job already exists for {date_str} (status={status}).")
+    if status == "errored":
+        click.echo("It is errored, so the consumer will NOT run it. Reset it with:")
+        click.echo(
+            f"  uv run python -m pipeline jobs reset --feed {feed_slug} "
+            f"--date {date_str}"
+        )
+    elif status == "completed":
+        click.echo("Already published; nothing to do.")
+    return None
 
 
 # ---------------------------------------------------------------------------
