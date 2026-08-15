@@ -88,7 +88,7 @@ def classify_semafor_articles(
     if not articles:
         return {}
 
-    fallback = {i: "both" for i in range(len(articles))}
+    fallback = dict.fromkeys(range(len(articles)), "both")
 
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:

@@ -57,7 +57,12 @@ def test_build_prompt_without_context():
 @patch("pipeline.rundown_writer.send_prompt_async")
 @patch("pipeline.rundown_writer.create_session")
 def test_generate_script(
-    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete,
+    mock_create,
+    mock_send,
+    mock_wait,
+    mock_messages,
+    mock_text,
+    mock_delete,
     tmp_path,
 ):
     mock_create.return_value = "ses_123"
@@ -97,7 +102,7 @@ def test_generate_script_timeout_raises(
             date_str="2026-03-10",
             work_dir=tmp_path,
         )
-        assert False, "Should have raised RuntimeError"
+        raise AssertionError("Should have raised RuntimeError")
     except RuntimeError as e:
         assert "900 seconds" in str(e)
 
@@ -111,7 +116,12 @@ def test_generate_script_timeout_raises(
 @patch("pipeline.rundown_writer.send_prompt_async")
 @patch("pipeline.rundown_writer.create_session")
 def test_generate_script_extracts_script_tags(
-    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete,
+    mock_create,
+    mock_send,
+    mock_wait,
+    mock_messages,
+    mock_text,
+    mock_delete,
     tmp_path,
 ):
     mock_create.return_value = "ses_456"
@@ -139,7 +149,12 @@ def test_generate_script_extracts_script_tags(
 @patch("pipeline.rundown_writer.send_prompt_async")
 @patch("pipeline.rundown_writer.create_session")
 def test_generate_rundown_script_rejects_empty_output(
-    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete,
+    mock_create,
+    mock_send,
+    mock_wait,
+    mock_messages,
+    mock_text,
+    mock_delete,
     tmp_path,
 ):
     mock_create.return_value = "ses_empty"
@@ -154,7 +169,7 @@ def test_generate_rundown_script_rejects_empty_output(
             date_str="2026-03-10",
             work_dir=tmp_path,
         )
-        assert False, "Should have raised RuntimeError"
+        raise AssertionError("Should have raised RuntimeError")
     except RuntimeError as e:
         assert "empty script" in str(e)
 
@@ -218,7 +233,12 @@ def test_parse_summary_multiline():
 @patch("pipeline.rundown_writer.send_prompt_async")
 @patch("pipeline.rundown_writer.create_session")
 def test_generate_rundown_returns_writer_output_with_summary(
-    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete,
+    mock_create,
+    mock_send,
+    mock_wait,
+    mock_messages,
+    mock_text,
+    mock_delete,
     tmp_path,
 ):
     """generate_rundown_script returns WriterOutput with summary when tags present."""
@@ -299,7 +319,12 @@ def test_writer_output_covered_defaults_empty():
 @patch("pipeline.rundown_writer.send_prompt_async")
 @patch("pipeline.rundown_writer.create_session")
 def test_generate_script_parses_covered_tags(
-    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete,
+    mock_create,
+    mock_send,
+    mock_wait,
+    mock_messages,
+    mock_text,
+    mock_delete,
     tmp_path,
 ):
     """generate_rundown_script populates covered_headlines from <covered> tags."""
@@ -329,15 +354,11 @@ def test_generate_script_parses_covered_tags(
 
 def test_generate_script_prompt_asks_for_covered_tags():
     """The Rundown prompt instructs the writer to emit <covered> tags."""
-    prompt = build_rundown_prompt(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article"]},
-        date_str="2026-03-12",
-    )
     # The instruction is prepended in generate_rundown_script, not in the prompt
     # itself. Check the instruction text instead.
-    from pipeline.rundown_writer import generate_rundown_script
     import inspect
+
+    from pipeline.rundown_writer import generate_rundown_script
 
     source = inspect.getsource(generate_rundown_script)
     assert "<covered>" in source
@@ -345,10 +366,11 @@ def test_generate_script_prompt_asks_for_covered_tags():
 
 def test_rundown_editor_uses_coverage_ledger_over_scripts(monkeypatch):
     """When coverage_ledger is provided, scripts are not included in prompt."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
+
     from pipeline.things_happen_editor import (
-        generate_rundown_research_plan,
         RundownResearchPlan,
+        generate_rundown_research_plan,
     )
 
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
@@ -381,7 +403,12 @@ def test_rundown_editor_uses_coverage_ledger_over_scripts(monkeypatch):
 @patch("pipeline.rundown_writer.send_prompt_async")
 @patch("pipeline.rundown_writer.create_session")
 def test_persists_raw_output_before_parsing(
-    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete,
+    mock_create,
+    mock_send,
+    mock_wait,
+    mock_messages,
+    mock_text,
+    mock_delete,
     tmp_path,
 ):
     """The raw assistant text is written to raw_writer_output.txt the moment
@@ -416,7 +443,12 @@ def test_persists_raw_output_before_parsing(
 @patch("pipeline.rundown_writer.send_prompt_async")
 @patch("pipeline.rundown_writer.create_session")
 def test_reuses_persisted_output_when_present(
-    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete,
+    mock_create,
+    mock_send,
+    mock_wait,
+    mock_messages,
+    mock_text,
+    mock_delete,
     tmp_path,
 ):
     """If raw_writer_output.txt already exists, the model is not called."""
@@ -449,7 +481,12 @@ def test_reuses_persisted_output_when_present(
 @patch("pipeline.rundown_writer.send_prompt_async")
 @patch("pipeline.rundown_writer.create_session")
 def test_deletes_persisted_output_on_parse_failure(
-    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete,
+    mock_create,
+    mock_send,
+    mock_wait,
+    mock_messages,
+    mock_text,
+    mock_delete,
     tmp_path,
 ):
     """If a persisted file parses to an empty script, the file is deleted
@@ -504,10 +541,11 @@ def test_does_not_persist_when_wait_for_idle_times_out(
 
 def test_rundown_editor_falls_back_to_scripts(monkeypatch):
     """When no coverage_ledger, context_scripts are used."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
+
     from pipeline.things_happen_editor import (
-        generate_rundown_research_plan,
         RundownResearchPlan,
+        generate_rundown_research_plan,
     )
 
     monkeypatch.setenv("GEMINI_API_KEY", "fake")

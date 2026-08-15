@@ -129,7 +129,8 @@ def test_mark_the_rundown_failed_marks_job_errored_after_retry_budget(tmp_path):
     assert result.status == "errored"
     assert store.list_due_the_rundown() == []
     row = store._conn.execute(
-        "SELECT status, failure_count, last_error FROM pending_the_rundown WHERE id = ?",
+        "SELECT status, failure_count, last_error "
+        "FROM pending_the_rundown WHERE id = ?",
         (job_id,),
     ).fetchone()
     assert row["status"] == "errored"
@@ -139,7 +140,8 @@ def test_mark_the_rundown_failed_marks_job_errored_after_retry_budget(tmp_path):
 
 
 def test_list_daily_jobs_by_feed_and_status_the_rundown(tmp_path) -> None:
-    """list_daily_jobs returns errored the-rundown jobs filtered by feed_slug and status."""
+    """list_daily_jobs returns errored the-rundown jobs filtered by feed_slug and
+    status."""
     store = StateStore(tmp_path / "test.db")
     job_id = store.insert_pending_the_rundown(date_str="2026-03-17")
     assert job_id is not None
@@ -156,7 +158,8 @@ def test_list_daily_jobs_by_feed_and_status_the_rundown(tmp_path) -> None:
 
 
 def test_list_daily_jobs_filters_out_other_statuses_the_rundown(tmp_path) -> None:
-    """list_daily_jobs does not return completed the-rundown jobs when filtering for errored."""
+    """list_daily_jobs does not return completed the-rundown jobs when filtering
+    for errored."""
     store = StateStore(tmp_path / "test.db")
     job_id = store.insert_pending_the_rundown(date_str="2026-03-17")
     assert job_id is not None
@@ -168,7 +171,8 @@ def test_list_daily_jobs_filters_out_other_statuses_the_rundown(tmp_path) -> Non
 
 
 def test_reset_the_rundown_job(tmp_path) -> None:
-    """reset_the_rundown_job sets a job back to pending with failure_count=0 and last_error=None."""
+    """reset_the_rundown_job sets a job back to pending with failure_count=0 and
+    last_error=None."""
     store = StateStore(tmp_path / "test.db")
     job_id = store.insert_pending_the_rundown(date_str="2026-03-17")
     assert job_id is not None
@@ -180,7 +184,8 @@ def test_reset_the_rundown_job(tmp_path) -> None:
     store.reset_the_rundown_job(job_id)
 
     row = store._conn.execute(
-        "SELECT status, failure_count, last_error, process_after FROM pending_the_rundown WHERE id = ?",
+        "SELECT status, failure_count, last_error, process_after "
+        "FROM pending_the_rundown WHERE id = ?",
         (job_id,),
     ).fetchone()
     assert row["status"] == "pending"

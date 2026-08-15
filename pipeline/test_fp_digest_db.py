@@ -61,7 +61,8 @@ def test_mark_fp_digest_failed_schedules_retry(tmp_path) -> None:
 
     assert store.list_due_fp_digest() == []
     row = store._conn.execute(
-        "SELECT failure_count, last_error, process_after FROM pending_fp_digest WHERE id = ?",
+        "SELECT failure_count, last_error, process_after "
+        "FROM pending_fp_digest WHERE id = ?",
         (job_id,),
     ).fetchone()
     assert row["failure_count"] == 1
@@ -118,7 +119,8 @@ def test_mark_fp_digest_failed_marks_job_errored_after_retry_budget(tmp_path) ->
 
 
 def test_list_daily_jobs_by_feed_and_status_fp_digest(tmp_path) -> None:
-    """list_daily_jobs returns errored fp-digest jobs filtered by feed_slug and status."""
+    """list_daily_jobs returns errored fp-digest jobs filtered by feed_slug and
+    status."""
     store = StateStore(tmp_path / "test.sqlite3")
     job_id = store.insert_pending_fp_digest(date_str="2026-03-17")
     assert job_id is not None
@@ -135,7 +137,8 @@ def test_list_daily_jobs_by_feed_and_status_fp_digest(tmp_path) -> None:
 
 
 def test_list_daily_jobs_filters_out_other_statuses_fp_digest(tmp_path) -> None:
-    """list_daily_jobs does not return completed fp-digest jobs when filtering for errored."""
+    """list_daily_jobs does not return completed fp-digest jobs when filtering
+    for errored."""
     store = StateStore(tmp_path / "test.sqlite3")
     job_id = store.insert_pending_fp_digest(date_str="2026-03-17")
     assert job_id is not None
@@ -147,7 +150,8 @@ def test_list_daily_jobs_filters_out_other_statuses_fp_digest(tmp_path) -> None:
 
 
 def test_reset_fp_digest_job(tmp_path) -> None:
-    """reset_fp_digest_job sets a job back to pending with failure_count=0 and last_error=None."""
+    """reset_fp_digest_job sets a job back to pending with failure_count=0 and
+    last_error=None."""
     store = StateStore(tmp_path / "test.sqlite3")
     job_id = store.insert_pending_fp_digest(date_str="2026-03-17")
     assert job_id is not None
@@ -159,7 +163,8 @@ def test_reset_fp_digest_job(tmp_path) -> None:
     store.reset_fp_digest_job(job_id)
 
     row = store._conn.execute(
-        "SELECT status, failure_count, last_error, process_after FROM pending_fp_digest WHERE id = ?",
+        "SELECT status, failure_count, last_error, process_after "
+        "FROM pending_fp_digest WHERE id = ?",
         (job_id,),
     ).fetchone()
     assert row["status"] == "pending"

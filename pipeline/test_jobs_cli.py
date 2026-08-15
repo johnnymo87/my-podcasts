@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 from click.testing import CliRunner
 
 from pipeline.__main__ import cli
@@ -86,7 +85,8 @@ def test_jobs_list_no_jobs_outputs_nothing(tmp_path: Path) -> None:
 
 
 def test_jobs_reset_by_feed_and_date_resets_to_pending(tmp_path: Path) -> None:
-    """jobs reset --feed fp-digest --date 2026-03-17 resets the errored job to pending."""
+    """jobs reset --feed fp-digest --date 2026-03-17 resets the errored job to
+    pending."""
     store = StateStore(tmp_path / "state.sqlite3")
     fp_id = store.insert_pending_fp_digest("2026-03-17")
     for _ in range(51):
@@ -234,7 +234,8 @@ def test_jobs_reset_requires_date_or_job_id(tmp_path: Path) -> None:
 
 
 def test_jobs_reset_nonexistent_job_id_emits_clean_error(tmp_path: Path) -> None:
-    """jobs reset --job-id <bad-id> prints a clean error and exits nonzero (no traceback)."""
+    """jobs reset --job-id <bad-id> prints a clean error and exits nonzero (no
+    traceback)."""
     with patch(
         "pipeline.__main__._default_state_db_path",
         return_value=tmp_path / "state.sqlite3",

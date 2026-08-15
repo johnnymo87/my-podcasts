@@ -72,6 +72,10 @@ ignore = [
 "pipeline/test_zvi_cache.py" = ["E501"] # Allow long lines in test data strings
 "pipeline/test_things_happen_collector.py" = ["E501"] # Allow long lines in test data strings
 "pipeline/test_db_lookback.py" = ["E501"] # Allow long lines in test data strings
+"pipeline/things_happen_editor.py" = ["E501"] # Allow long lines in pydantic Field description strings sent to the LLM as part of the structured-output schema
+"pipeline/test_things_happen_processor.py" = ["E501"] # Allow long lines in HTML fixtures
+"pipeline/test_things_happen_extractor.py" = ["E501"] # Allow long lines in HTML fixtures
+"pipeline/test_show_notes_db.py" = ["E501"] # Allow long lines in JSON fixture strings
 
 [tool.ruff.lint.isort]
 # Configure isort to be compatible with black formatting

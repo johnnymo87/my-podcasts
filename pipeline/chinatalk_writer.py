@@ -82,8 +82,7 @@ def generate_report(*, body: str, subject: str) -> ReportOutput:
         "Read the following transcript and produce the spoken briefing. "
         "First write a 2-3 sentence summary wrapped in <summary>...</summary> "
         "tags. Then write the full spoken script wrapped in "
-        "<script>...</script> tags. Output nothing outside these tags.\n\n"
-        + prompt
+        "<script>...</script> tags. Output nothing outside these tags.\n\n" + prompt
     )
 
     session_id = create_session()

@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 _BLOG_POLL_INTERVAL = 6 * 3600  # 6 hours
 _last_blog_poll = 0.0
 
+RUNDOWN_SCRIPT_ARCHIVE_DIR = Path("/persist/my-podcasts/scripts/the-rundown")
+FP_DIGEST_SCRIPT_ARCHIVE_DIR = Path("/persist/my-podcasts/scripts/fp-digest")
+
 
 def _compute_lookback(
     store: StateStore, feed_slug: str, default: int = 2, cap: int = 14
@@ -278,12 +281,14 @@ def consume_forever(
                             dry_run = os.environ.get("THE_RUNDOWN_DRY_RUN", "").strip()
                             if dry_run:
                                 print(
-                                    f"DRY RUN: skipping TTS for {job['id']} ({job['date_str']}). Script at: {script_file}"
+                                    f"DRY RUN: skipping TTS for {job['id']} "
+                                    f"({job['date_str']}). Script at: {script_file}"
                                 )
                                 store.mark_the_rundown_completed(job["id"])
                             else:
                                 print(
-                                    f"Processing Rundown job with script: {job['id']} ({job['date_str']})"
+                                    f"Processing Rundown job with script: "
+                                    f"{job['id']} ({job['date_str']})"
                                 )
                                 summary_text = None
                                 summary_path = work_dir / "summary.txt"
@@ -303,9 +308,7 @@ def consume_forever(
                                 print(f"Completed Rundown job: {job['id']}")
 
                             # Copy to persistent storage
-                            persist_dir = Path(
-                                "/persist/my-podcasts/scripts/the-rundown"
-                            )
+                            persist_dir = RUNDOWN_SCRIPT_ARCHIVE_DIR
                             persist_dir.mkdir(parents=True, exist_ok=True)
                             persist_path = persist_dir / f"{job['date_str']}.txt"
                             shutil.copy(script_file, persist_path)
@@ -413,7 +416,8 @@ def consume_forever(
                     if retry.exhausted:
                         print(
                             f"Failed Rundown job {job['id']}: {exc} "
-                            f"(retry budget exhausted after #{retry.failure_count}; marked errored)"
+                            f"(retry budget exhausted after #{retry.failure_count}; "
+                            f"marked errored)"
                         )
                     else:
                         print(
@@ -459,7 +463,7 @@ def consume_forever(
                             )
                             print(f"Completed FP digest: {job['id']}")
                         # Copy to persistent storage
-                        persist_dir = Path("/persist/my-podcasts/scripts/fp-digest")
+                        persist_dir = FP_DIGEST_SCRIPT_ARCHIVE_DIR
                         persist_dir.mkdir(parents=True, exist_ok=True)
                         shutil.copy(script_file, persist_dir / f"{job['date_str']}.txt")
                     else:
@@ -557,7 +561,8 @@ def consume_forever(
                     if retry.exhausted:
                         print(
                             f"Failed FP digest job {job['id']}: {exc} "
-                            f"(retry budget exhausted after #{retry.failure_count}; marked errored)"
+                            f"(retry budget exhausted after #{retry.failure_count}; "
+                            f"marked errored)"
                         )
                     else:
                         print(

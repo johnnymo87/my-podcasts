@@ -1,15 +1,15 @@
 import subprocess
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from pipeline.blog_poller import (
     BlogPost,
-    parse_blog_feed,
     adapt_for_audio,
-    process_blog_post,
+    parse_blog_feed,
     poll_all_blogs,
+    process_blog_post,
 )
-from pipeline.blog_sources import BLOG_SOURCES, BlogSource
+from pipeline.blog_sources import BLOG_SOURCES
 from pipeline.db import StateStore
 
 

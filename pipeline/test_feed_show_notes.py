@@ -8,7 +8,8 @@ from pipeline.feed import generate_feed_xml
 
 
 def test_feed_includes_show_notes(tmp_path, monkeypatch) -> None:
-    """Episodes with summary and articles_json produce description and content:encoded."""
+    """Episodes with summary and articles_json produce description and
+    content:encoded."""
     monkeypatch.setenv("PODCAST_BASE_URL", "https://podcast.test")
     store = StateStore(tmp_path / "test.sqlite3")
 

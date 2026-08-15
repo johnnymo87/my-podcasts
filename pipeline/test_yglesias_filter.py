@@ -46,11 +46,7 @@ def test_single_speaker_many_turns_is_not_enough():
 
 def test_two_speakers_below_turn_threshold_not_detected():
     # Two distinct speakers but only 4 turns each -> below the 5-turn floor.
-    body = "\n".join(
-        line
-        for i in range(4)
-        for line in (f"Alice: {i}", f"Bob: {i}")
-    )
+    body = "\n".join(line for i in range(4) for line in (f"Alice: {i}", f"Bob: {i}"))
     assert is_argument_transcript(body) is False
 
 

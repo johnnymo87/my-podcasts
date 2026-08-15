@@ -209,6 +209,9 @@ def test_publish_script_end_to_end(tmp_path, monkeypatch) -> None:
         "pipeline.script_processor.regenerate_and_upload_feed",
         lambda s, r: feed_regen_called.append(True),
     )
+    monkeypatch.setattr(
+        "pipeline.script_processor.SCRIPT_ARCHIVE_ROOT", tmp_path / "persisted-scripts"
+    )
 
     result = publish_script(
         script_file=script_file,
@@ -272,6 +275,9 @@ def test_publish_script_without_show_notes(tmp_path, monkeypatch) -> None:
         "pipeline.script_processor.regenerate_and_upload_feed",
         lambda s, r: None,
     )
+    monkeypatch.setattr(
+        "pipeline.script_processor.SCRIPT_ARCHIVE_ROOT", tmp_path / "persisted-scripts"
+    )
 
     publish_script(
         script_file=script_file,
@@ -321,6 +327,9 @@ def test_publish_script_tts_receives_stripped_text(tmp_path, monkeypatch) -> Non
         "pipeline.script_processor.regenerate_and_upload_feed",
         lambda s, r: None,
     )
+    monkeypatch.setattr(
+        "pipeline.script_processor.SCRIPT_ARCHIVE_ROOT", tmp_path / "persisted-scripts"
+    )
 
     publish_script(
         script_file=script_file,
@@ -342,7 +351,8 @@ def test_publish_script_tts_receives_stripped_text(tmp_path, monkeypatch) -> Non
 
 
 def test_publish_script_archives_source_files(tmp_path, monkeypatch) -> None:
-    """Successful publish with show notes archives both script and show-notes markdown."""
+    """Successful publish with show notes archives both script and show-notes
+    markdown."""
     store = StateStore(tmp_path / "test.sqlite3")
     r2_client = MagicMock()
     archive_root = tmp_path / "persisted-scripts"
@@ -391,7 +401,8 @@ def test_publish_script_archives_source_files(tmp_path, monkeypatch) -> None:
 def test_publish_script_archives_script_without_show_notes(
     tmp_path, monkeypatch
 ) -> None:
-    """Successful publish without show notes archives only the script; no show-notes file is created."""
+    """Successful publish without show notes archives only the script; no
+    show-notes file is created."""
     store = StateStore(tmp_path / "test.sqlite3")
     r2_client = MagicMock()
     archive_root = tmp_path / "persisted-scripts"

@@ -116,15 +116,12 @@ def generate_report(
     *, body: str, subject: str, style: str = "interview", byline: str = ""
 ) -> ReportOutput:
     """Generate a spoken-briefing report on a source document."""
-    prompt = build_report_prompt(
-        body=body, subject=subject, style=style, byline=byline
-    )
+    prompt = build_report_prompt(body=body, subject=subject, style=style, byline=byline)
     instruction = (
         "Read the following source text and produce the spoken briefing. "
         "First write a 2-3 sentence summary wrapped in <summary>...</summary> "
         "tags. Then write the full spoken script wrapped in "
-        "<script>...</script> tags. Output nothing outside these tags.\n\n"
-        + prompt
+        "<script>...</script> tags. Output nothing outside these tags.\n\n" + prompt
     )
 
     session_id = create_session()

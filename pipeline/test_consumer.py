@@ -12,7 +12,8 @@ from pipeline.consumer import (
 
 class _Done(BaseException):
     """Sentinel used to break out of consume_forever's infinite loop in tests.
-    Inherits from BaseException (not Exception) so it bypasses except-Exception clauses."""
+    Inherits from BaseException (not Exception) so it bypasses except-Exception
+    clauses."""
 
 
 def test_consume_forever_retries_on_pull_exception(monkeypatch) -> None:
@@ -55,6 +56,9 @@ def test_consume_forever_processes_rundown_script(monkeypatch, tmp_path) -> None
     """When a due Rundown job exists with a script file, consumer runs TTS + publish."""
     store = MagicMock()
     r2_client = MagicMock()
+
+    archive_dir = tmp_path / "rundown-archive"
+    monkeypatch.setattr("pipeline.consumer.RUNDOWN_SCRIPT_ARCHIVE_DIR", archive_dir)
 
     job_id = "job-rundown-tts-test-11111"
     work_dir = Path(f"/tmp/the-rundown-{job_id}")
@@ -103,9 +107,10 @@ def test_consume_forever_processes_rundown_script(monkeypatch, tmp_path) -> None
 
     # TTS should have been called
     assert process_calls == [1]
-    # Script should have been copied to persist
+    # Script should have been copied to persist (redirected to tmp_path, not /persist)
     assert len(copy_calls) == 1
     assert copy_calls[0][0] == script
+    assert copy_calls[0][1] == archive_dir / "2026-03-02.txt"
 
 
 def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
@@ -114,6 +119,9 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
 
     store = MagicMock()
     r2_client = MagicMock()
+
+    archive_dir = tmp_path / "rundown-archive"
+    monkeypatch.setattr("pipeline.consumer.RUNDOWN_SCRIPT_ARCHIVE_DIR", archive_dir)
 
     # Use a unique job ID, create the work dir and script at /tmp/the-rundown-<id>
     job_id = "job-dry-test-unique-12345"
@@ -167,9 +175,10 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
     assert work_dir.exists()
     # Deferred cleanup should have been invoked
     assert cleanup_calls == [1]
-    # Script should have been copied to persist
+    # Script should have been copied to persist (redirected to tmp_path, not /persist)
     assert len(copy_calls) == 1
     assert copy_calls[0][0] == script
+    assert copy_calls[0][1] == archive_dir / "2026-03-02.txt"
 
 
 def test_consume_forever_cleanup_on_tts_failure(monkeypatch, tmp_path) -> None:

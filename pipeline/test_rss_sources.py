@@ -3,11 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from pipeline.rss_sources import (
     SEMAFOR,
-    RssResult,
     RssSource,
     _keyword_score,
     _parse_entry_datetime,

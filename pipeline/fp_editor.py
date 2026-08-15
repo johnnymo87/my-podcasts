@@ -32,7 +32,7 @@ class FPStoryDirective(BaseModel):
 
 class FPResearchPlan(BaseModel):
     themes: list[str] = Field(
-        description="The dominant themes or story arcs identified across all sources today"
+        description="The dominant themes or story arcs identified across all sources today"  # noqa: E501
     )
     directives: list[FPStoryDirective]
     rotation_override: str | None = None  # Explanation if freshness budget unmet
