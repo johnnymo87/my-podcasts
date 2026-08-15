@@ -27,6 +27,27 @@ def _slugify(text: str) -> str:
     return safe.strip("-")[:50]
 
 
+def exa_text_if_hit(exa_file: Path) -> str:
+    """Exa file contents, but only when the search actually returned results.
+
+    Task 1.2 writes this file unconditionally so that misses are observable.
+    That makes gating the readers mandatory: a `Result: empty` stub is not
+    article text and must never reach the writer or the show notes.
+    """
+    if not exa_file.exists():
+        return ""
+    text = exa_file.read_text(encoding="utf-8")
+    for line in text.split("\n")[:5]:
+        if line.startswith("Result: "):
+            return text if line[8:].strip() == "hit" else ""
+    # No Result header: an FP-written file. This branch is PERMANENT, not a
+    # migration shim -- show_notes._find_article_file is shared with the FP
+    # path, whose collector (fp_collector.py:396-398) writes no header and is
+    # deliberately not being changed. Deleting this branch as "legacy" would
+    # silently break FP show notes.
+    return text
+
+
 def collect_all_artifacts(
     job_id: str,
     work_dir: Path,

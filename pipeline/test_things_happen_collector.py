@@ -572,6 +572,63 @@ def test_find_rundown_article_text_no_false_match(tmp_path):
     assert text == ""
 
 
+def test_find_rundown_article_text_exa_hit(tmp_path):
+    """Exa fallback returns the body when the file reports a hit."""
+    exa_dir = tmp_path / "enrichment" / "exa"
+    exa_dir.mkdir(parents=True)
+    slug = _slugify("Paywalled Story")
+    (exa_dir / f"{slug}.md").write_text(
+        "Result: hit\n\n# Paywalled Story\n\nURL: https://example.com/paywalled\n\n"
+        "Full article text recovered via Exa search."
+    )
+
+    from pipeline.__main__ import _find_rundown_article_text
+
+    class FakeDirective:
+        headline = "Paywalled Story"
+        source = "levine"
+
+    text = _find_rundown_article_text(FakeDirective(), tmp_path)
+    assert "Full article text recovered via Exa search." in text
+
+
+def test_find_rundown_article_text_exa_empty_result_gated(tmp_path):
+    """Exa fallback must not surface a `Result: empty` stub as article text."""
+    exa_dir = tmp_path / "enrichment" / "exa"
+    exa_dir.mkdir(parents=True)
+    slug = _slugify("No Results Story")
+    (exa_dir / f"{slug}.md").write_text("Result: empty\n\nNo results found for query.")
+
+    from pipeline.__main__ import _find_rundown_article_text
+
+    class FakeDirective:
+        headline = "No Results Story"
+        source = "levine"
+
+    text = _find_rundown_article_text(FakeDirective(), tmp_path)
+    assert text == ""
+
+
+def test_find_rundown_article_text_exa_headerless_still_trusted(tmp_path):
+    """Headerless Exa files (FP format) are trusted -- this branch is permanent."""
+    exa_dir = tmp_path / "enrichment" / "exa"
+    exa_dir.mkdir(parents=True)
+    slug = _slugify("Legacy Format Story")
+    (exa_dir / f"{slug}.md").write_text(
+        "# Legacy Format Story\n\nURL: https://example.com/legacy\n\n"
+        "Article text with no Result header at all."
+    )
+
+    from pipeline.__main__ import _find_rundown_article_text
+
+    class FakeDirective:
+        headline = "Legacy Format Story"
+        source = "levine"
+
+    text = _find_rundown_article_text(FakeDirective(), tmp_path)
+    assert "Article text with no Result header at all." in text
+
+
 def test_semafor_routing_header_preferred_over_category(tmp_path, monkeypatch):
     """Routing: header overrides Category-based routing for Semafor articles."""
     monkeypatch.setattr(
