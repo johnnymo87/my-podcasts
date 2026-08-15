@@ -36,13 +36,174 @@ class TestCreateSession:
         result = create_session("/home/dev/projects/my-podcasts")
         assert result == "sess-abc"
         # The session row is created on serve-0 (the OPENCODE_URL fallback).
-        create_url = mock_post.call_args_list[0][0][0]
-        assert create_url == "http://127.0.0.1:4096/session"
-        call_kwargs = mock_post.call_args
+        create_call = mock_post.call_args_list[0]
+        assert create_call[0][0] == "http://127.0.0.1:4096/session"
         assert (
-            call_kwargs[1]["headers"]["x-opencode-directory"]
+            create_call[1]["headers"]["x-opencode-directory"]
             == "/home/dev/projects/my-podcasts"
         )
+
+
+class TestDeclareQuietOrigin:
+    """Every session this module creates is machine-driven, so it declares itself
+    to pigeon as a quiet automated origin. Without this each pipeline run posts a
+    Stop notification AND a mirrored launch prompt to Telegram, and because a
+    forum topic is created by a session's first notification, each run also leaves
+    behind a topic. Sessions a human starts by hand in this directory never call
+    create_session, so they stay audible."""
+
+    @patch("pipeline.opencode_client.requests.get")
+    @patch("pipeline.opencode_client.requests.post")
+    def test_create_session_declares_quiet_origin(
+        self, mock_post: MagicMock, mock_get: MagicMock
+    ) -> None:
+        from pipeline import opencode_client
+
+        opencode_client._session_serve.clear()
+        mock_post.side_effect = [
+            _mock_response(200, {"id": "sess-quiet"}),  # POST /session
+            _mock_response(200, {"ok": True}),  # POST /session-origin
+        ]
+        mock_get.return_value = _mock_response(
+            200, {"apiBase": "http://127.0.0.1:4096"}
+        )
+
+        opencode_client.create_session("/home/dev/projects/my-podcasts")
+
+        declare = mock_post.call_args_list[1]
+        assert declare[0][0] == "http://127.0.0.1:4731/session-origin"
+        assert declare[1]["json"] == {
+            "session_id": "sess-quiet",
+            "origin": "my-podcasts-pipeline",
+            "notify_policy": "none",
+        }
+
+    @patch("pipeline.opencode_client.requests.get")
+    @patch("pipeline.opencode_client.requests.post")
+    def test_declares_before_the_route_lookup(
+        self, mock_post: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """The declaration must land before anything can notify. The mirror of the
+        launch prompt is the first thing that would create a topic, so declaring
+        early -- and certainly before the caller gets the id back to prompt with --
+        is what makes the suppression race-free."""
+        from pipeline import opencode_client
+
+        opencode_client._session_serve.clear()
+        order: list[str] = []
+        mock_post.side_effect = lambda url, **kw: (
+            order.append(url),
+            _mock_response(200, {"id": "sess-order"}),
+        )[1]
+        mock_get.side_effect = lambda url, **kw: (
+            order.append(url),
+            _mock_response(200, {"apiBase": "http://127.0.0.1:4096"}),
+        )[1]
+
+        opencode_client.create_session("/home/dev/projects/my-podcasts")
+
+        assert order[0].endswith("/session")
+        assert order[1].endswith("/session-origin")
+
+    @patch("pipeline.opencode_client.requests.get")
+    @patch("pipeline.opencode_client.requests.post")
+    def test_session_survives_a_failed_declaration(
+        self, mock_post: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """Pigeon being down must never fail a podcast run. The cost of a lost
+        declaration is noise in Telegram, which is recoverable; a raised exception
+        here would kill an episode, which is not."""
+        from pipeline import opencode_client
+
+        opencode_client._session_serve.clear()
+        mock_post.side_effect = [
+            _mock_response(200, {"id": "sess-nopigeon"}),
+            requests.RequestException("pigeon down"),
+        ]
+        mock_get.return_value = _mock_response(
+            200, {"apiBase": "http://127.0.0.1:4096"}
+        )
+
+        assert (
+            opencode_client.create_session("/home/dev/projects/my-podcasts")
+            == "sess-nopigeon"
+        )
+
+    @patch("pipeline.opencode_client.requests.get")
+    @patch("pipeline.opencode_client.requests.post")
+    def test_session_survives_a_rejected_declaration(
+        self, mock_post: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """Same reasoning for a daemon that answers, but with an error: a 401 from
+        an auth-enabled daemon, or a 400 from a daemon too old to know the route."""
+        from pipeline import opencode_client
+
+        opencode_client._session_serve.clear()
+        mock_post.side_effect = [
+            _mock_response(200, {"id": "sess-rejected"}),
+            _mock_response(401, {"error": "unauthorized"}),
+        ]
+        mock_get.return_value = _mock_response(
+            200, {"apiBase": "http://127.0.0.1:4096"}
+        )
+
+        assert (
+            opencode_client.create_session("/home/dev/projects/my-podcasts")
+            == "sess-rejected"
+        )
+
+    @patch("pipeline.opencode_client.requests.get")
+    @patch("pipeline.opencode_client.requests.post")
+    def test_sends_bearer_token_when_one_is_configured(
+        self, mock_post: MagicMock, mock_get: MagicMock
+    ) -> None:
+        """Devbox runs the daemon with auth disabled, but cloudbox does not. A
+        missing header there is a 401, i.e. a silent return of the noise this
+        exists to remove -- so read the token if it is present."""
+        from pipeline import opencode_client
+
+        opencode_client._session_serve.clear()
+        mock_post.side_effect = [
+            _mock_response(200, {"id": "sess-auth"}),
+            _mock_response(200, {"ok": True}),
+        ]
+        mock_get.return_value = _mock_response(
+            200, {"apiBase": "http://127.0.0.1:4096"}
+        )
+
+        with patch.dict("os.environ", {"PIGEON_DAEMON_AUTH_TOKEN": "s3cret"}):
+            opencode_client.create_session("/home/dev/projects/my-podcasts")
+
+        declare = mock_post.call_args_list[1]
+        assert declare[1]["headers"]["Authorization"] == "Bearer s3cret"
+
+    @patch("pipeline.opencode_client.requests.get")
+    @patch("pipeline.opencode_client.requests.post")
+    def test_omits_the_header_when_no_token_is_configured(
+        self, mock_post: MagicMock, mock_get: MagicMock
+    ) -> None:
+        from pipeline import opencode_client
+
+        opencode_client._session_serve.clear()
+        mock_post.side_effect = [
+            _mock_response(200, {"id": "sess-noauth"}),
+            _mock_response(200, {"ok": True}),
+        ]
+        mock_get.return_value = _mock_response(
+            200, {"apiBase": "http://127.0.0.1:4096"}
+        )
+
+        # Point the file fallback at a path that cannot exist, so this test does
+        # not depend on whether the host happens to have the sops secret.
+        with patch.dict(
+            "os.environ",
+            {"PIGEON_DAEMON_AUTH_TOKEN_FILE": "/nonexistent/pigeon-token"},
+            clear=True,
+        ):
+            opencode_client.create_session("/home/dev/projects/my-podcasts")
+
+        declare = mock_post.call_args_list[1]
+        assert "Authorization" not in declare[1]["headers"]
 
     @patch("pipeline.opencode_client.requests.post")
     def test_raises_on_failure(self, mock_post: MagicMock) -> None:
@@ -107,6 +268,7 @@ class TestRouteAfterCreate:
         opencode_client._session_serve.clear()
         mock_post.side_effect = [
             _mock_response(200, {"id": "sess-xyz"}),  # POST /session (create)
+            _mock_response(200, {"ok": True}),  # POST /session-origin (declare)
             _mock_response(204),  # POST prompt_async
         ]
         mock_get.return_value = _mock_response(
@@ -122,7 +284,7 @@ class TestRouteAfterCreate:
         assert mock_get.call_args[1]["params"] == {"session_id": "sess-xyz"}
         # prompt goes to the routed owner, NOT serve-0
         assert (
-            mock_post.call_args_list[1][0][0]
+            mock_post.call_args_list[2][0][0]
             == "http://127.0.0.1:4098/session/sess-xyz/prompt_async"
         )
 
@@ -136,6 +298,7 @@ class TestRouteAfterCreate:
         opencode_client._session_serve.clear()
         mock_post.side_effect = [
             _mock_response(200, {"id": "sess-down"}),
+            _mock_response(200, {"ok": True}),  # POST /session-origin (declare)
             _mock_response(204),
         ]
         mock_get.side_effect = requests.RequestException("pigeon down")
@@ -144,7 +307,7 @@ class TestRouteAfterCreate:
         opencode_client.send_prompt_async(sid, "hi")
 
         assert (
-            mock_post.call_args_list[1][0][0]
+            mock_post.call_args_list[2][0][0]
             == "http://127.0.0.1:4096/session/sess-down/prompt_async"
         )
 

@@ -58,6 +58,78 @@ def _headers(directory: str | None = None) -> dict[str, str]:
     return headers
 
 
+def _daemon_auth_headers() -> dict[str, str]:
+    """Bearer header for pigeon, when the daemon on this host runs with auth on.
+
+    Devbox runs the daemon with auth disabled and so needs nothing here, but a
+    missing header against an auth-enabled daemon is a 401 -- which silently
+    returns the Telegram noise that ``declare_quiet_origin`` exists to remove.
+    Resolution order matches the ``oc-pool-attach`` convention: env var first,
+    then the sops secret file.
+    """
+    token = os.environ.get("PIGEON_DAEMON_AUTH_TOKEN", "").strip()
+    if not token:
+        token_file = os.environ.get(
+            "PIGEON_DAEMON_AUTH_TOKEN_FILE", "/run/secrets/pigeon_daemon_auth_token"
+        )
+        try:
+            token = Path(token_file).read_text().strip()
+        except OSError:
+            token = ""
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def declare_quiet_origin(session_id: str) -> None:
+    """Tell pigeon this session is machine-driven, so it stays out of Telegram.
+
+    Every session this module creates belongs to an unattended pipeline run. Left
+    undeclared, each one posts a Stop notification and a mirror of its own launch
+    prompt; and because a Telegram forum topic is created by a session's FIRST
+    notification, each run also strands a topic behind it. Measured before this
+    existed: 122 sessions in 6 days, one every ~15 minutes, 103 of them dying
+    before opencode could even title them -- so 103 topics all named
+    ``~/projects/my-podcasts``.
+
+    ``notify_policy='none'`` suppresses Stop, Error and Retry, and also gates the
+    prompt mirror and the swarm feed, so nothing reaches Telegram and no topic is
+    born. The single known gap is ``POST /question-asked``, which bypasses the
+    policy matrix entirely; a non-interactive pipeline should never ask.
+
+    Scope is deliberately this function rather than the working directory: a
+    human working by hand in this repo does not go through ``create_session``,
+    and so is unaffected. A directory-wide rule would have silenced them too.
+
+    Best-effort by design. Pigeon being down, rejecting the write, or being too
+    old to know the route must never fail a podcast run -- the cost is noise in
+    Telegram, which is recoverable, whereas a raised exception here loses an
+    episode. Declared quiet also carries a ~2h TTL on pigeon's side, which is
+    ample: these sessions are created, prompted and deleted within minutes.
+    """
+    try:
+        resp = requests.post(
+            f"{PIGEON_DAEMON_URL.rstrip('/')}/session-origin",
+            json={
+                "session_id": session_id,
+                "origin": "my-podcasts-pipeline",
+                "notify_policy": "none",
+            },
+            headers=_daemon_auth_headers(),
+            timeout=3,
+        )
+        if not resp.ok:
+            print(
+                f"warning: pigeon declined to quiet session {session_id} "
+                f"(HTTP {resp.status_code}); its notifications will reach Telegram",
+                flush=True,
+            )
+    except (requests.RequestException, OSError) as exc:
+        print(
+            f"warning: could not reach pigeon to quiet session {session_id} "
+            f"({exc}); its notifications will reach Telegram",
+            flush=True,
+        )
+
+
 def create_session(directory: str | None = None) -> str:
     """Create a new opencode session. Returns the session ID."""
     dir_value = directory or PROJECT_DIR
@@ -68,6 +140,12 @@ def create_session(directory: str | None = None) -> str:
     )
     resp.raise_for_status()
     session_id = resp.json()["id"]
+    # Declare BEFORE anything can notify. pigeon accepts a declaration for a
+    # session it has never seen (the plugin registers it moments later), and the
+    # first thing that would post to Telegram is the mirror of the prompt the
+    # caller sends once this function returns -- so declaring here is what makes
+    # the suppression race-free rather than merely likely.
+    declare_quiet_origin(session_id)
     # Pin the session to its owning serve so every subsequent prompt/poll/delete
     # call below reaches the serve that runs its agent loop (pool-aware routing).
     _session_serve[session_id] = resolve_serve_url(session_id)
