@@ -10,9 +10,16 @@ from pipeline.sources import resolve_document
 
 def _doc(**kw) -> Document:
     base = {
-        "title": "T", "byline": "B", "canonical_url": "https://x/y", "description": "D",
-        "report_text": "R", "read_html": "<p>H</p>", "slug": "s", "style": "interview",
-        "wordcount": 1, "default_category": "Technology",
+        "title": "T",
+        "byline": "B",
+        "canonical_url": "https://x/y",
+        "description": "D",
+        "report_text": "R",
+        "read_html": "<p>H</p>",
+        "slug": "s",
+        "style": "interview",
+        "wordcount": 1,
+        "default_category": "Technology",
     }
     base.update(kw)
     return Document(**base)

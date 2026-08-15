@@ -41,10 +41,7 @@ def _substack_matches(url: str) -> bool:
     # /p/<slug> and /p-<id> are Substack path conventions,
     # present on custom domains too.
     return (
-        "substack.com" in ref
-        or "/p/" in ref
-        or "/p-" in ref
-        or ".dwarkesh.com" in ref
+        "substack.com" in ref or "/p/" in ref or "/p-" in ref or ".dwarkesh.com" in ref
     )
 
 

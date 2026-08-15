@@ -147,7 +147,7 @@ def classify_headlines(
     try:
         client = genai.Client(api_key=api_key)
         response = client.models.generate_content(
-                model="gemini-3.1-flash-lite",
+            model="gemini-3.1-flash-lite",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -220,7 +220,7 @@ def extract_themes_from_scripts(
         try:
             client = genai.Client(api_key=api_key)
             response = client.models.generate_content(
-            model="gemini-3.1-flash-lite",
+                model="gemini-3.1-flash-lite",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",

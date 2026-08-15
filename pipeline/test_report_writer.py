@@ -78,9 +78,7 @@ def test_generate_report_extracts_and_passes_paper_style(
         "<script>The full spoken script.</script>"
     )
 
-    out = generate_report(
-        body="body", subject="Subj", style="paper", byline="Jane Doe"
-    )
+    out = generate_report(body="body", subject="Subj", style="paper", byline="Jane Doe")
 
     assert isinstance(out, ReportOutput)
     assert out.script == "The full spoken script."

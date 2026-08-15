@@ -840,42 +840,67 @@ def publish_script_command(
 @cli.command("episode")
 @click.option("--url", required=True, type=str, help="Source URL or id.")
 @click.option(
-    "--source", default=None, type=click.Choice(["arxiv", "substack"]),
+    "--source",
+    default=None,
+    type=click.Choice(["arxiv", "substack"]),
     help="Force a source adapter (otherwise auto-detected from the URL).",
 )
 @click.option(
-    "--mode", type=click.Choice(["report", "read"]), default="report",
-    show_default=True, help="report: spoken briefing; read: faithful full reading.",
+    "--mode",
+    type=click.Choice(["report", "read"]),
+    default="report",
+    show_default=True,
+    help="report: spoken briefing; read: faithful full reading.",
 )
 @click.option("--feed-slug", "feed_slug", required=True, type=str)
 @click.option(
-    "--style", default=None, type=click.Choice(["interview", "paper"]),
+    "--style",
+    default=None,
+    type=click.Choice(["interview", "paper"]),
     help="Override the report prompt style (defaults to the source's style).",
 )
 @click.option(
-    "--title", default=None, type=str,
+    "--title",
+    default=None,
+    type=str,
     help="Override episode title (report mode prepends 'Report: ' if not set).",
 )
 @click.option("--voice", default="nova", show_default=True, type=str)
 @click.option(
-    "--category", default=None, type=str,
+    "--category",
+    default=None,
+    type=str,
     help="Override iTunes category (defaults to the source's category).",
 )
 @click.option("--date", "date_str", default=None, type=str, help="Date (YYYY-MM-DD).")
 @click.option(
-    "--script-file", "script_file_opt", default=None,
+    "--script-file",
+    "script_file_opt",
+    default=None,
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    help=("Publish this pre-written script verbatim, skipping generation. "
-          "Metadata (title, source link, show notes) still comes from the source."),
+    help=(
+        "Publish this pre-written script verbatim, skipping generation. "
+        "Metadata (title, source link, show notes) still comes from the source."
+    ),
 )
 @click.option(
-    "--dry-run", is_flag=True, default=False,
+    "--dry-run",
+    is_flag=True,
+    default=False,
     help="Generate the script only; skip TTS and publish.",
 )
 def episode_command(
-    url: str, source: str | None, mode: str, feed_slug: str, style: str | None,
-    title: str | None, voice: str, category: str | None, date_str: str | None,
-    script_file_opt: Path | None, dry_run: bool,
+    url: str,
+    source: str | None,
+    mode: str,
+    feed_slug: str,
+    style: str | None,
+    title: str | None,
+    voice: str,
+    category: str | None,
+    date_str: str | None,
+    script_file_opt: Path | None,
+    dry_run: bool,
 ) -> None:
     """Turn a source URL (Substack post, arXiv paper, ...) into a one-off episode."""
     import tempfile
@@ -909,8 +934,10 @@ def episode_command(
         )
     elif mode == "report":
         out = report_writer.generate_report(
-            body=doc.report_text, subject=doc.title,
-            style=style or doc.style, byline=doc.byline,
+            body=doc.report_text,
+            subject=doc.title,
+            style=style or doc.style,
+            byline=doc.byline,
         )
         script_text = out.script
         episode_title = title or f"Report: {doc.title}"
@@ -952,10 +979,16 @@ def episode_command(
             notes_file.write_text(notes_md, encoding="utf-8")
 
             result = script_processor.publish_script(
-                script_file=script_file, title=episode_title, feed_slug=feed_slug,
-                store=store, r2_client=r2_client, show_notes_file=notes_file,
-                voice=voice, category=(category or doc.default_category),
-                date_str=date_str, source_url=doc.canonical_url or None,
+                script_file=script_file,
+                title=episode_title,
+                feed_slug=feed_slug,
+                store=store,
+                r2_client=r2_client,
+                show_notes_file=notes_file,
+                voice=voice,
+                category=(category or doc.default_category),
+                date_str=date_str,
+                source_url=doc.canonical_url or None,
             )
         click.echo(f"Published: {result.r2_key}")
         click.echo(f"Title: {result.title}")

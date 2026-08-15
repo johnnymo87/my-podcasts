@@ -104,7 +104,7 @@ def test_report_text_quality(mock_get):
         "Conclusion",
     ]:
         assert heading in t
-    assert "Definition 1" in t                       # theorem/definition kept
+    assert "Definition 1" in t  # theorem/definition kept
     assert "The relationship between generating processes" in t  # figure caption kept
     assert "Barreto" not in t  # the actual bibliography-exclusion guard
     # tightened so a bib/footnote leak causes a failure
