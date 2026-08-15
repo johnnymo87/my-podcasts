@@ -55,6 +55,7 @@ def collect_all_artifacts(
         d.mkdir(parents=True, exist_ok=True)
 
     _et = ZoneInfo("America/New_York")
+    started_at = datetime.now(tz=_et).isoformat()
     lookback_dates = set()
     for i in range(lookback_days):
         d = (datetime.now(tz=_et) - timedelta(days=i)).strftime("%Y-%m-%d")
@@ -97,6 +98,10 @@ def collect_all_artifacts(
     headlines_with_snippets = []
     # Maps the headline text sent to the editor → file path (relative to work_dir)
     headline_index: dict[str, str] = {}
+    # Fetch outcome per article, kept OUT of the article markdown: article file
+    # contents are passed verbatim into the writer prompt, so a Source-Tier line
+    # inside the file would be read by the model as part of the story.
+    tiers: dict[str, dict] = {}
 
     for i, art in enumerate(articles):
         slug = f"{i:02d}-{_slugify(art.headline)}"
@@ -106,23 +111,33 @@ def collect_all_artifacts(
         content = f"# {art.headline}\n\nURL: {art.url}\n\n{art.content}"
         art_path.write_text(content, encoding="utf-8")
 
+        rel = str(art_path.relative_to(work_dir))
+        tiers[rel] = {
+            "tier": art.source_tier,
+            "extracted_chars": art.extracted_chars,
+            "url": art.url,
+        }
+
         # Build snippet for the Editor AI
         truncated = art.content[:300]
         suffix = "..." if len(art.content) > 300 else ""
         snippet = f"Headline: {art.headline}\nContext: {truncated}{suffix}"
         headlines_with_snippets.append(snippet)
-        headline_index[art.headline] = str(art_path.relative_to(work_dir))
+        headline_index[art.headline] = rel
 
     # Phase 1b: Semafor articles from cache (TH categories)
     semafor_dir = articles_dir / "semafor"
     semafor_dir.mkdir(parents=True, exist_ok=True)
     _semafor_cache = semafor_cache_dir or Path("/persist/my-podcasts/semafor-cache")
+    semafor_candidates = 0
+    semafor_deduped = 0
     if not _semafor_cache.exists():
         print(f"[collector] WARNING: Semafor cache not found at {_semafor_cache}")
     if _semafor_cache.exists():
         for cached in sorted(_semafor_cache.glob("*.md")):
             if not any(cached.name.startswith(d) for d in lookback_dates):
                 continue
+            semafor_candidates += 1
             text = cached.read_text(encoding="utf-8")
             lines = text.split("\n")
             headline = " ".join(lines[0].lstrip("# ").split())
@@ -142,6 +157,7 @@ def collect_all_artifacts(
             if routing not in ("th", "both"):
                 continue
             if url and url in _prior:
+                semafor_deduped += 1
                 continue
             slug = _slugify(headline)
             art_path = semafor_dir / f"{slug}.md"
@@ -169,9 +185,12 @@ def collect_all_artifacts(
     sync_zvi_cache(zvi_cache)
     zvi_dir = articles_dir / "zvi"
     zvi_dir.mkdir(parents=True, exist_ok=True)
+    zvi_candidates = 0
+    zvi_deduped = 0
     for cached_file in zvi_cache.glob("*.md"):
         if not any(cached_file.name.startswith(d) for d in lookback_dates):
             continue
+        zvi_candidates += 1
         # Extract URL and skip if already used in prior episodes
         if _prior:
             zvi_text = cached_file.read_text(encoding="utf-8")
@@ -181,6 +200,7 @@ def collect_all_artifacts(
                     zvi_url = line[5:].strip()
                     break
             if zvi_url and zvi_url in _prior:
+                zvi_deduped += 1
                 continue
         target = zvi_dir / cached_file.name
         if not target.exists():
@@ -216,6 +236,11 @@ def collect_all_artifacts(
     (work_dir / "headline_index.json").write_text(
         json.dumps(headline_index, indent=2), encoding="utf-8"
     )
+
+    # Fetch-tier sidecar. Deliberately not a header inside the article
+    # markdown: article file contents are passed verbatim into the writer
+    # prompt, so an in-content Source-Tier line would be read as story text.
+    (work_dir / "tiers.json").write_text(json.dumps(tiers, indent=2), encoding="utf-8")
 
     # Freshness annotation
     coverage_ledger: str | None = None
@@ -307,21 +332,35 @@ def collect_all_artifacts(
     # Write sentinel — collection completed successfully
     sentinel = {
         "job_id": job_id,
+        "started_at": started_at,
         "completed_at": datetime.now(tz=_et).isoformat(),
         "lookback_days": lookback_days,
-        # levine_candidates is every link found in the cache window;
-        # levine_deduped is how many were dropped as already-covered before
-        # any HTTP fetch. levine_articles counts what survived BOTH the dedup
-        # and the fetch, so it is not comparable to sentinels written before
-        # the dedup moved ahead of the fetch.
-        "levine_candidates": levine_candidates,
-        "levine_deduped": levine_deduped,
+        # levine_articles counts what survived BOTH the dedup and the fetch
+        # below, so it is not comparable to sentinels written before the
+        # dedup moved ahead of the fetch.
         "levine_articles": len(articles),
         "directives": len(plan.directives),
         "fp_routed": len(fp_directives),
         # "enriched" counts every non-FP directive, including ones that never
         # asked for Exa, so it does not equal the number of Exa files written.
         "enriched": len(non_fp_directives),
+        # Candidates skipped are never written to disk and prior_urls comes from
+        # the DB at run time, so these cannot be recovered from the work dir
+        # afterwards. They must be emitted here or not at all.
+        #
+        # For each source, candidates is every item found in the cache window;
+        # deduped is how many were dropped as already-covered before further
+        # work (an HTTP fetch for Levine, a file copy for Semafor/Zvi).
+        "candidates": {
+            "levine": levine_candidates,
+            "semafor": semafor_candidates,
+            "zvi": zvi_candidates,
+        },
+        "deduped": {
+            "levine": levine_deduped,
+            "semafor": semafor_deduped,
+            "zvi": zvi_deduped,
+        },
         # Per-slug Exa status, so a miss is legible from the archived sentinel
         # rather than only from a work dir that /tmp reaps after 10 days. Note
         # a slug collision overwrites, so this can hold fewer entries than

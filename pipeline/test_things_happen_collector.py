@@ -193,8 +193,8 @@ def test_prior_urls_are_not_fetched(tmp_path, monkeypatch):
     # The sentinel records the dedup that just happened, so a later run can be
     # told apart from a run that simply had nothing to collect.
     sentinel = json.loads((work_dir / "collection_done.json").read_text())
-    assert sentinel["levine_candidates"] == 2
-    assert sentinel["levine_deduped"] == 1
+    assert sentinel["candidates"]["levine"] == 2
+    assert sentinel["deduped"]["levine"] == 1
     assert sentinel["levine_articles"] == 1
 
 
@@ -1009,3 +1009,102 @@ def test_collector_works_without_levine_links(tmp_path, monkeypatch):
     )
     assert work_dir.exists()
     assert (work_dir / "articles").exists()
+
+
+def _run_collector_basic(tmp_path, monkeypatch):
+    """Run the collector with a single Levine article carrying tier metadata.
+
+    Mirrors the monkeypatch style already used in this file for
+    fetch_all_articles / resolve_redirect_url / generate_rundown_research_plan
+    / sync_zvi_cache. Returns work_dir.
+    """
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles",
+        lambda *a, **kw: [
+            Article(
+                headline="Test Article",
+                url="http://resolved.com",
+                content="Full text here",
+                source_tier="live",
+                extracted_chars=250,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(
+            themes=["Tech"],
+            directives=[
+                RundownStoryDirective(
+                    headline="Test Article",
+                    source="levine",
+                    priority=1,
+                    theme="Tech",
+                    needs_exa=False,
+                    exa_query="",
+                    is_foreign_policy=False,
+                    fp_query="",
+                    include_in_episode=True,
+                )
+            ],
+        ),
+    )
+
+    today = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+    (levine_cache / f"{today}.json").write_text(
+        json.dumps([{"raw_url": "http://raw.com", "headline_context": "context"}])
+    )
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    zvi_cache = tmp_path / "zvi-cache"
+    zvi_cache.mkdir()
+    work_dir = tmp_path / "work"
+
+    collect_all_artifacts(
+        "job-basic-test",
+        work_dir,
+        levine_cache_dir=levine_cache,
+        semafor_cache_dir=semafor_cache,
+        zvi_cache_dir=zvi_cache,
+    )
+    return work_dir
+
+
+def test_tiers_sidecar_records_tier_and_chars(tmp_path, monkeypatch):
+    work_dir = _run_collector_basic(tmp_path, monkeypatch)
+    tiers = json.loads((work_dir / "tiers.json").read_text(encoding="utf-8"))
+    entry = next(iter(tiers.values()))
+    assert entry["tier"] in {"live", "paywalled", "http_error", "fetch_error"}
+    assert isinstance(entry["extracted_chars"], int)
+    assert entry["url"]
+
+
+def test_tiers_sidecar_is_keyed_by_relative_article_path(tmp_path, monkeypatch):
+    work_dir = _run_collector_basic(tmp_path, monkeypatch)
+    tiers = json.loads((work_dir / "tiers.json").read_text(encoding="utf-8"))
+    for rel_path in tiers:
+        assert (work_dir / rel_path).exists()
+
+
+def test_sentinel_records_per_source_counts(tmp_path, monkeypatch):
+    work_dir = _run_collector_basic(tmp_path, monkeypatch)
+    sentinel = json.loads((work_dir / "collection_done.json").read_text())
+    assert "started_at" in sentinel
+    for key in ("levine", "semafor", "zvi"):
+        assert key in sentinel["candidates"]
+        assert key in sentinel["deduped"]
+
+
+def test_article_files_have_no_tier_header(tmp_path, monkeypatch):
+    """Tier metadata must not leak into the writer prompt."""
+    work_dir = _run_collector_basic(tmp_path, monkeypatch)
+    for f in (work_dir / "articles").glob("*.md"):
+        assert "Source-Tier" not in f.read_text(encoding="utf-8")
