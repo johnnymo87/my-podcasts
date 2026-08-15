@@ -261,11 +261,37 @@ done until CI passes.
 Three defects, one commit each. All are in the Rundown path only; the FP path is
 already correct and must not be touched.
 
+**Land the tasks in the order 1.1 → 1.3 → 1.2 → 1.4, not 1.1 → 1.2 → 1.3.**
+Adversarial review found a real window in the naive order: the consumer service
+runs `uv run python -m pipeline consume` against the **live working tree** with
+`Restart=on-failure`, so any restart between the 1.2 and 1.3 commits would make
+`Result: empty` stubs valid writer input. Gating first costs nothing, because
+`exa_text_if_hit` is backward-compatible by construction — a file with no
+`Result:` header is trusted, and until 1.2 lands no file has one. Also: do not
+restart the consumer mid-piece.
+
+**What Piece 1 does NOT achieve.** After all four tasks, Exa text will still
+almost never reach the writer. The fuzzy match at `__main__.py:74-77` accepts
+`best_score > 0` — a single shared word longer than three characters with any
+indexed file wins — and a Levine stub file is always on disk, so the Exa fallback
+stays unreachable until `my-podcasts-kyk`. Piece 1 delivers observability of Exa
+*status*, not delivery of Exa *content*. Expect the funnel to report Exa hits
+that `writer_inputs.json` shows going unused, and do not read that as the fix
+having failed.
+
+**Every task's verification step must also run `uv run ruff check .`.** CI is
+green as of PR #6 and lint is now blocking; the code snippets below were written
+before that and contain unused imports (`pytest` in Task 1.1, and
+`_find_rundown_article_text` in Task 1.2) which will fail F401. Drop them.
+
 ### Task 1.1: Make Exa report why it returned nothing
 
 **Files:**
 - Modify: `pipeline/exa_client.py`
-- Test: `pipeline/test_exa_client.py` (create if absent)
+- Test: `pipeline/test_exa_client.py` — **this file already exists** (91 lines, 4
+  tests, patching `exa_client.Exa`). APPEND to it; do not overwrite it with the
+  listing below. The existing tests keep passing, since
+  `search_related_status` still references `exa_client.Exa`.
 
 `search_related` swallows every exception and returns `[]`
 (`exa_client.py:48-49`), so a caller cannot distinguish "no results" from "the
@@ -541,13 +567,42 @@ Replace the Phase 3 block (`things_happen_collector.py:276-290`):
 Note `search_related_status` never raises, so the `try/except` is gone; the error
 is now data in the file rather than a print.
 
+Three consequences the first draft of this plan did not acknowledge, all
+accepted deliberately:
+
+- Removing the `try/except` also stops swallowing `write_text` failures. A
+  disk-full `OSError` on the Exa write now fails the whole collection instead of
+  being silently absorbed. That is the right behavior, but it is a change.
+- On a slug collision, `exa_outcomes[slug]` overwrites, so Task 2.2's sentinel
+  can report fewer outcomes than the number of directives flagged for Exa. The
+  old `{i:02d}-` prefix guaranteed uniqueness; last-writer-wins is now by design.
+  Don't be surprised by it in the funnel numbers.
+- After Task 1.4, the sentinel's `levine_articles` changes meaning from
+  pre-dedup to post-dedup count. That is what the funnel wants, but it makes the
+  field non-comparable against sentinels written before this change.
+
+**Step 3b: Migrate the existing mocks — the plan originally got this wrong**
+
+Changing the import at `collector:9` breaks two pre-existing tests that patch the
+old name: `test_things_happen_collector.py:26`
+(`@patch("pipeline.things_happen_collector.search_related")`) and `:151`
+(`monkeypatch.setattr(...search_related...)`). Both will raise `AttributeError`.
+
+Migrate them to patch `search_related_status`, returning tuples
+(`([...], "hit")` / `([], "empty")`). **Do not "fix" this by keeping both
+imports** — the old mocks would then patch a dead name, the real
+`search_related_status` would run, and with no `EXA_API_KEY` in the test
+environment you would get a `no_key` stub and a confusing failure at `:106-107`.
+
 **Step 4: Run tests**
 
 ```bash
 uv run pytest pipeline/test_things_happen_collector.py -v
+uv run ruff check .
 ```
 
-Expected: all pass, including the pre-existing ones.
+Expected: all pass, including the pre-existing ones (after the Step 3b
+migration).
 
 **Step 5: Commit**
 
@@ -638,9 +693,23 @@ def exa_text_if_hit(exa_file: Path) -> str:
     for line in text.split("\n")[:5]:
         if line.startswith("Result: "):
             return text if line[8:].strip() == "hit" else ""
-    # No Result header: a file from before this change. Trust it.
+    # No Result header: an FP-written file. This branch is PERMANENT, not a
+    # migration shim -- show_notes._find_article_file is shared with the FP
+    # path, whose collector (fp_collector.py:396-398) writes no header and is
+    # deliberately not being changed. Deleting this branch as "legacy" would
+    # silently break FP show notes.
     return text
 ```
+
+Add a test for that branch specifically: a headerless, FP-format Exa file must be
+trusted. (Untrustworthy files cannot reach it — old Rundown artifacts carry the
+`{i:02d}-` prefix and fail the exact-path `exists()` check before the header is
+ever parsed.)
+
+Note this means Task 1.3 *does* touch a code path the FP digest depends on,
+contrary to the "FP path must not be touched" rule stated above. It is benign —
+the fallback preserves today's behavior exactly — but it is not nothing, and the
+headerless test is what keeps it that way.
 
 In `pipeline/__main__.py`, replace lines 100-103:
 
@@ -664,10 +733,24 @@ In `pipeline/show_notes.py`, replace lines 77-80:
         return exa_file
 ```
 
+**Step 3b: Add the end-to-end test that actually couples writer to reader**
+
+The per-task tests each hardcode `enrichment/exa/{slug}.md` independently, which
+makes them a *third* copy of the convention rather than a link between the two
+halves — they would not catch the writer and reader drifting apart again. Add one
+test that runs the collector with an Exa hit and then calls the real reader with
+a directive whose headline is absent from `headline_index.json` (so the index and
+article lookups both miss), asserting the Exa body comes back. That is the test
+that would have caught the original bug.
+
+Also avoid `assert not exa_dir_files[0].name[0].isdigit()` as a spec: it
+false-fails on any headline beginning with a digit ("2026 Budget…").
+
 **Step 4: Run tests**
 
 ```bash
 uv run pytest pipeline/ -q
+uv run ruff check .
 ```
 
 Expected: all pass.
