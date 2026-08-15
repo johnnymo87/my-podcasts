@@ -155,7 +155,8 @@ class StateStore:
         }
         if "failure_count" not in existing_cols:
             self._conn.execute(
-                f"ALTER TABLE {table_name} ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0"
+                f"ALTER TABLE {table_name} ADD COLUMN failure_count "
+                "INTEGER NOT NULL DEFAULT 0"
             )
         if "last_error" not in existing_cols:
             self._conn.execute(f"ALTER TABLE {table_name} ADD COLUMN last_error TEXT")
@@ -177,7 +178,8 @@ class StateStore:
         failure_count = int(row["failure_count"] or 0) + 1
         if failure_count >= MAX_RETRY_FAILURES:
             self._conn.execute(
-                f"UPDATE {table_name} SET status = 'errored', failure_count = ?, last_error = ? WHERE id = ?",
+                f"UPDATE {table_name} SET status = 'errored', failure_count = ?, "
+                "last_error = ? WHERE id = ?",
                 (failure_count, error[:500], job_id),
             )
             self._conn.commit()
@@ -189,7 +191,8 @@ class StateStore:
             )
         process_after = self._next_retry_process_after(failure_count)
         self._conn.execute(
-            f"UPDATE {table_name} SET status = 'pending', failure_count = ?, last_error = ?, process_after = ? WHERE id = ?",
+            f"UPDATE {table_name} SET status = 'pending', failure_count = ?, "
+            "last_error = ?, process_after = ? WHERE id = ?",
             (failure_count, error[:500], process_after, job_id),
         )
         self._conn.commit()
@@ -202,7 +205,8 @@ class StateStore:
 
     def _mark_pending_job_completed(self, table_name: str, job_id: str) -> None:
         self._conn.execute(
-            f"UPDATE {table_name} SET status = 'completed', failure_count = 0, last_error = NULL WHERE id = ?",
+            f"UPDATE {table_name} SET status = 'completed', failure_count = 0, "
+            "last_error = NULL WHERE id = ?",
             (job_id,),
         )
         self._conn.commit()
@@ -233,7 +237,8 @@ class StateStore:
 
     def mark_blog_post_processed(self, source_url: str, feed_slug: str) -> None:
         self._conn.execute(
-            "INSERT OR REPLACE INTO processed_blog_posts (source_url, feed_slug) VALUES (?, ?)",
+            "INSERT OR REPLACE INTO processed_blog_posts "
+            "(source_url, feed_slug) VALUES (?, ?)",
             (source_url, feed_slug),
         )
         self._conn.commit()

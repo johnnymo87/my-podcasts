@@ -12,7 +12,8 @@ from pipeline.consumer import (
 
 class _Done(BaseException):
     """Sentinel used to break out of consume_forever's infinite loop in tests.
-    Inherits from BaseException (not Exception) so it bypasses except-Exception clauses."""
+    Inherits from BaseException (not Exception) so it bypasses except-Exception
+    clauses."""
 
 
 def test_consume_forever_retries_on_pull_exception(monkeypatch) -> None:

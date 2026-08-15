@@ -180,7 +180,9 @@ def test_generate_fp_script_rejects_empty_output(monkeypatch, tmp_path) -> None:
                 "parts": [
                     {
                         "type": "text",
-                        "text": "<summary>FP summary.</summary>\n\n<script>   </script>",
+                        "text": (
+                            "<summary>FP summary.</summary>\n\n<script>   </script>"
+                        ),
                     }
                 ],
             }

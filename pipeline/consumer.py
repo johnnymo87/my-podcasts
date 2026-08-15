@@ -278,12 +278,14 @@ def consume_forever(
                             dry_run = os.environ.get("THE_RUNDOWN_DRY_RUN", "").strip()
                             if dry_run:
                                 print(
-                                    f"DRY RUN: skipping TTS for {job['id']} ({job['date_str']}). Script at: {script_file}"
+                                    f"DRY RUN: skipping TTS for {job['id']} "
+                                    f"({job['date_str']}). Script at: {script_file}"
                                 )
                                 store.mark_the_rundown_completed(job["id"])
                             else:
                                 print(
-                                    f"Processing Rundown job with script: {job['id']} ({job['date_str']})"
+                                    f"Processing Rundown job with script: "
+                                    f"{job['id']} ({job['date_str']})"
                                 )
                                 summary_text = None
                                 summary_path = work_dir / "summary.txt"
@@ -413,7 +415,8 @@ def consume_forever(
                     if retry.exhausted:
                         print(
                             f"Failed Rundown job {job['id']}: {exc} "
-                            f"(retry budget exhausted after #{retry.failure_count}; marked errored)"
+                            f"(retry budget exhausted after #{retry.failure_count}; "
+                            f"marked errored)"
                         )
                     else:
                         print(
@@ -557,7 +560,8 @@ def consume_forever(
                     if retry.exhausted:
                         print(
                             f"Failed FP digest job {job['id']}: {exc} "
-                            f"(retry budget exhausted after #{retry.failure_count}; marked errored)"
+                            f"(retry budget exhausted after #{retry.failure_count}; "
+                            f"marked errored)"
                         )
                     else:
                         print(

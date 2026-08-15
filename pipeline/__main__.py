@@ -64,7 +64,7 @@ def _find_rundown_article_text(directive: Any, work_dir: Path) -> str:
             if query_words:
                 best_score = 0
                 best_path: str | None = None
-                for orig_headline, rel_path in index.items():
+                for _orig_headline, rel_path in index.items():
                     fpath = work_dir / rel_path
                     if not fpath.exists():
                         continue
@@ -212,7 +212,7 @@ def jobs_reset_command(
                 raise SystemExit(1)
         except ValueError as exc:
             click.echo(f"Error: {exc}", err=True)
-            raise SystemExit(1)
+            raise SystemExit(1) from exc
 
         click.echo(f"Reset {feed_slug} job {job_id} to pending.")
 

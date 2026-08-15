@@ -97,7 +97,7 @@ def test_generate_script_timeout_raises(
             date_str="2026-03-10",
             work_dir=tmp_path,
         )
-        assert False, "Should have raised RuntimeError"
+        raise AssertionError("Should have raised RuntimeError")
     except RuntimeError as e:
         assert "900 seconds" in str(e)
 
@@ -154,7 +154,7 @@ def test_generate_rundown_script_rejects_empty_output(
             date_str="2026-03-10",
             work_dir=tmp_path,
         )
-        assert False, "Should have raised RuntimeError"
+        raise AssertionError("Should have raised RuntimeError")
     except RuntimeError as e:
         assert "empty script" in str(e)
 
@@ -329,11 +329,6 @@ def test_generate_script_parses_covered_tags(
 
 def test_generate_script_prompt_asks_for_covered_tags():
     """The Rundown prompt instructs the writer to emit <covered> tags."""
-    prompt = build_rundown_prompt(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article"]},
-        date_str="2026-03-12",
-    )
     # The instruction is prepended in generate_rundown_script, not in the prompt
     # itself. Check the instruction text instead.
     import inspect

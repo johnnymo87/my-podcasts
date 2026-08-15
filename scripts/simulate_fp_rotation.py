@@ -97,7 +97,7 @@ def build_prior_urls(
     being offered to the editor across multiple days.
     """
     urls: set[str] = set()
-    for date_str, work_dir in work_dirs.items():
+    for _date_str, work_dir in work_dirs.items():
         articles_dir = work_dir / "articles"
         if not articles_dir.exists():
             continue
