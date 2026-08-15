@@ -101,8 +101,18 @@ def collect_all_artifacts(
     if links_raw:
         for link in links_raw:
             link["resolved_url"] = resolve_redirect_url(link["raw_url"])
+        # Dedup before fetching. The key is available pre-fetch, and every
+        # skipped article we fetch anyway costs an HTTP round trip plus a
+        # one-second politeness delay for a result we then throw away.
+        levine_candidates = len(links_raw)
+        links_raw = [
+            link for link in links_raw if link.get("resolved_url") not in _prior
+        ]
+        levine_deduped = levine_candidates - len(links_raw)
         articles = fetch_all_articles(links_raw, delay_between=1.0)
     else:
+        levine_candidates = 0
+        levine_deduped = 0  # noqa: F841 -- consumed by the funnel-report task
         articles = []
 
     headlines_with_snippets = []
@@ -110,10 +120,6 @@ def collect_all_artifacts(
     headline_index: dict[str, str] = {}
 
     for i, art in enumerate(articles):
-        # Skip articles already used in prior episodes
-        if art.url and art.url in _prior:
-            continue
-
         slug = f"{i:02d}-{_slugify(art.headline)}"
         art_path = articles_dir / f"{slug}.md"
 

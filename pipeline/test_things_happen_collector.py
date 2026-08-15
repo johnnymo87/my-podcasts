@@ -126,6 +126,71 @@ def test_collect_all_artifacts(
     assert index["Test Article"].startswith("articles/")
 
 
+def test_prior_urls_are_not_fetched(tmp_path, monkeypatch):
+    """Dedup must happen before the HTTP fetch, not after."""
+    fetched_urls: list[str] = []
+
+    def fake_fetch_all_articles(links, delay_between=1.0):
+        fetched_urls.extend(link["resolved_url"] for link in links)
+        return [
+            Article(
+                headline=link["headline"],
+                url=link["resolved_url"],
+                content="content",
+            )
+            for link in links
+        ]
+
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles", fake_fetch_all_articles
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(themes=[], directives=[]),
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
+    )
+
+    _et = ZoneInfo("America/New_York")
+    today = datetime.now(tz=_et).strftime("%Y-%m-%d")
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+    links_raw = [
+        {"raw_url": "https://example.com/covered", "headline": "Covered Story"},
+        {"raw_url": "https://example.com/fresh", "headline": "Fresh Story"},
+    ]
+    (levine_cache / f"{today}.json").write_text(json.dumps(links_raw))
+
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    work_dir = tmp_path / "work"
+
+    collect_all_artifacts(
+        "job-dedup-test",
+        work_dir,
+        levine_cache_dir=levine_cache,
+        semafor_cache_dir=semafor_cache,
+        prior_urls={"https://example.com/covered"},
+    )
+
+    # Dedup must happen before fetch: the fetcher must only be handed the
+    # fresh URL, never the already-covered one.
+    assert fetched_urls == ["https://example.com/fresh"]
+
+    # Existing behavior preserved: the covered article never appears in the
+    # collector's output artifacts.
+    index = json.loads((work_dir / "headline_index.json").read_text())
+    assert "Covered Story" not in index
+    assert "Fresh Story" in index
+    art_files = list((work_dir / "articles").glob("*.md"))
+    assert len(art_files) == 1
+    assert "Fresh Story" in art_files[0].read_text()
+
+
 def test_fp_links_routed_to_staging(tmp_path, monkeypatch):
     """FP-flagged links are written to fp-routed-links dir, not enriched."""
     # Mock all external calls
