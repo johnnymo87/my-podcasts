@@ -82,6 +82,52 @@ for name in ['collection_done.json', 'plan.json', 'summary.txt', 'script.txt', '
 PY
 ```
 
+### Read the content-acquisition funnel
+
+Every script stage posts a funnel report to the Telegram General topic and
+appends a line to `/persist/my-podcasts/run-stats.jsonl`. Re-render it for any
+work dir without sending:
+
+```bash
+uv run python -m pipeline run-stats --work-dir /tmp/the-rundown-<job_id>
+```
+
+```
+The Rundown 2026-08-15 (job 412) - script stage - collect 4m12s, lookback 3d
+
+IN     47 = levine 21, semafor 19, zvi 7
+DEDUP  -6 (levine)
+FETCH  levine 15: live 6, paywalled 8, http_error 1, fetch_error 0
+PLAN   14 directives = 9 episode, 5 fp-routed
+EXA    7 flagged -> 3 hit, 3 empty, 1 error
+WRITE  9 selected -> 8 with text (3 live, 4 cache, 1 stub), 1 dropped
+OUT    1840 words, 4 themes, 9 headlines covered
+
+paywalled: bloomberg.com 5, ft.com 2, wsj.com 1
+```
+
+What a healthy run looks like: `FETCH` shows a nonzero `live` count, `EXA`
+shows more `hit` than `error`, and `WRITE`'s "with text" is close to "selected"
+with few `dropped`.
+
+What is currently normal but *not* healthy, and is expected: most Levine
+articles land in `paywalled`, because 93% of them are headline-only stubs. That
+is the measured baseline this reporting exists to track, not a new fault. Fixing
+it is open-access substitution (`my-podcasts-85c`).
+
+Beware two false alarms:
+
+- **`FETCH ... unknown N`** means the work dir predates the tier instrumentation,
+  not that fetching failed.
+- **A missing Telegram report** means the reporter or pigeon failed. The episode
+  is unaffected — the reporter runs after the script is on disk and swallows all
+  its own errors. Check `journalctl -u my-podcasts-consumer | grep 'run stats'`,
+  and note the numbers are still in `work_dir/run_stats.json` and the JSONL
+  regardless of whether the message was delivered.
+
+The report is labeled **script stage** because TTS and publish happen on a later
+consumer loop iteration. It never means an episode shipped.
+
 ## Manual operations
 
 ```bash
