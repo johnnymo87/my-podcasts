@@ -38,6 +38,12 @@ or pushed back on something, say so — name the publication, the analyst, or
 the author when the material gives you a name. Lean into concrete details,
 numbers, and examples that give the briefing weight.
 
+Some stories include a "Related coverage from other outlets" section pulled
+in from a different publisher to fill out a story your primary source only
+sketched. When you draw specific facts from that section, name the outlet —
+"Reuters reports...", "according to the Associated Press..." — the same way
+you'd credit any other named source.
+
 Do not editorialize beyond what the sources themselves said. Report the
 arguments and the disagreements; don't add opinions, jokes, or asides of
 your own. If a source is uncertain, convey that uncertainty; don't resolve
