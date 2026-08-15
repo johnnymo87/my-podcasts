@@ -653,9 +653,12 @@ def test_find_rundown_article_text_exa_hit(tmp_path):
     exa_dir = tmp_path / "enrichment" / "exa"
     exa_dir.mkdir(parents=True)
     slug = _slugify("Paywalled Story")
+    # Production shape (things_happen_collector.py Phase 3): bookkeeping
+    # headers followed by "## [title](url)" result sections.
     (exa_dir / f"{slug}.md").write_text(
-        "Result: hit\n\n# Paywalled Story\n\nURL: https://example.com/paywalled\n\n"
-        "Full article text recovered via Exa search."
+        "# Exa Results for: Paywalled Story\nResult: hit\nQuery: paywalled story\n\n"
+        "## [Paywalled Story](https://example.com/paywalled)\n"
+        "Full article text recovered via Exa search.\n\n"
     )
 
     from pipeline.__main__ import _find_rundown_article_text
@@ -685,8 +688,21 @@ def test_find_rundown_article_text_exa_empty_result_gated(tmp_path):
     assert text == ""
 
 
-def test_find_rundown_article_text_exa_headerless_still_trusted(tmp_path):
-    """Headerless Exa files (FP format) are trusted -- this branch is permanent."""
+def test_find_rundown_article_text_exa_headerless_file_no_longer_surfaced(tmp_path):
+    """Headerless Exa files (FP format, no `## [title](url)` sections) are no
+    longer surfaced by the Rundown resolver's Exa fallback.
+
+    Before this change the resolver used `exa_text_if_hit`, which trusts any
+    headerless file unconditionally (that trust is still correct and is
+    tested directly against `exa_text_if_hit` in test_exa_client.py -- this
+    test is about the resolver, not that function). The resolver now uses
+    `exa_result_sections`, which additionally requires `## [title](url)`
+    sections; a headerless file has none, so it yields no text here. This
+    is not a regression for The Rundown: its own collector
+    (things_happen_collector.py Phase 3) always writes headers plus `## [`
+    sections for a hit. The headerless shape is FP-only and FP does not read
+    through this resolver.
+    """
     exa_dir = tmp_path / "enrichment" / "exa"
     exa_dir.mkdir(parents=True)
     slug = _slugify("Legacy Format Story")
@@ -702,7 +718,7 @@ def test_find_rundown_article_text_exa_headerless_still_trusted(tmp_path):
         source = "levine"
 
     text = _find_rundown_article_text(FakeDirective(), tmp_path)
-    assert "Article text with no Result header at all." in text
+    assert text == ""
 
 
 def test_find_rundown_article_source_reports_path_on_exact_match(tmp_path):
@@ -814,9 +830,12 @@ def test_find_rundown_article_source_reports_path_on_exa_hit(tmp_path):
     exa_dir.mkdir(parents=True)
     slug = _slugify("Paywalled Story")
     exa_file = exa_dir / f"{slug}.md"
+    # Production shape (things_happen_collector.py Phase 3): bookkeeping
+    # headers followed by "## [title](url)" result sections.
     exa_file.write_text(
-        "Result: hit\n\n# Paywalled Story\n\nURL: https://example.com/paywalled\n\n"
-        "Full article text recovered via Exa search."
+        "# Exa Results for: Paywalled Story\nResult: hit\nQuery: paywalled story\n\n"
+        "## [Paywalled Story](https://example.com/paywalled)\n"
+        "Full article text recovered via Exa search.\n\n"
     )
 
     from pipeline.__main__ import find_rundown_article_source
@@ -861,6 +880,33 @@ def test_find_rundown_article_source_reports_miss(tmp_path):
     text, path = find_rundown_article_source(FakeDirective(), tmp_path)
     assert text == ""
     assert path is None
+
+
+def test_exa_fallback_has_no_bookkeeping_headers(tmp_path):
+    """Exa fallback (site 6) must not leak Result:/Query: metadata into the
+    writer prompt -- article text is fed verbatim, and those lines are
+    bookkeeping written by the collector, not article content."""
+    from pipeline.__main__ import find_rundown_article_source
+    from pipeline.exa_client import exa_file_path
+    from pipeline.things_happen_collector import _slugify
+
+    class FakeDirective:
+        headline = "Some Very Distinctive Headline About Widgets"
+        source = ""
+
+    slug = _slugify(FakeDirective.headline)
+    exa_path = exa_file_path(tmp_path, slug)
+    exa_path.parent.mkdir(parents=True, exist_ok=True)
+    exa_path.write_text(
+        "# Exa Results for: X\nResult: hit\nQuery: widgets\n\n"
+        "## [Widget News](https://w.example)\nReal body text.\n\n",
+        encoding="utf-8",
+    )
+    text, src = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert "Real body text." in text
+    assert "Result:" not in text
+    assert "Query:" not in text
+    assert src == f"enrichment/exa/{slug}.md"
 
 
 def test_find_rundown_article_text_wrapper_unchanged(tmp_path):
