@@ -1339,3 +1339,393 @@ def test_article_files_have_no_tier_header(tmp_path, monkeypatch):
     work_dir = _run_collector_basic(tmp_path, monkeypatch)
     for f in (work_dir / "articles").glob("*.md"):
         assert "Source-Tier" not in f.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 gate: fire Exa on the measured fetch tier, not the editor's guess.
+# ---------------------------------------------------------------------------
+
+
+def _run_collector_for_exa_gate(
+    tmp_path,
+    monkeypatch,
+    *,
+    articles,
+    directive,
+    exa_results=None,
+    exa_status="hit",
+):
+    """Run the collector with one directive against a controlled article set.
+
+    Captures every search_related_status call (args, kwargs) for inspection.
+    Mirrors the monkeypatch style already used in this file for
+    fetch_all_articles / resolve_redirect_url / generate_rundown_research_plan
+    / sync_zvi_cache. Returns (work_dir, calls).
+    """
+    calls: list[tuple[tuple, dict]] = []
+
+    def _fake_search(*args, **kwargs):
+        calls.append((args, kwargs))
+        return (exa_results or [], exa_status)
+
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles",
+        lambda *a, **kw: articles,
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(themes=["Tech"], directives=[directive]),
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.search_related_status", _fake_search
+    )
+
+    _et = ZoneInfo("America/New_York")
+    today = datetime.now(tz=_et).strftime("%Y-%m-%d")
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+    (levine_cache / f"{today}.json").write_text(
+        json.dumps([{"raw_url": a.url, "headline": a.headline} for a in articles])
+    )
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    zvi_cache = tmp_path / "zvi-cache"
+    zvi_cache.mkdir()
+    work_dir = tmp_path / "work"
+
+    collect_all_artifacts(
+        "job-exa-gate",
+        work_dir,
+        levine_cache_dir=levine_cache,
+        semafor_cache_dir=semafor_cache,
+        zvi_cache_dir=zvi_cache,
+    )
+    return work_dir, calls
+
+
+def test_exa_fires_for_stubbed_article_without_editor_flag(tmp_path, monkeypatch):
+    """The editor flags 4% of directives; the tier signal must drive this."""
+    article = Article(
+        headline="Widget Maker Struggles",
+        url="https://paywalled.example/a",
+        content="stub",
+        source_tier="paywalled",
+    )
+    directive = RundownStoryDirective(
+        headline="Widget Maker Struggles",
+        source="levine",
+        priority=1,
+        theme="Tech",
+        needs_exa=False,
+        exa_query="",
+        is_foreign_policy=False,
+        fp_query="",
+        include_in_episode=True,
+    )
+    _work_dir, calls = _run_collector_for_exa_gate(
+        tmp_path,
+        monkeypatch,
+        articles=[article],
+        directive=directive,
+        exa_results=[ExaResult(title="X", url="https://open.example/x", text="body")],
+        exa_status="hit",
+    )
+    assert len(calls) == 1
+    args, _kwargs = calls[0]
+    assert args[0] == "Widget Maker Struggles"
+
+
+def test_exa_skips_live_article(tmp_path, monkeypatch):
+    """A successfully fetched article does not need substitution."""
+    article = Article(
+        headline="Fine Article",
+        url="https://open.example/a",
+        content="full text",
+        source_tier="live",
+    )
+    directive = RundownStoryDirective(
+        headline="Fine Article",
+        source="levine",
+        priority=1,
+        theme="Tech",
+        needs_exa=False,
+        exa_query="",
+        is_foreign_policy=False,
+        fp_query="",
+        include_in_episode=True,
+    )
+    _work_dir, calls = _run_collector_for_exa_gate(
+        tmp_path, monkeypatch, articles=[article], directive=directive
+    )
+    assert calls == []
+
+
+def test_exa_fires_for_unmatched_directive_with_needs_exa(tmp_path, monkeypatch):
+    """Semafor/Zvi directives have no matching Levine article; the editor
+    flag must still be honored, or this silently regresses today's
+    behavior."""
+    directive = RundownStoryDirective(
+        headline="Semafor Story",
+        source="semafor",
+        priority=1,
+        theme="Markets",
+        needs_exa=True,
+        exa_query="",
+        is_foreign_policy=False,
+        fp_query="",
+        include_in_episode=True,
+    )
+    _work_dir, calls = _run_collector_for_exa_gate(
+        tmp_path,
+        monkeypatch,
+        articles=[],
+        directive=directive,
+        exa_status="empty",
+    )
+    assert len(calls) == 1
+    from pipeline.things_happen_collector import BYPASS_DOMAINS
+
+    args, kwargs = calls[0]
+    assert args[0] == "Semafor Story"
+    # No matched article means no origin domain to exclude.
+    assert kwargs["exclude_domains"] == list(BYPASS_DOMAINS)
+
+
+def test_exa_excludes_origin_domain_and_bypass_mirrors(tmp_path, monkeypatch):
+    """8/12 spike searches ranked the paywalled origin first."""
+    article = Article(
+        headline="Paywalled Piece",
+        url="https://www.bloomberg.com/news/x",
+        content="stub",
+        source_tier="paywalled",
+    )
+    directive = RundownStoryDirective(
+        headline="Paywalled Piece",
+        source="levine",
+        priority=1,
+        theme="Tech",
+        needs_exa=False,
+        exa_query="",
+        is_foreign_policy=False,
+        fp_query="",
+        include_in_episode=True,
+    )
+    _work_dir, calls = _run_collector_for_exa_gate(
+        tmp_path, monkeypatch, articles=[article], directive=directive
+    )
+    assert len(calls) == 1
+    _args, kwargs = calls[0]
+    exclude = kwargs["exclude_domains"]
+    assert "bloomberg.com" in exclude
+    assert "archive.ph" in exclude
+
+
+def test_exa_filters_bypass_domain_result_locally(tmp_path, monkeypatch):
+    """exclude_domains is a request parameter honored by a third-party API;
+    ethics policy must not depend on Exa's compliance."""
+    article = Article(
+        headline="Paywalled Piece",
+        url="https://www.bloomberg.com/news/x",
+        content="stub",
+        source_tier="paywalled",
+    )
+    directive = RundownStoryDirective(
+        headline="Paywalled Piece",
+        source="levine",
+        priority=1,
+        theme="Tech",
+        needs_exa=False,
+        exa_query="",
+        is_foreign_policy=False,
+        fp_query="",
+        include_in_episode=True,
+    )
+    exa_results = [
+        ExaResult(title="Mirror", url="https://archive.ph/xyz", text="mirrored body"),
+        ExaResult(title="Legit", url="https://reuters.com/story", text="real body"),
+    ]
+    work_dir, _calls = _run_collector_for_exa_gate(
+        tmp_path,
+        monkeypatch,
+        articles=[article],
+        directive=directive,
+        exa_results=exa_results,
+        exa_status="hit",
+    )
+    slug = _slugify(directive.headline)
+    text = (work_dir / "enrichment" / "exa" / f"{slug}.md").read_text(encoding="utf-8")
+    assert "archive.ph" not in text
+    assert "Legit" in text
+    assert "real body" in text
+    assert "Result: hit" in text
+
+
+def test_exa_downgrades_status_when_local_filter_empties_a_hit(tmp_path, monkeypatch):
+    """A hit whose only result gets filtered locally must not report a hit."""
+    article = Article(
+        headline="Paywalled Piece",
+        url="https://www.bloomberg.com/news/x",
+        content="stub",
+        source_tier="paywalled",
+    )
+    directive = RundownStoryDirective(
+        headline="Paywalled Piece",
+        source="levine",
+        priority=1,
+        theme="Tech",
+        needs_exa=False,
+        exa_query="",
+        is_foreign_policy=False,
+        fp_query="",
+        include_in_episode=True,
+    )
+    exa_results = [
+        ExaResult(title="Mirror", url="https://archive.ph/xyz", text="mirrored")
+    ]
+    work_dir, _calls = _run_collector_for_exa_gate(
+        tmp_path,
+        monkeypatch,
+        articles=[article],
+        directive=directive,
+        exa_results=exa_results,
+        exa_status="hit",
+    )
+    slug = _slugify(directive.headline)
+    text = (work_dir / "enrichment" / "exa" / f"{slug}.md").read_text(encoding="utf-8")
+    assert "Result: empty" in text
+    sentinel = json.loads((work_dir / "collection_done.json").read_text())
+    assert sentinel["exa_outcomes"][slug] == "empty"
+
+
+def test_double_space_headline_slug_match_regression(tmp_path, monkeypatch):
+    """Levine headlines come from sentence extraction and can carry a double
+    space that Gemini normalizes away when it echoes the headline back.
+    Verified: exact-equality match loses 3 of 38 real selected directives to
+    this. Matching must be by slug, not raw headline equality."""
+    raw_headline = "US Set to  Pay Most Tariffs"  # double space, real shape
+    echoed_headline = "US Set to Pay Most Tariffs"  # Gemini-normalized
+    article = Article(
+        headline=raw_headline,
+        url="https://paywalled.example/tariffs",
+        content="stub",
+        source_tier="paywalled",
+    )
+    directive = RundownStoryDirective(
+        headline=echoed_headline,
+        source="levine",
+        priority=1,
+        theme="Tech",
+        needs_exa=False,
+        exa_query="",
+        is_foreign_policy=False,
+        fp_query="",
+        include_in_episode=True,
+    )
+    _work_dir, calls = _run_collector_for_exa_gate(
+        tmp_path, monkeypatch, articles=[article], directive=directive
+    )
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    # The query is directive.exa_query or directive.headline -- the echoed
+    # (Gemini) headline, not the raw one -- but firing at all is the point.
+    assert args[0] == echoed_headline
+    assert "paywalled.example" in kwargs["exclude_domains"]
+
+
+def test_exa_prefers_editor_query_when_present(tmp_path, monkeypatch):
+    article = Article(
+        headline="Paywalled Piece",
+        url="https://paywalled.example/a",
+        content="stub",
+        source_tier="paywalled",
+    )
+    directive = RundownStoryDirective(
+        headline="Paywalled Piece",
+        source="levine",
+        priority=1,
+        theme="Tech",
+        needs_exa=False,
+        exa_query="widget factory keywords",
+        is_foreign_policy=False,
+        fp_query="",
+        include_in_episode=True,
+    )
+    _work_dir, calls = _run_collector_for_exa_gate(
+        tmp_path, monkeypatch, articles=[article], directive=directive
+    )
+    assert len(calls) == 1
+    args, _kwargs = calls[0]
+    assert args[0] == "widget factory keywords"
+
+
+def test_exa_skipped_when_not_included_in_episode(tmp_path, monkeypatch):
+    """Directives never written to the episode are never worth an Exa call."""
+    article = Article(
+        headline="Paywalled Piece",
+        url="https://paywalled.example/a",
+        content="stub",
+        source_tier="paywalled",
+    )
+    directive = RundownStoryDirective(
+        headline="Paywalled Piece",
+        source="levine",
+        priority=1,
+        theme="Tech",
+        needs_exa=True,
+        exa_query="",
+        is_foreign_policy=False,
+        fp_query="",
+        include_in_episode=False,
+    )
+    _work_dir, calls = _run_collector_for_exa_gate(
+        tmp_path, monkeypatch, articles=[article], directive=directive
+    )
+    assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# _host_banned: local defence-in-depth filter, independent of exclude_domains.
+# ---------------------------------------------------------------------------
+
+
+def test_host_banned_exact_bypass_domain():
+    from pipeline.things_happen_collector import _host_banned
+
+    assert _host_banned("https://archive.ph/xyz", "") is True
+
+
+def test_host_banned_subdomain_of_bypass_domain():
+    from pipeline.things_happen_collector import _host_banned
+
+    assert _host_banned("https://news.archive.ph/xyz", "") is True
+
+
+def test_host_banned_origin_domain():
+    from pipeline.things_happen_collector import _host_banned
+
+    assert _host_banned("https://bloomberg.com/story", "bloomberg.com") is True
+
+
+def test_host_banned_subdomain_of_origin():
+    from pipeline.things_happen_collector import _host_banned
+
+    assert _host_banned("https://amp.bloomberg.com/story", "bloomberg.com") is True
+
+
+def test_host_banned_empty_or_garbage_url():
+    from pipeline.things_happen_collector import _host_banned
+
+    assert _host_banned("", "bloomberg.com") is True
+    assert _host_banned("not a url", "bloomberg.com") is True
+
+
+def test_host_banned_legitimate_host_passes():
+    from pipeline.things_happen_collector import _host_banned
+
+    assert _host_banned("https://reuters.com/story", "bloomberg.com") is False

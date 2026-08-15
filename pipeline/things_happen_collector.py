@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from pipeline.article_fetcher import fetch_all_articles
@@ -16,6 +17,41 @@ from pipeline.rss_sources import categorize_semafor_article
 from pipeline.things_happen_editor import generate_rundown_research_plan
 from pipeline.things_happen_extractor import resolve_redirect_url
 from pipeline.zvi_cache import sync_zvi_cache
+
+
+# Paywall-circumvention mirrors and front-ends. Never cite these: the show
+# republishes what it reads, and laundering a paywalled article through an
+# archive mirror is materially different from citing an outlet that published
+# openly. archive.today rotates TLDs, so all known ones are listed.
+BYPASS_DOMAINS = (
+    "archive.ph",
+    "archive.is",
+    "archive.today",
+    "archive.md",
+    "archive.li",
+    "archive.vn",
+    "archive.fo",
+    "12ft.io",
+    "1ft.io",
+    "freedium.cfd",
+    "removepaywall.com",
+)
+
+
+def _host_banned(url: str, origin: str) -> bool:
+    """True if a result URL is a bypass mirror or the paywalled origin itself.
+
+    Suffix matching, so a subdomain (news.archive.ph) cannot slip through.
+    `exclude_domains` is a request parameter honored by a third-party API;
+    ethics policy must not depend on Exa's compliance, so results are
+    filtered locally too.
+    """
+    host = (urlparse(url).hostname or "").removeprefix("www.").lower()
+    if not host:
+        return True
+    if origin and (host == origin or host.endswith("." + origin)):
+        return True
+    return any(host == b or host.endswith("." + b) for b in BYPASS_DOMAINS)
 
 
 def _slugify(text: str) -> str:
@@ -315,11 +351,46 @@ def collect_all_artifacts(
     # index prefix here is how enrichment silently went undelivered for months.
     exa_outcomes: dict[str, str] = {}
     for directive in non_fp_directives:
-        if not (directive.needs_exa and directive.exa_query):
+        if not directive.include_in_episode:
             continue
 
-        slug = _slugify(directive.headline)
-        exa_results, status = search_related_status(directive.exa_query)
+        # Slug, not raw equality: Levine headlines come from sentence
+        # extraction and can carry a double space that Gemini normalizes away
+        # when it echoes the headline. Measured: exact match loses 3 of 38
+        # selected directives, silently, with every unit test still passing.
+        d_slug = _slugify(directive.headline)
+        art = next((a for a in articles if _slugify(a.headline) == d_slug), None)
+
+        # No matching Levine article means a Semafor/Zvi story, read from
+        # cache with real body text. It needs no substitution UNLESS the
+        # editor explicitly asked for one -- dropping that case would silently
+        # regress today's behavior.
+        if art is None and not directive.needs_exa:
+            continue
+
+        # The editor judges "paywalled" from headlines alone and sets the flag
+        # on ~4% of directives while ~93% of articles arrive as stubs. The
+        # fetch tier is the measured answer; the flag stays in the union
+        # because it is real signal, just badly under-fired.
+        if art is not None and art.source_tier == "live" and not directive.needs_exa:
+            continue
+
+        query = directive.exa_query or directive.headline
+        origin = (
+            (urlparse(art.url).hostname or "").removeprefix("www.")
+            if art is not None
+            else ""
+        )
+        exclude = [d for d in (origin, *BYPASS_DOMAINS) if d]
+
+        slug = d_slug
+        exa_results, status = search_related_status(query, exclude_domains=exclude)
+        # Defence in depth: exclude_domains is a request parameter honored by a
+        # third-party API. Ethics policy must not depend on Exa's compliance,
+        # so drop banned hosts from the results locally too.
+        exa_results = [r for r in exa_results if not _host_banned(r.url, origin)]
+        if not exa_results and status == "hit":
+            status = "empty"
         exa_outcomes[slug] = status
 
         # Written unconditionally: an absent file cannot distinguish "we never
@@ -328,7 +399,7 @@ def collect_all_artifacts(
         out = (
             f"# Exa Results for: {directive.headline}\n"
             f"Result: {status}\n"
-            f"Query: {directive.exa_query}\n\n"
+            f"Query: {query}\n\n"
         )
         for exa_r in exa_results:
             out += f"## [{exa_r.title}]({exa_r.url})\n{exa_r.text}\n\n"
