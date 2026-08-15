@@ -148,6 +148,24 @@ def _jobs_work_dir_base() -> Path:
     return _consumer_work_dir_base()
 
 
+def _stale_daily_jobs(store: StateStore, feed_slug: str, today: str) -> list[dict]:
+    """Return daily job rows for *feed_slug* left unfinished on an earlier date.
+
+    A row still 'pending' or 'errored' for a date before *today* means a
+    previous run was enqueued but never carried to completion - the signal that
+    the consumer is wedged, stopped, or exhausted its retries. Comparison is
+    lexical because date_str is always YYYY-MM-DD.
+    """
+    stale: list[dict] = []
+    for status in ("pending", "errored"):
+        stale.extend(
+            row
+            for row in store.list_daily_jobs(feed_slug, status)
+            if row["date_str"] < today
+        )
+    return sorted(stale, key=lambda r: r["date_str"])
+
+
 # ---------------------------------------------------------------------------
 # jobs group
 # ---------------------------------------------------------------------------
