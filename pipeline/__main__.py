@@ -1083,6 +1083,23 @@ def poll_blogs_command(dry_run: bool) -> None:
         store.close()
 
 
+@cli.command("run-stats")
+@click.option("--work-dir", required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--send", is_flag=True, help="Also post to the Telegram General topic.")
+def run_stats_command(work_dir: Path, send: bool) -> None:
+    """Render the content-acquisition funnel for an existing work dir."""
+    from pipeline.alerts import send_alert
+    from pipeline.run_stats import collect_run_stats, render_report
+
+    job_id = work_dir.name.replace("the-rundown-", "")
+    stats = collect_run_stats(work_dir, job_id=job_id, date_str="")
+    report = render_report(stats)
+    click.echo(report)
+    if send:
+        # Deliberately ignores run_stats_sent: a manual send is a manual send.
+        click.echo("sent" if send_alert(report) else "send failed")
+
+
 @cli.command("sync-sources")
 def sync_sources_command() -> None:
     """Sync all source caches (Zvi, Semafor, Antiwar RSS, Antiwar homepage)."""
