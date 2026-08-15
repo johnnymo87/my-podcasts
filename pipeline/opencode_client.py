@@ -6,13 +6,10 @@ from pathlib import Path
 
 import requests
 
+from pipeline.pigeon import PIGEON_DAEMON_URL, daemon_auth_headers
+
 
 OPENCODE_URL = os.environ.get("OPENCODE_URL", "http://127.0.0.1:4096")
-# Pigeon daemon discovery endpoint. In a K-serve pool each opencode serve runs
-# its own agent loop, so a session's prompt/poll must reach the serve that OWNS
-# it. After creating a session we ask pigeon GET /route?session_id which serve
-# that is and cache it. Matches the opencode-launch / opencode-send convention.
-PIGEON_DAEMON_URL = os.environ.get("PIGEON_DAEMON_URL", "http://127.0.0.1:4731")
 PROJECT_DIR = str(Path(__file__).resolve().parent.parent)
 
 # session_id -> owning serve base URL, resolved once at create time via /route.
@@ -58,27 +55,6 @@ def _headers(directory: str | None = None) -> dict[str, str]:
     return headers
 
 
-def _daemon_auth_headers() -> dict[str, str]:
-    """Bearer header for pigeon, when the daemon on this host runs with auth on.
-
-    Devbox runs the daemon with auth disabled and so needs nothing here, but a
-    missing header against an auth-enabled daemon is a 401 -- which silently
-    returns the Telegram noise that ``declare_quiet_origin`` exists to remove.
-    Resolution order matches the ``oc-pool-attach`` convention: env var first,
-    then the sops secret file.
-    """
-    token = os.environ.get("PIGEON_DAEMON_AUTH_TOKEN", "").strip()
-    if not token:
-        token_file = os.environ.get(
-            "PIGEON_DAEMON_AUTH_TOKEN_FILE", "/run/secrets/pigeon_daemon_auth_token"
-        )
-        try:
-            token = Path(token_file).read_text().strip()
-        except OSError:
-            token = ""
-    return {"Authorization": f"Bearer {token}"} if token else {}
-
-
 def declare_quiet_origin(session_id: str) -> None:
     """Tell pigeon this session is machine-driven, so it stays out of Telegram.
 
@@ -113,7 +89,7 @@ def declare_quiet_origin(session_id: str) -> None:
                 "origin": "my-podcasts-pipeline",
                 "notify_policy": "none",
             },
-            headers=_daemon_auth_headers(),
+            headers=daemon_auth_headers(),
             timeout=3,
         )
         if not resp.ok:
