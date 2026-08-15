@@ -61,13 +61,21 @@ def _report_run_stats(
     are already on disk, and swallows everything, so a reporting bug can never
     fail a job or burn retry budget.
 
+    The three sinks below (local JSON, durable JSONL, Telegram) are guarded
+    independently rather than under one try/except. They previously shared a
+    single try, so a disk failure in the JSONL append (e.g. a full /persist)
+    would skip the Telegram send entirely -- suppressing the human-visible
+    report on exactly the day an operator most needs it. Now each sink's
+    failure is isolated to that sink; send_alert already logs the rendered
+    report to journald when it can't reach Telegram, so as long as the send
+    step still runs, the report reaches an operator one way or another.
+
     The run_stats_sent marker keeps a retry (which reuses collection but reruns
     the writer) from sending a second message. A /tmp marker is safe here
     because the retry budget is ~12 hours and /tmp is reaped at 10 days.
     """
     try:
-        from pipeline.alerts import send_alert
-        from pipeline.run_stats import append_jsonl, collect_run_stats, render_report
+        from pipeline.run_stats import collect_run_stats
 
         stats = collect_run_stats(
             work_dir,
@@ -75,16 +83,34 @@ def _report_run_stats(
             date_str=date_str,
             reused_collection=reused_collection,
         )
+    except Exception as exc:
+        print(f"[consumer] run stats collection failed: {exc}")
+        return
+
+    try:
         (work_dir / "run_stats.json").write_text(
             stats.model_dump_json(indent=2), encoding="utf-8"
         )
+    except Exception as exc:
+        print(f"[consumer] run stats json write failed: {exc}")
+
+    try:
+        from pipeline.run_stats import append_jsonl
+
         append_jsonl(stats, Path("/persist/my-podcasts/run-stats.jsonl"))
+    except Exception as exc:
+        print(f"[consumer] run stats jsonl append failed: {exc}")
+
+    try:
+        from pipeline.alerts import send_alert
+        from pipeline.run_stats import render_report
+
         marker = work_dir / "run_stats_sent"
         if not marker.exists():
             if send_alert(render_report(stats), severity="info"):
                 marker.touch()
     except Exception as exc:
-        print(f"[consumer] run stats reporting failed: {exc}")
+        print(f"[consumer] run stats send failed: {exc}")
 
 
 @dataclass(frozen=True)
