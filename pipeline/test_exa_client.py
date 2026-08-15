@@ -74,6 +74,25 @@ def test_search_related_with_include_domains(monkeypatch: pytest.MonkeyPatch) ->
     assert results[0].title == "Domain Article"
 
 
+def test_search_related_status_passes_exclude_domains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """search_related_status forwards exclude_domains to exa.search."""
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+
+    mock_response = MagicMock()
+    mock_response.results = []
+
+    with patch("pipeline.exa_client.Exa") as MockExa:
+        mock_exa_instance = MockExa.return_value
+        mock_exa_instance.search.return_value = mock_response
+
+        search_related_status("headline", exclude_domains=["bloomberg.com"])
+
+        call_kwargs = mock_exa_instance.search.call_args
+        assert call_kwargs.kwargs.get("exclude_domains") == ["bloomberg.com"]
+
+
 def test_search_related_returns_empty_on_missing_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

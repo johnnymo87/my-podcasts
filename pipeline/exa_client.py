@@ -18,6 +18,7 @@ def search_related_status(
     headline: str,
     *,
     include_domains: list[str] | None = None,
+    exclude_domains: list[str] | None = None,
     num_results: int = 3,
 ) -> tuple[list[ExaResult], str]:
     """Search Exa, reporting why the result list is empty when it is.
@@ -38,6 +39,7 @@ def search_related_status(
             type="auto",
             contents={"text": {"max_characters": 3000}},
             include_domains=include_domains,
+            exclude_domains=exclude_domains,
         )
 
         results = [
