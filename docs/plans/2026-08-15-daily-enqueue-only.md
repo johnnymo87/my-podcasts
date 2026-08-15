@@ -202,19 +202,47 @@ def _enqueue_daily_job(store: StateStore, feed_slug: str, date_str: str) -> str 
     if label is None:
         raise ValueError(f"Unknown feed_slug: {feed_slug!r}")
 
+    # Reject a malformed date here rather than letting the consumer retry a
+    # garbage row for ~12h. The old inline CLI failed loudly in the operator's
+    # terminal; enqueue-only would otherwise make the same typo silent.
+    datetime.strptime(date_str, "%Y-%m-%d")
+
     if feed_slug == "the-rundown":
         job_id = store.insert_pending_the_rundown(date_str)
     else:
         job_id = store.insert_pending_fp_digest(date_str)
 
-    if job_id is None:
-        click.echo(f"{label} job already exists for {date_str}; nothing to do.")
-    else:
+    if job_id is not None:
         click.echo(f"Queued {label} job {job_id} for {date_str}.")
         click.echo("The consumer will pick it up within ~10s. Follow it with:")
         click.echo("  journalctl -fu my-podcasts-consumer")
-    return job_id
+        return job_id
+
+    # A row already exists. Report its ACTUAL status: 'errored' rows are NOT
+    # eligible for execution (list_due_* filters status='pending'), so a bare
+    # "already exists" would leave the operator believing work was queued when
+    # nothing will ever run.
+    existing = next(
+        (
+            row
+            for status in ("pending", "errored", "completed")
+            for row in store.list_daily_jobs(feed_slug, status)
+            if row["date_str"] == date_str
+        ),
+        None,
+    )
+    status = existing["status"] if existing else "unknown"
+    click.echo(f"{label} job already exists for {date_str} (status={status}).")
+    if status == "errored":
+        click.echo("It is errored, so the consumer will NOT run it. Reset it with:")
+        click.echo(f"  uv run python -m pipeline jobs reset --feed {feed_slug} "
+                   f"--date {date_str}")
+    elif status == "completed":
+        click.echo("Already published; nothing to do.")
+    return None
 ```
+
+Add `from datetime import datetime` at module top if not already imported at that scope.
 
 **Step 4: Run to verify they pass**
 
@@ -241,19 +269,61 @@ This is the commit that actually fixes the bug for The Rundown.
 
 ```python
 from click.testing import CliRunner
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from pipeline.__main__ import cli
 
 
 def test_the_rundown_command_only_enqueues(tmp_path):
-    """The CLI must NOT collect, generate, or publish - only enqueue."""
+    """The CLI must NOT collect, generate, or publish - only enqueue.
+
+    Patching R2Client is not incidental. BEFORE the implementation lands this
+    test drives the OLD inline pipeline, which would construct a real R2 client
+    and attempt a real ~6-minute collection + LLM + TTS + publish. On a devbox
+    shell the R2 env vars are unset so it dies early by luck; in an operator
+    shell with secrets sourced, running this "failing test" would fire a real
+    production publish out of pytest. The mock makes that impossible, and
+    asserting it was never called is also the only DIRECT proof that the new
+    command performs no pipeline work - absence of the helper name is a
+    resurrection tripwire, not evidence of behavior.
+    """
     db = tmp_path / "s.db"
-    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+    fake_r2 = MagicMock()
+    with (
+        patch("pipeline.__main__._default_state_db_path", return_value=db),
+        patch("pipeline.__main__.R2Client", fake_r2),
+    ):
         result = CliRunner().invoke(cli, ["the-rundown", "--date", "2026-08-17"])
     assert result.exit_code == 0, result.output
     assert "Queued The Rundown job" in result.output
+    fake_r2.assert_not_called()
     store = StateStore(db)
     assert len(store.list_daily_jobs("the-rundown", "pending")) == 1
+    store.close()
+
+
+def test_enqueue_reports_errored_status_and_how_to_reset(tmp_path):
+    """An errored row is NOT eligible for execution; saying "already exists" lies."""
+    db = tmp_path / "s.db"
+    store = StateStore(db)
+    store.insert_pending_the_rundown("2026-08-17")
+    job = store.list_daily_jobs("the-rundown", "pending")[0]
+    for _ in range(60):
+        if store.mark_the_rundown_failed(job["id"], "boom").exhausted:
+            break
+    store.close()
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(cli, ["the-rundown", "--date", "2026-08-17"])
+    assert "status=errored" in result.output
+    assert "jobs reset" in result.output
+
+
+def test_enqueue_rejects_a_malformed_date(tmp_path):
+    db = tmp_path / "s.db"
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(cli, ["the-rundown", "--date", "17-08-2026"])
+    assert result.exit_code != 0
+    store = StateStore(db)
+    assert store.list_daily_jobs("the-rundown", "pending") == []
     store.close()
 
 
@@ -343,6 +413,14 @@ Identical surgery on the twin. **Both feeds must land before the next 04:30 fire
 
 **Steps:** mirror Task 3 exactly, with `fp-digest` / "Queued FP Digest job". `test_full_run_helpers_are_deleted` from Task 3 now covers the second half and should go green.
 
+**While you are here, harmonize the date default.** `fp_digest_command`
+(`__main__.py:360-363`) defaults `date_str` from **UTC**, while
+`the_rundown_command` (`:577-581`) uses **America/New_York**. So a manual FP
+enqueue after ~20:00 ET silently files tomorrow's date. This is pre-existing,
+but manual enqueue becomes the normal operator gesture after this change, so fix
+it to ET to match. Add a test asserting both commands derive the same default
+date for a fixed clock.
+
 **Commit:**
 
 ```bash
@@ -380,7 +458,9 @@ def test_lookback_still_works_with_dry_run():
     """--dry-run never touches the DB, so --lookback remains meaningful there."""
     with patch("pipeline.__main__._the_rundown_dry_run") as dry:
         CliRunner().invoke(cli, ["the-rundown", "--dry-run", "--lookback", "5"])
-    assert dry.call_args[0][1] == 5
+    # Assert on the value, not the call shape, so a later switch to keyword
+    # arguments does not fail a test that still holds.
+    assert 5 in dry.call_args.args or 5 in dry.call_args.kwargs.values()
 ```
 
 **Step 2-4:** raise before opening the store:
@@ -489,11 +569,14 @@ git commit -m "feat(daily): alert when a previous daily run never completed"
 
 **This is the only task that touches `consumer.py`, so it is the one that makes the restart mandatory** — see the deploy section.
 
-Add to both exhausted branches:
+Add to both exhausted branches (note `label` is **not** in scope at
+`consumer.py:549`/`:694` — define it, or the snippet raises `NameError` on the
+one path that only executes when something has already gone wrong):
 
 ```python
                         from pipeline.alerts import send_alert
 
+                        label = "The Rundown"  # "FP Digest" in the FP branch
                         send_alert(
                             f"{label} job {job['date_str']} gave up after "
                             f"{retry.failure_count} failures.\n"
@@ -508,6 +591,69 @@ Test that it fires on exhaustion and does **not** fire on an ordinary retry.
 
 ---
 
+### Task 7b: `jobs complete` — close the manual-publish trap
+
+**This exists because the plan as first written created a new instance of the very
+bug it fixes.** After Tasks 3-4 the only way to publish a daily episode with the
+consumer down is `--dry-run` then `publish-script`. But `publish-script` never
+touches the job row (verified: no `pending_*` or `mark_*` reference anywhere in
+it). So the row stays `pending`, and the moment the consumer comes back it
+executes the job and publishes a **second** episode — the exact double-publish
+this plan is fixing, now reachable through the documented recovery path.
+
+There is no way to close a job by hand today: the `jobs` group has only `list`
+and `reset` (`__main__.py:168`, `:204`).
+
+**Files:**
+- Modify: `pipeline/db.py` (expose completion by feed slug), `pipeline/__main__.py`
+- Test: `pipeline/test_jobs_cli.py`
+
+**Step 1: Write the failing test**
+
+```python
+def test_jobs_complete_marks_a_pending_job_completed(tmp_path):
+    db = tmp_path / "s.db"
+    store = StateStore(db)
+    store.insert_pending_the_rundown("2026-08-17")
+    store.close()
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(
+            cli, ["jobs", "complete", "--feed", "the-rundown", "--date", "2026-08-17"]
+        )
+    assert result.exit_code == 0, result.output
+    store = StateStore(db)
+    assert store.list_daily_jobs("the-rundown", "pending") == []
+    assert len(store.list_daily_jobs("the-rundown", "completed")) == 1
+    store.close()
+
+
+def test_jobs_complete_rejects_an_unknown_date(tmp_path):
+    db = tmp_path / "s.db"
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(
+            cli, ["jobs", "complete", "--feed", "the-rundown", "--date", "2026-01-01"]
+        )
+    assert result.exit_code != 0
+```
+
+**Step 3: Implement** — mirror `jobs_reset_command` (`__main__.py:204`), resolving
+the row by feed+date and calling the existing `_mark_pending_job_completed` via a
+thin `StateStore.complete_daily_job(feed_slug, job_id)` that reuses
+`_FEED_SLUG_TO_TABLE`. Raise `click.ClickException` when no such row exists.
+
+**Step 5: Commit**
+
+```bash
+git commit -m "feat(jobs): add 'jobs complete' so a manual publish can close its job row
+
+Without this, the documented consumer-down recovery (dry-run then
+publish-script) leaves the row pending, and the returning consumer
+publishes a second episode - reintroducing the double-publish through
+the recovery path itself."
+```
+
+---
+
 ### Task 8: Documentation
 
 **Files:** `AGENTS.md`, `pipeline/AGENTS.md`, `.opencode/skills/operating-daily-podcast-jobs/SKILL.md`
@@ -518,6 +664,23 @@ Record:
 - `--lookback` applies to `--dry-run` only.
 - To force a run: `uv run python -m pipeline the-rundown --date YYYY-MM-DD`, then watch `journalctl -fu my-podcasts-consumer`.
 - Never run a second consumer by hand; it would reintroduce exactly this race.
+- **Manual publish with the consumer down:** `--dry-run`, then `publish-script`,
+  then **`jobs complete`**. Skipping the last step leaves the row `pending` and
+  the returning consumer publishes a duplicate.
+- Re-running an already-`completed` date is not supported (and was not before);
+  the command reports `status=completed` and does nothing.
+
+**State the availability tradeoff explicitly** — it is a real regression, not a
+free win. Before this change the timer's inline run was accidental redundancy:
+it published even when the consumer was dead. Now a dead consumer means no
+episode. We accept that because (a) `Restart=on-failure` covers the crash case,
+(b) a dead consumer stops the email-driven feeds too, so it gets noticed and
+fixed regardless, and (c) the concurrent "redundancy" was itself corrupting a
+shared work dir. But note the detection gap honestly: the enqueue-time audit
+only runs at the **next** weekday 04:30, so a consumer that dies Friday morning
+yields no episode and no alert until Monday — roughly 72 hours. If that proves
+unacceptable in practice, the fix is a consumer heartbeat file checked at
+enqueue time; file a bead rather than pre-building it.
 
 **Commit:** `docs: record the enqueue-only daily job model`
 
@@ -536,7 +699,14 @@ Record:
 
 ## Post-deploy remediation (separate from the fix)
 
-Only after the fix is deployed, clean the 16 duplicated `r2_key`s (32 rows, 16 stale extras). For each duplicated key keep the **newest** row — verified previously to match the actual R2 object in 146/147 cases — delete the rest, and regenerate the affected feeds. Back up `state.sqlite3` first. Cleaning before the fix just restarts the clock, which is exactly what happened on 2026-07-30.
+Only after the fix is deployed, clean the 16 duplicated `r2_key`s (32 rows, 16 stale extras). For each duplicated key keep the **newest** row, delete the rest, and regenerate the affected feeds. Back up `state.sqlite3` first. Cleaning before the fix just restarts the clock, which is exactly what happened on 2026-07-30.
+
+**Do not apply keep-newest blindly.** The rule came from a measurement that read
+"the newest-created row matches the actual R2 object for **146 of 147** keys" —
+which means there is a known mismatch. Re-run that comparison over today's 16
+keys, and for any key where the newest row does not match the live R2 object,
+hand-check it and keep the row that does. A blanket keep-newest would knowingly
+leave one feed entry pointing at the wrong artifact.
 
 ## Verification on the first real run (Monday ~06:00 ET)
 
