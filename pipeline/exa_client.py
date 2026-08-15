@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -137,3 +138,29 @@ def exa_text_if_hit(work_dir: Path, slug: str) -> str:
     # deliberately not being changed. Deleting this branch as "legacy" would
     # silently break FP show notes.
     return text
+
+
+def exa_result_sections(work_dir: Path, slug: str, *, limit: int = 2) -> str:
+    """The `## [title](url)` sections of a slug's Exa file, headers stripped.
+
+    `exa_text_if_hit` returns the raw file, which carries the `Result:` and
+    `Query:` bookkeeping headers. Those must never reach the writer prompt,
+    which consumes article text verbatim. This is the writer-facing view.
+
+    Returns "" when the file is absent, when the search was not a hit, or
+    when the file carries no result sections. `limit` caps how many results
+    are returned; syndicated copies of the same wire story are common, so
+    the tail is usually redundant.
+    """
+    text = exa_text_if_hit(work_dir, slug)
+    if not text:
+        return ""
+    # Anchor on the "## [title](url)" shape the collector writes, NOT on a
+    # bare "## ": Exa result bodies are scraped article text and can contain
+    # their own markdown headings, which would split a section mid-body and
+    # silently drop the next result.
+    parts = re.split(r"\n(?=## \[)", text)
+    sections = [p.strip() for p in parts if p.lstrip().startswith("## [")]
+    if not sections:
+        return ""
+    return "\n\n".join(sections[:limit])
