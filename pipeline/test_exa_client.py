@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from pipeline.exa_client import (
     ExaResult,
     exa_file_path,
+    exa_result_sections,
     exa_text_if_hit,
     search_related,
     search_related_status,
@@ -72,6 +74,55 @@ def test_search_related_with_include_domains(monkeypatch: pytest.MonkeyPatch) ->
 
     assert len(results) == 1
     assert results[0].title == "Domain Article"
+
+
+def test_search_related_status_passes_exclude_domains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """search_related_status forwards exclude_domains to exa.search."""
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+
+    mock_response = MagicMock()
+    mock_response.results = []
+
+    with patch("pipeline.exa_client.Exa") as MockExa:
+        mock_exa_instance = MockExa.return_value
+        mock_exa_instance.search.return_value = mock_response
+
+        search_related_status("headline", exclude_domains=["bloomberg.com"])
+
+        call_kwargs = mock_exa_instance.search.call_args
+        assert call_kwargs.kwargs.get("exclude_domains") == ["bloomberg.com"]
+
+
+def test_search_related_status_times_out_on_hung_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hung exa.search must not wedge the caller -> error:TimeoutError.
+
+    exa_py issues requests with no timeout=, so a stuck TCP connection is not
+    an exception; the call must be bounded from our side instead.
+    """
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr("pipeline.exa_client._EXA_TIMEOUT_SECONDS", 0.1)
+
+    class _HangingExa:
+        def __init__(self, api_key: str) -> None:
+            pass
+
+        def search(self, *args: object, **kwargs: object) -> None:
+            time.sleep(0.3)  # comfortably longer than the patched timeout
+            raise AssertionError("must not run to completion within the test")
+
+    monkeypatch.setattr("pipeline.exa_client.Exa", _HangingExa)
+
+    start = time.monotonic()
+    results, status = search_related_status("headline")
+    elapsed = time.monotonic() - start
+
+    assert results == []
+    assert status == "error:TimeoutError"
+    assert elapsed < 0.3, "call must return at the patched timeout, not the sleep"
 
 
 def test_search_related_returns_empty_on_missing_key(
@@ -213,3 +264,81 @@ def test_exa_text_if_hit_trusts_headerless_fp_file(tmp_path) -> None:
 def test_exa_text_if_hit_missing_file_returns_empty(tmp_path) -> None:
     """No file at all -> empty string, not an error."""
     assert exa_text_if_hit(tmp_path, "nonexistent") == ""
+
+
+# --- exa_result_sections ---
+
+
+def test_exa_result_sections_strips_headers(tmp_path) -> None:
+    """Writer-facing view drops the # Exa Results / Result: / Query: headers."""
+    p = exa_file_path(tmp_path, "slug")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        "# Exa Results for: Some Headline\n"
+        "Result: hit\n"
+        "Query: some keywords\n\n"
+        "## [Title A](https://a.example/x)\nBody A\n\n",
+        encoding="utf-8",
+    )
+    out = exa_result_sections(tmp_path, "slug")
+    assert out.startswith("## [Title A]")
+    assert "Result:" not in out
+    assert "Query:" not in out
+    assert "Exa Results for" not in out
+    assert "Body A" in out
+
+
+def test_exa_result_sections_empty_when_not_hit(tmp_path) -> None:
+    """Result: empty -> no sections, empty string."""
+    p = exa_file_path(tmp_path, "slug")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# Exa Results for: H\nResult: empty\nQuery: q\n\n", encoding="utf-8")
+    assert exa_result_sections(tmp_path, "slug") == ""
+
+
+def test_exa_result_sections_missing_file(tmp_path) -> None:
+    """No file at all -> empty string, not an error."""
+    assert exa_result_sections(tmp_path, "nope") == ""
+
+
+def test_exa_result_sections_limit(tmp_path) -> None:
+    """Caps at `limit` results, default trims to the first two."""
+    p = exa_file_path(tmp_path, "slug")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        "# Exa Results for: H\nResult: hit\nQuery: q\n\n"
+        "## [A](https://a.example)\nAAA\n\n"
+        "## [B](https://b.example)\nBBB\n\n"
+        "## [C](https://c.example)\nCCC\n\n",
+        encoding="utf-8",
+    )
+    out = exa_result_sections(tmp_path, "slug", limit=2)
+    assert "AAA" in out and "BBB" in out
+    assert "CCC" not in out
+
+
+def test_exa_result_sections_survives_subheading_in_body(tmp_path) -> None:
+    """A body's own '## Subheading' must not be mistaken for a new section.
+
+    Exa result bodies are scraped article text and can carry their own
+    markdown headings. Splitting on a bare "## " (rather than the anchored
+    "## [title](url)" shape) would cut a section mid-body and silently drop
+    the result that follows it -- this is the failure this test guards.
+    """
+    p = exa_file_path(tmp_path, "slug")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        "# Exa Results for: H\nResult: hit\nQuery: q\n\n"
+        "## [Title A](https://a.example)\n"
+        "Intro text.\n\n"
+        "## Subheading\n"
+        "More body text under the subheading.\n\n"
+        "## [Title B](https://b.example)\nBody B\n\n",
+        encoding="utf-8",
+    )
+    out = exa_result_sections(tmp_path, "slug")
+    assert "## [Title A]" in out
+    assert "## Subheading" in out
+    assert "More body text under the subheading." in out
+    assert "## [Title B]" in out
+    assert "Body B" in out

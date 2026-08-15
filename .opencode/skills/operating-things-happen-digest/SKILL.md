@@ -99,8 +99,8 @@ IN     47 = levine 21, semafor 19, zvi 7
 DEDUP  -6 (levine)
 FETCH  levine 15: live 6, paywalled 8, http_error 1, fetch_error 0
 PLAN   14 directives = 9 episode, 5 fp-routed
-EXA    7 flagged -> 3 hit, 3 empty, 1 error
-WRITE  9 selected -> 8 with text (3 live, 4 cache, 1 stub), 1 dropped
+EXA    2 flagged -> 1 hit, 1 empty
+WRITE  9 selected -> 8 with text (3 live, 4 cache, 1 paywalled+exa), 1 dropped, 1 +open-access
 OUT    1840 words, 4 themes, 9 headlines covered
 
 paywalled: bloomberg.com 5, ft.com 2, wsj.com 1
@@ -111,9 +111,40 @@ shows more `hit` than `error`, and `WRITE`'s "with text" is close to "selected"
 with few `dropped`.
 
 What is currently normal but *not* healthy, and is expected: most Levine
-articles land in `paywalled`, because 93% of them are headline-only stubs. That
-is the measured baseline this reporting exists to track, not a new fault. Fixing
-it is open-access substitution (`my-podcasts-85c`).
+articles land in `paywalled`, because 93% of *Levine files* are headline-only
+stubs. That is the measured baseline this reporting exists to track, not a new
+fault.
+
+### Reading the `+exa` buckets and the `+open-access` fragment
+
+Open-access substitution (`my-podcasts-85c`) fires Exa on stubbed Levine
+stories that were actually *selected*, retrieves other outlets' coverage of
+the same story, and appends it to the stub rather than replacing it — so the
+stub's true headline still anchors the writer's section even if the search
+matched the wrong story.
+
+- A `WRITE` bucket suffixed `+exa` (e.g. `paywalled+exa` above) means that
+  writer input's stub got open-access text appended. The plain bucket (bare
+  `paywalled`) means it did not — either Exa wasn't triggered, or it was
+  triggered and came back empty/error.
+- The trailing `, N +open-access` on the `WRITE` line is the same count
+  spelled out; it is present only when `N > 0`, so its absence on an older or
+  quiet run is normal, not a sign the feature regressed.
+- `EXA n flagged` is a much smaller number than the old editor-driven trigger
+  produced, **by design**: it now fires per *selected* stubbed Levine story,
+  not per directive the editor guessed was paywalled. Measured across 8 real
+  runs, only ~1.2 of ~4.75 selected stories per episode are Levine stubs at
+  all (`[0, 1, 0, 3, 1, 2, 1, 2]` stubs/run, max 3). **`EXA 2 flagged` is a
+  healthy day. `EXA 0 flagged` is legitimate on a light one** — do not
+  diagnose a broken trigger from a small number; compare it against that
+  day's `FETCH` stub count (`paywalled` + `http_error` + `fetch_error`)
+  instead, which is the fair denominator.
+- A single run's report can neither confirm nor refute whether this feature
+  is working, because the daily numbers are this small. Prefer a week of
+  `/persist/my-podcasts/run-stats.jsonl` history over any one report.
+- Alert thresholds for any of this remain deliberately unset
+  (`my-podcasts-3qs`) until that history exists — don't invent a guessed
+  threshold from one day's numbers.
 
 Beware two false alarms:
 

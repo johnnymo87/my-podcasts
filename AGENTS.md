@@ -91,9 +91,10 @@ Daily current-affairs digest covering business, technology, AI, law, media, scie
 1. Systemd timer triggers, or CLI: `uv run python -m pipeline the-rundown [--date YYYY-MM-DD] [--lookback N] [--dry-run]`
 2. `things_happen_collector.py` reads Levine links from cache, Semafor from cache, syncs Zvi cache — all within adaptive lookback window. Routes FP-flagged links to `/persist/my-podcasts/fp-routed-links/` for FP Digest.
 3. `things_happen_editor.py` (Gemini Flash-Lite) triages into 3-5 themes, selects 8-12 stories, writes `plan.json`
-4. Exa enrichment for paywalled articles
-5. `rundown_writer.py` generates script via opencode-serve (synchronous, no agent session)
-6. `things_happen_processor.py` runs TTS (`ttsjoin`) + publishes to R2 + updates feed
+4. Exa enrichment for selected stories whose Levine article measured a non-`live` `source_tier` (`paywalled`/`http_error`/`fetch_error`), unioned with any directive the editor separately flagged `needs_exa` — the measured fetch tier drives this, not the editor's headline-only guess. Semafor/Zvi stories have no Levine article to match, so the tier half cannot fire for them — they come from cache with real body text already — but they still fire when the editor flags `needs_exa`, which is the union preserving today's behavior. Matching a directive to its Levine article is by slug, not raw headline equality. The search excludes the article's own origin domain plus a fixed deny-list of paywall-circumvention mirrors (`archive.ph` and friends) so retrieved text never launders a paywalled read through a bypass site.
+5. Open-access text found this way is **appended** to the stub, never used to replace it — the stub's true headline still anchors the section, so a wrong-story search result degrades the section rather than fabricating a confident narration under the wrong headline
+6. `rundown_writer.py` generates script via opencode-serve (synchronous, no agent session); the writer prompt is told to name the outlet when it draws facts from that appended coverage
+7. `things_happen_processor.py` runs TTS (`ttsjoin`) + publishes to R2 + updates feed
 
 **Key modules:**
 - `pipeline/opencode_client.py` — shared HTTP client for the opencode-serve API
@@ -101,7 +102,8 @@ Daily current-affairs digest covering business, technology, AI, law, media, scie
 - `pipeline/things_happen_collector.py` — article collection, Semafor integration, Zvi integration, FP routing
 - `pipeline/things_happen_editor.py` — Gemini AI for themed research plan (story selection, priority, FP flagging)
 - `pipeline/zvi_cache.py` — Zvi RSS fetch, roundup splitting, persistent cache
-- `pipeline/exa_client.py` — Exa search API wrapper, plus `exa_file_path`/`exa_text_if_hit` (the `Result: hit` gate)
+- `pipeline/exa_client.py` — Exa search API wrapper (bounded with a 30s timeout, `exclude_domains` support), plus `exa_file_path`/`exa_text_if_hit` (the `Result: hit` gate) and `exa_result_sections` (header-stripped view fed to the writer)
+- `pipeline/consumer.py` — `_assemble_writer_inputs` resolves each selected directive to article text and appends open-access coverage to stubs
 - `pipeline/rss_sources.py` — RSS source definitions, `SEMAFOR`, `categorize_semafor_article()` (legacy fallback)
 - `pipeline/source_cache.py` — Persistent cache sync for Semafor (with LLM routing), Antiwar RSS, and Antiwar homepage
 - `pipeline/run_stats.py` — content-acquisition funnel: `collect_run_stats`, `render_report`, `append_jsonl`
@@ -126,6 +128,17 @@ already covered, `FETCH` the per-tier outcome of fetching Levine links
 writer got a headline), `EXA` the enrichment hit rate, `WRITE` what reached the
 writer, `OUT` the resulting script. The `paywalled:` domain histogram names the
 publishers worth routing around.
+
+A `WRITE` bucket suffixed `+exa` (e.g. `paywalled+exa`) means that stub got
+open-access coverage appended before reaching the writer; the plain bucket
+(bare `paywalled`) means it did not. When any appending happened, the `WRITE`
+line also grows a trailing `, N +open-access` count — its absence means zero
+appends that run, not that the field doesn't exist. **Scale expectations:**
+measured across 8 real runs, only ~1.2 of ~4.75 selected stories per episode
+are Levine stubs (`[0, 1, 0, 3, 1, 2, 1, 2]` stubs/run) — `EXA 2 flagged` is a
+healthy day, and `EXA 0 flagged` is legitimate on a light one. A single run's
+report cannot confirm or refute whether this feature is working; only a
+week of `run-stats.jsonl` history can.
 
 Two cautions. It is labeled **script stage** because TTS and publish happen on a
 later consumer loop iteration — the report says nothing about whether an episode

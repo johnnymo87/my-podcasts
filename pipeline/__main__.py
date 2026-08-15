@@ -51,7 +51,7 @@ def find_rundown_article_source(
     """
     import json as _json
 
-    from pipeline.exa_client import exa_file_path, exa_text_if_hit
+    from pipeline.exa_client import exa_file_path, exa_result_sections
     from pipeline.things_happen_collector import _slugify
 
     headline = directive.headline
@@ -127,7 +127,7 @@ def find_rundown_article_source(
             )
 
     # Exa enrichment
-    exa_text = exa_text_if_hit(work_dir, slug)
+    exa_text = exa_result_sections(work_dir, slug)
     if exa_text:
         exa_path = exa_file_path(work_dir, slug)
         return exa_text, str(exa_path.relative_to(work_dir))

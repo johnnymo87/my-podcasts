@@ -215,6 +215,9 @@ def test_fully_populated_fixture_every_number_exact(tmp_path):
     assert stats.exa_outcomes == {
         "hit": 3,
         "empty": 3,
+        # Always present, distinct from "empty": Exa returned results but the
+        # deny-list rejected all of them (paywalled origin or bypass mirror).
+        "filtered": 0,
         "no_key": 0,
         "error": 1,
     }
@@ -515,6 +518,96 @@ def test_append_jsonl_writes_one_line_and_creates_parent_dir(tmp_path):
     parsed = json.loads(lines[0])
     assert parsed["job_id"] == "j1"
     assert parsed["date_str"] == "2026-08-15"
+
+
+def test_writer_input_with_exa_appended_is_counted(tmp_path):
+    """A paywalled stub that received Exa text must be distinguishable."""
+    work_dir = tmp_path / "the-rundown-exa-appended"
+    work_dir.mkdir()
+    _write_json(
+        work_dir / "tiers.json",
+        {
+            "articles/00-pw0.md": {
+                "tier": "paywalled",
+                "extracted_chars": 50,
+                "url": "https://bloomberg.com/news/a",
+            }
+        },
+    )
+    _write_json(
+        work_dir / "writer_inputs.json",
+        [
+            {
+                "headline": "Stubbed story",
+                "theme": "Theme A",
+                "source_path": "articles/00-pw0.md",
+                "chars": 550,
+                "exa_appended": True,
+                "exa_chars": 500,
+            }
+        ],
+    )
+
+    stats = collect_run_stats(work_dir, job_id="j", date_str="2026-08-15")
+
+    assert stats.writer_exa_appended == 1
+    assert stats.writer_exa_chars == 500
+    assert stats.writer_buckets["paywalled+exa"] == 1
+    assert stats.writer_buckets["paywalled"] == 0
+
+    report = render_report(stats)
+    assert ", 1 +open-access" in report
+
+
+def test_exa_appended_absent_on_historical_dirs(tmp_path):
+    """Work dirs written before this feature have no exa_appended key."""
+    work_dir = tmp_path / "the-rundown-historical"
+    work_dir.mkdir()
+    _write_json(
+        work_dir / "tiers.json",
+        {
+            "articles/00-live0.md": {
+                "tier": "live",
+                "extracted_chars": 1000,
+                "url": "https://example.com/live0",
+            }
+        },
+    )
+    _write_json(
+        work_dir / "writer_inputs.json",
+        [
+            {
+                "headline": "Live story",
+                "theme": "Theme A",
+                "source_path": "articles/00-live0.md",
+                "chars": 1000,
+            }
+        ],
+    )
+
+    stats = collect_run_stats(work_dir, job_id="j", date_str="2026-08-15")
+
+    assert stats.writer_exa_appended == 0
+    assert stats.writer_exa_chars == 0
+    assert stats.writer_buckets["live"] == 1
+    assert "live+exa" not in stats.writer_buckets
+
+    report = render_report(stats)
+    assert "+open-access" not in report
+
+
+def test_render_report_byte_identical_when_no_exa_appended(tmp_path):
+    """Historical work dirs must render exactly as before this feature."""
+    work_dir = _populated_work_dir(tmp_path)
+    stats = collect_run_stats(work_dir, job_id="job-full", date_str="2026-08-15")
+
+    report = render_report(stats)
+
+    assert (
+        "WRITE  9 selected -> 8 with text (3 live, 2 paywalled, 2 cache, 1 exa), "
+        "1 dropped" in report
+    )
+    assert "+open-access" not in report
 
 
 def test_append_jsonl_appends_across_calls(tmp_path):

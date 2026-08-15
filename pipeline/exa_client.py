@@ -1,10 +1,44 @@
 from __future__ import annotations
 
 import os
+import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from exa_py import Exa
+
+
+# exa_py issues requests.get/requests.post with no timeout= (verified in the
+# installed package, exa_py/api.py:1417-1439), so a stuck TCP connection is
+# not an exception -- it blocks forever. The consumer is a single loop
+# serving four pipelines, so one wedged call would stall all of them. Bound
+# it from our side instead.
+_EXA_TIMEOUT_SECONDS = 30
+
+
+def _search_with_timeout(exa: Exa, headline: str, **kwargs: object) -> Any:
+    """Run exa.search in a worker thread, bounded by _EXA_TIMEOUT_SECONDS.
+
+    A fresh, single-use executor per call (not a shared/module-level pool):
+    reusing one pool would let a hung call block every later call queued
+    behind it, reintroducing the wedge this function exists to prevent.
+
+    On timeout we deliberately do NOT join or cancel the worker thread --
+    shutdown(wait=False) returns immediately without waiting for the hung
+    call to finish. (A `with ThreadPoolExecutor(...)` block would be wrong
+    here: __exit__ calls shutdown(wait=True), which blocks until the hung
+    task completes and reintroduces the exact hang this is meant to avoid.)
+    The abandoned thread leaks one idle socket until the hung call eventually
+    returns or errors; that is the accepted tradeoff for a long-lived loop.
+    """
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(exa.search, headline, **kwargs)
+    try:
+        return future.result(timeout=_EXA_TIMEOUT_SECONDS)
+    finally:
+        executor.shutdown(wait=False)
 
 
 @dataclass(frozen=True)
@@ -18,6 +52,7 @@ def search_related_status(
     headline: str,
     *,
     include_domains: list[str] | None = None,
+    exclude_domains: list[str] | None = None,
     num_results: int = 3,
 ) -> tuple[list[ExaResult], str]:
     """Search Exa, reporting why the result list is empty when it is.
@@ -32,12 +67,14 @@ def search_related_status(
 
     try:
         exa = Exa(api_key=api_key)
-        response = exa.search(
+        response = _search_with_timeout(
+            exa,
             headline,
             num_results=num_results,
             type="auto",
             contents={"text": {"max_characters": 3000}},
             include_domains=include_domains,
+            exclude_domains=exclude_domains,
         )
 
         results = [
@@ -101,3 +138,29 @@ def exa_text_if_hit(work_dir: Path, slug: str) -> str:
     # deliberately not being changed. Deleting this branch as "legacy" would
     # silently break FP show notes.
     return text
+
+
+def exa_result_sections(work_dir: Path, slug: str, *, limit: int = 2) -> str:
+    """The `## [title](url)` sections of a slug's Exa file, headers stripped.
+
+    `exa_text_if_hit` returns the raw file, which carries the `Result:` and
+    `Query:` bookkeeping headers. Those must never reach the writer prompt,
+    which consumes article text verbatim. This is the writer-facing view.
+
+    Returns "" when the file is absent, when the search was not a hit, or
+    when the file carries no result sections. `limit` caps how many results
+    are returned; syndicated copies of the same wire story are common, so
+    the tail is usually redundant.
+    """
+    text = exa_text_if_hit(work_dir, slug)
+    if not text:
+        return ""
+    # Anchor on the "## [title](url)" shape the collector writes, NOT on a
+    # bare "## ": Exa result bodies are scraped article text and can contain
+    # their own markdown headings, which would split a section mid-body and
+    # silently drop the next result.
+    parts = re.split(r"\n(?=## \[)", text)
+    sections = [p.strip() for p in parts if p.lstrip().startswith("## [")]
+    if not sections:
+        return ""
+    return "\n\n".join(sections[:limit])

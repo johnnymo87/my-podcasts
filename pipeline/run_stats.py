@@ -27,7 +27,11 @@ _FETCH_TIERS = ("live", "paywalled", "http_error", "fetch_error")
 
 # Outcome buckets for an Exa search, per exa_client.search_related_status.
 # "error:{ExcClass}" collapses into "error"; anything unrecognized -> "other".
-_EXA_BUCKETS = ("hit", "empty", "no_key", "error")
+# "filtered" means Exa returned results but every one was rejected locally as
+# the paywalled origin or a bypass mirror. It is deliberately distinct from
+# "empty" (Exa found nothing), because the two have completely different
+# causes and only one of them indicates the deny-list is doing work.
+_EXA_BUCKETS = ("hit", "empty", "filtered", "no_key", "error")
 
 # Buckets a writer_inputs.json entry can classify into. "live"/"paywalled"/
 # "http_error"/"fetch_error" come from the tiers.json join (Levine articles,
@@ -94,6 +98,14 @@ class RunStats(BaseModel):
     writer_with_text: int = 0
     writer_dropped: int = 0
     writer_buckets: dict[str, int] = Field(default_factory=dict)
+
+    # Writer inputs that had open-access coverage appended to a stub
+    # (consumer.py's exa_appended/exa_chars fields), and the total
+    # characters of that appended text. Both zero on historical work dirs
+    # written before this feature (writer_inputs.json entries with no
+    # exa_appended key at all).
+    writer_exa_appended: int = 0
+    writer_exa_chars: int = 0
 
     # From script.txt / covered.json.
     script_words: int | None = None
@@ -294,12 +306,22 @@ def collect_run_stats(
     selected = 0
     with_text = 0
     dropped = 0
+    writer_exa_appended = 0
+    writer_exa_chars = 0
     for item in writer_inputs:
         if not isinstance(item, dict):
-            write_buckets["unknown"] += 1
+            write_buckets["unknown"] = write_buckets.get("unknown", 0) + 1
             selected += 1
             continue
         selected += 1
+
+        appended = item.get("exa_appended") is True
+        if appended:
+            writer_exa_appended += 1
+            exa_chars = item.get("exa_chars")
+            if isinstance(exa_chars, int) and not isinstance(exa_chars, bool):
+                writer_exa_chars += exa_chars
+
         source_path = item.get("source_path")
         chars = item.get("chars")
         has_text = isinstance(chars, int) and not isinstance(chars, bool) and chars > 0
@@ -308,7 +330,8 @@ def collect_run_stats(
             dropped += 1
             continue
         if not isinstance(source_path, str):
-            write_buckets["unknown"] += 1
+            key = "unknown+exa" if appended else "unknown"
+            write_buckets[key] = write_buckets.get(key, 0) + 1
             if has_text:
                 with_text += 1
             continue
@@ -316,18 +339,17 @@ def collect_run_stats(
         tier_entry = tiers.get(source_path)
         if isinstance(tier_entry, dict) and isinstance(tier_entry.get("tier"), str):
             tier = tier_entry["tier"]
-            if tier in _FETCH_TIERS:
-                write_buckets[tier] += 1
-            else:
-                write_buckets["unknown"] += 1
+            bucket = tier if tier in _FETCH_TIERS else "unknown"
         elif source_path.startswith("articles/semafor/") or source_path.startswith(
             "articles/zvi/"
         ):
-            write_buckets["cache"] += 1
+            bucket = "cache"
         elif source_path.startswith("enrichment/exa/"):
-            write_buckets["exa"] += 1
+            bucket = "exa"
         else:
-            write_buckets["unknown"] += 1
+            bucket = "unknown"
+        key = f"{bucket}+exa" if appended else bucket
+        write_buckets[key] = write_buckets.get(key, 0) + 1
 
         if has_text:
             with_text += 1
@@ -336,6 +358,8 @@ def collect_run_stats(
     stats.writer_with_text = with_text
     stats.writer_dropped = dropped
     stats.writer_buckets = write_buckets
+    stats.writer_exa_appended = writer_exa_appended
+    stats.writer_exa_chars = writer_exa_chars
 
     # --- script.txt / covered.json ----------------------------------------
     script_path = work_dir / "script.txt"
@@ -435,6 +459,8 @@ def render_report(stats: RunStats) -> str:
     if write_breakdown:
         write_line += f" ({write_breakdown})"
     write_line += f", {stats.writer_dropped} dropped"
+    if stats.writer_exa_appended:
+        write_line += f", {stats.writer_exa_appended} +open-access"
     lines.append(write_line)
 
     out_parts = []

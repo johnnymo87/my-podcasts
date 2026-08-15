@@ -22,7 +22,17 @@ from pipeline.things_happen_processor import process_things_happen_job
 if TYPE_CHECKING:
     from pipeline.db import StateStore
     from pipeline.r2 import R2Client
+    from pipeline.things_happen_editor import RundownResearchPlan
 
+
+# Framing matters: this text is retrieved by keyword search and is not
+# guaranteed to cover the same story. Telling the writer that is the cheap
+# mitigation for a wrong-story match in a pipeline with no human review.
+_OPEN_ACCESS_HEADING = (
+    "## Related coverage from other outlets\n"
+    "(Retrieved by search. Use only the parts that clearly describe the "
+    "story in the headline above; ignore anything that does not match.)"
+)
 
 _BLOG_POLL_INTERVAL = 6 * 3600  # 6 hours
 _last_blog_poll = 0.0
@@ -306,6 +316,50 @@ def _find_article_text(directive: Any, work_dir: Path) -> str:
     return ""
 
 
+def _assemble_writer_inputs(
+    plan: RundownResearchPlan, work_dir: Path
+) -> tuple[dict[str, list[str]], list[dict]]:
+    """Resolve each selected directive to article text. Pure function of disk state."""
+    from pipeline.__main__ import find_rundown_article_source
+    from pipeline.exa_client import exa_result_sections
+    from pipeline.things_happen_collector import _slugify as _th_slugify
+
+    rundown_articles_by_theme: dict[str, list[str]] = {}
+    writer_inputs: list[dict] = []
+    for directive in plan.directives:
+        if not directive.include_in_episode:
+            continue
+        text, src = find_rundown_article_source(directive, work_dir)
+
+        # A stub always wins the word-overlap match ahead of Exa (it IS the
+        # headline text, so it shares words with the directive by
+        # construction), so retrieved open-access text never reaches the
+        # writer on its own. Append it here. Never replace: with a fully
+        # automated writer and no human review, replacing a stub with a
+        # wrong-story article would make the writer confidently narrate a
+        # false story under a true headline -- appending leaves the true
+        # headline anchoring the section, so a mismatch degrades instead.
+        exa_extra = ""
+        if src is not None and not src.startswith("enrichment/exa/"):
+            exa_extra = exa_result_sections(work_dir, _th_slugify(directive.headline))
+            if exa_extra:
+                text = f"{text}\n\n{_OPEN_ACCESS_HEADING}\n\n{exa_extra}"
+
+        writer_inputs.append(
+            {
+                "headline": directive.headline,
+                "theme": directive.theme,
+                "source_path": src,
+                "chars": len(text),
+                "exa_appended": bool(exa_extra),
+                "exa_chars": len(exa_extra),
+            }
+        )
+        if text:
+            rundown_articles_by_theme.setdefault(directive.theme, []).append(text)
+    return rundown_articles_by_theme, writer_inputs
+
+
 def consume_forever(
     store: StateStore,
     r2_client: R2Client,
@@ -389,7 +443,6 @@ def consume_forever(
 
                     else:
                         # No script yet — run the full synchronous pipeline.
-                        from pipeline.__main__ import find_rundown_article_source
                         from pipeline.rundown_writer import generate_rundown_script
                         from pipeline.things_happen_collector import (
                             collect_all_artifacts,
@@ -447,24 +500,9 @@ def consume_forever(
                             plan_path.read_text()
                         )
 
-                        rundown_articles_by_theme: dict[str, list[str]] = {}
-                        writer_inputs: list[dict] = []
-                        for directive in plan.directives:
-                            if not directive.include_in_episode:
-                                continue
-                            text, src = find_rundown_article_source(directive, work_dir)
-                            writer_inputs.append(
-                                {
-                                    "headline": directive.headline,
-                                    "theme": directive.theme,
-                                    "source_path": src,
-                                    "chars": len(text),
-                                }
-                            )
-                            if text:
-                                rundown_articles_by_theme.setdefault(
-                                    directive.theme, []
-                                ).append(text)
+                        rundown_articles_by_theme, writer_inputs = (
+                            _assemble_writer_inputs(plan, work_dir)
+                        )
                         # A directive resolving to nothing used to vanish here
                         # with no counter and no log.
                         (work_dir / "writer_inputs.json").write_text(

@@ -29,6 +29,16 @@ def test_build_prompt_basic():
     assert "The Rundown" in prompt
 
 
+def test_build_prompt_instructs_outlet_attribution_for_open_access():
+    prompt = build_rundown_prompt(
+        themes=["Tech"],
+        articles_by_theme={"Tech": ["Article about tech"]},
+        date_str="2026-03-10",
+    )
+    assert "Related coverage from other outlets" in prompt
+    assert "name the outlet" in prompt
+
+
 def test_build_prompt_with_context():
     prompt = build_rundown_prompt(
         themes=["Tech"],
