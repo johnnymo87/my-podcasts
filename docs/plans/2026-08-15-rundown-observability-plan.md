@@ -10,6 +10,18 @@
 
 **Design doc:** `docs/plans/2026-08-15-rundown-observability-design.md`
 
+**Beads:**
+
+| Bead | Piece | Blocked by |
+| --- | --- | --- |
+| `my-podcasts-llm` | Piece 0 — unblock CI | ready |
+| `my-podcasts-6yo` | Piece 1 — repair the Exa path | `llm` |
+| `my-podcasts-vxd` | Piece 2 — the funnel | `6yo` |
+| `my-podcasts-85c` | Open-access substitution (the actual feature) | `vxd` |
+| `my-podcasts-kyk` | Exa augment-not-replace | `vxd` |
+| `my-podcasts-3qs` | Alert thresholds from real data | `vxd` |
+| `my-podcasts-cgn` | Triage 111 mypy errors, make the step blocking | `llm` |
+
 ---
 
 ## Background you need before touching anything
