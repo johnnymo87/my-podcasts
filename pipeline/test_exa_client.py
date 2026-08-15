@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -91,6 +92,36 @@ def test_search_related_status_passes_exclude_domains(
 
         call_kwargs = mock_exa_instance.search.call_args
         assert call_kwargs.kwargs.get("exclude_domains") == ["bloomberg.com"]
+
+
+def test_search_related_status_times_out_on_hung_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hung exa.search must not wedge the caller -> error:TimeoutError.
+
+    exa_py issues requests with no timeout=, so a stuck TCP connection is not
+    an exception; the call must be bounded from our side instead.
+    """
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr("pipeline.exa_client._EXA_TIMEOUT_SECONDS", 0.1)
+
+    class _HangingExa:
+        def __init__(self, api_key: str) -> None:
+            pass
+
+        def search(self, *args: object, **kwargs: object) -> None:
+            time.sleep(0.3)  # comfortably longer than the patched timeout
+            raise AssertionError("must not run to completion within the test")
+
+    monkeypatch.setattr("pipeline.exa_client.Exa", _HangingExa)
+
+    start = time.monotonic()
+    results, status = search_related_status("headline")
+    elapsed = time.monotonic() - start
+
+    assert results == []
+    assert status == "error:TimeoutError"
+    assert elapsed < 0.3, "call must return at the patched timeout, not the sleep"
 
 
 def test_search_related_returns_empty_on_missing_key(

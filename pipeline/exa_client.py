@@ -1,10 +1,43 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from exa_py import Exa
+
+
+# exa_py issues requests.get/requests.post with no timeout= (verified in the
+# installed package, exa_py/api.py:1417-1439), so a stuck TCP connection is
+# not an exception -- it blocks forever. The consumer is a single loop
+# serving four pipelines, so one wedged call would stall all of them. Bound
+# it from our side instead.
+_EXA_TIMEOUT_SECONDS = 30
+
+
+def _search_with_timeout(exa: Exa, headline: str, **kwargs: object) -> Any:
+    """Run exa.search in a worker thread, bounded by _EXA_TIMEOUT_SECONDS.
+
+    A fresh, single-use executor per call (not a shared/module-level pool):
+    reusing one pool would let a hung call block every later call queued
+    behind it, reintroducing the wedge this function exists to prevent.
+
+    On timeout we deliberately do NOT join or cancel the worker thread --
+    shutdown(wait=False) returns immediately without waiting for the hung
+    call to finish. (A `with ThreadPoolExecutor(...)` block would be wrong
+    here: __exit__ calls shutdown(wait=True), which blocks until the hung
+    task completes and reintroduces the exact hang this is meant to avoid.)
+    The abandoned thread leaks one idle socket until the hung call eventually
+    returns or errors; that is the accepted tradeoff for a long-lived loop.
+    """
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(exa.search, headline, **kwargs)
+    try:
+        return future.result(timeout=_EXA_TIMEOUT_SECONDS)
+    finally:
+        executor.shutdown(wait=False)
 
 
 @dataclass(frozen=True)
@@ -33,7 +66,8 @@ def search_related_status(
 
     try:
         exa = Exa(api_key=api_key)
-        response = exa.search(
+        response = _search_with_timeout(
+            exa,
             headline,
             num_results=num_results,
             type="auto",
