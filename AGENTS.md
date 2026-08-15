@@ -101,9 +101,41 @@ Daily current-affairs digest covering business, technology, AI, law, media, scie
 - `pipeline/things_happen_collector.py` — article collection, Semafor integration, Zvi integration, FP routing
 - `pipeline/things_happen_editor.py` — Gemini AI for themed research plan (story selection, priority, FP flagging)
 - `pipeline/zvi_cache.py` — Zvi RSS fetch, roundup splitting, persistent cache
-- `pipeline/exa_client.py` — Exa search API wrapper
+- `pipeline/exa_client.py` — Exa search API wrapper, plus `exa_file_path`/`exa_text_if_hit` (the `Result: hit` gate)
 - `pipeline/rss_sources.py` — RSS source definitions, `SEMAFOR`, `categorize_semafor_article()` (legacy fallback)
 - `pipeline/source_cache.py` — Persistent cache sync for Semafor (with LLM routing), Antiwar RSS, and Antiwar homepage
+- `pipeline/run_stats.py` — content-acquisition funnel: `collect_run_stats`, `render_report`, `append_jsonl`
+- `pipeline/alerts.py` — `send_alert`, posts plain text to the Telegram General topic via pigeon
+- `pipeline/pigeon.py` — pigeon daemon URL + auth headers, shared by `alerts` and `opencode_client`
+
+**Content-acquisition funnel:** every Rundown script stage emits a funnel report
+to the Telegram General topic and appends a line to
+`/persist/my-podcasts/run-stats.jsonl`. It answers "how much real article text
+actually reached the writer" — the question that went unanswered for months while
+93% of Levine articles arrived as bare headlines.
+
+Render the funnel for any existing work dir:
+
+```bash
+uv run python -m pipeline run-stats --work-dir /tmp/the-rundown-<job_id> [--send]
+```
+
+Reading the report: `IN` is candidates found per source, `DEDUP` how many were
+already covered, `FETCH` the per-tier outcome of fetching Levine links
+(`live` means real body text; `paywalled`/`http_error`/`fetch_error` all mean the
+writer got a headline), `EXA` the enrichment hit rate, `WRITE` what reached the
+writer, `OUT` the resulting script. The `paywalled:` domain histogram names the
+publishers worth routing around.
+
+Two cautions. It is labeled **script stage** because TTS and publish happen on a
+later consumer loop iteration — the report says nothing about whether an episode
+shipped. And severity is always `info`: thresholds are deliberately unset until
+`run-stats.jsonl` has real history (`my-podcasts-3qs`), because
+`include_in_episode` measured 4-5 on every one of the last 10 runs, so any
+guessed threshold fires on normal days.
+
+Work dirs live under `/tmp` by default; `MY_PODCASTS_WORK_DIR_BASE` overrides
+the base (used by tests so the suite does not litter the host's `/tmp`).
 
 ## FP Digest Pipeline
 

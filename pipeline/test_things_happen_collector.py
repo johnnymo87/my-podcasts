@@ -193,8 +193,8 @@ def test_prior_urls_are_not_fetched(tmp_path, monkeypatch):
     # The sentinel records the dedup that just happened, so a later run can be
     # told apart from a run that simply had nothing to collect.
     sentinel = json.loads((work_dir / "collection_done.json").read_text())
-    assert sentinel["levine_candidates"] == 2
-    assert sentinel["levine_deduped"] == 1
+    assert sentinel["candidates"]["levine"] == 2
+    assert sentinel["deduped"]["levine"] == 1
     assert sentinel["levine_articles"] == 1
 
 
@@ -705,6 +705,183 @@ def test_find_rundown_article_text_exa_headerless_still_trusted(tmp_path):
     assert "Article text with no Result header at all." in text
 
 
+def test_find_rundown_article_source_reports_path_on_exact_match(tmp_path):
+    """Exact index match (return site 1) reports the work-dir-relative path."""
+    from pipeline.__main__ import find_rundown_article_source
+
+    index = {"Some Headline": "articles/00-some-headline.md"}
+    (tmp_path / "articles").mkdir()
+    (tmp_path / "articles" / "00-some-headline.md").write_text(
+        "# Some Headline\n\nURL: u\n\nbody text here", encoding="utf-8"
+    )
+    (tmp_path / "headline_index.json").write_text(json.dumps(index))
+
+    class FakeDirective:
+        headline = "Some Headline"
+        source = ""
+
+    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert "body text here" in text
+    assert path == "articles/00-some-headline.md"
+
+
+def test_find_rundown_article_source_reports_path_on_word_overlap_match(tmp_path):
+    """Word-overlap index match (return site 2) reports the resolved path."""
+    articles_dir = tmp_path / "articles" / "zvi"
+    articles_dir.mkdir(parents=True)
+    zvi_file = articles_dir / "2026-03-19-chip-city.md"
+    zvi_file.write_text(
+        "# Chip City\n\nPost: AI Weekly\nURL: https://zvi.com/ai\n\n"
+        "Nvidia to spend $26 billion to build open weight AI models. "
+        "The company announced plans for inference workloads."
+    )
+
+    index = {"Chip City": "articles/zvi/2026-03-19-chip-city.md"}
+    (tmp_path / "headline_index.json").write_text(json.dumps(index))
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class FakeDirective:
+        # Editor reformulated "Chip City" into a descriptive headline
+        headline = "Nvidia to spend $26 billion to build open weight AI models"
+        source = "zvi"
+
+    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert "Nvidia" in text
+    assert path == "articles/zvi/2026-03-19-chip-city.md"
+
+
+def test_find_rundown_article_source_reports_path_on_legacy_flat_match(tmp_path):
+    """Legacy flat Levine glob (return site 3) reports its own relative path."""
+    articles_dir = tmp_path / "articles"
+    articles_dir.mkdir(parents=True)
+    slug = _slugify("Flat Levine Story")
+    art_file = articles_dir / f"00-{slug}.md"
+    art_file.write_text("# Flat Levine Story\n\nURL: u\n\nFlat body text.")
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class FakeDirective:
+        headline = "Flat Levine Story"
+        source = "levine"
+
+    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert "Flat body text." in text
+    assert path == f"articles/00-{slug}.md"
+
+
+def test_find_rundown_article_source_reports_path_on_legacy_semafor_match(tmp_path):
+    """Legacy Semafor slug match (return site 4) reports its relative path."""
+    semafor_dir = tmp_path / "articles" / "semafor"
+    semafor_dir.mkdir(parents=True)
+    slug = _slugify("Semafor Story")
+    semafor_file = semafor_dir / f"{slug}.md"
+    semafor_file.write_text("# Semafor Story\n\nURL: u\n\nSemafor body text.")
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class FakeDirective:
+        headline = "Semafor Story"
+        source = "semafor"
+
+    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert "Semafor body text." in text
+    assert path == f"articles/semafor/{slug}.md"
+
+
+def test_find_rundown_article_source_reports_path_on_legacy_zvi_glob_match(tmp_path):
+    """Legacy Zvi glob match (return site 5) reports its own relative path."""
+    zvi_dir = tmp_path / "articles" / "zvi"
+    zvi_dir.mkdir(parents=True)
+    slug = _slugify("Zvi Glob Story")
+    zvi_file = zvi_dir / f"2026-03-19-{slug}.md"
+    zvi_file.write_text("# Zvi Glob Story\n\nURL: u\n\nZvi body text.")
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class FakeDirective:
+        headline = "Zvi Glob Story"
+        source = "zvi"
+
+    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert "Zvi body text." in text
+    assert path == f"articles/zvi/2026-03-19-{slug}.md"
+
+
+def test_find_rundown_article_source_reports_path_on_exa_hit(tmp_path):
+    """Exa hit (return site 6) reports the Exa enrichment file's relative path."""
+    exa_dir = tmp_path / "enrichment" / "exa"
+    exa_dir.mkdir(parents=True)
+    slug = _slugify("Paywalled Story")
+    exa_file = exa_dir / f"{slug}.md"
+    exa_file.write_text(
+        "Result: hit\n\n# Paywalled Story\n\nURL: https://example.com/paywalled\n\n"
+        "Full article text recovered via Exa search."
+    )
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class FakeDirective:
+        headline = "Paywalled Story"
+        source = "levine"
+
+    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert "Full article text recovered via Exa search." in text
+    assert path == f"enrichment/exa/{slug}.md"
+
+
+def test_find_rundown_article_source_exa_gated_miss_returns_none(tmp_path):
+    """The Exa gate rejecting a `Result: empty` stub (site 6, miss branch) must
+    fall through to the final miss (site 7): no text, no path -- not the path
+    to a file whose text is being withheld."""
+    exa_dir = tmp_path / "enrichment" / "exa"
+    exa_dir.mkdir(parents=True)
+    slug = _slugify("No Results Story")
+    (exa_dir / f"{slug}.md").write_text("Result: empty\n\nNo results found for query.")
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class FakeDirective:
+        headline = "No Results Story"
+        source = "levine"
+
+    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert text == ""
+    assert path is None
+
+
+def test_find_rundown_article_source_reports_miss(tmp_path):
+    """Final fallback (return site 7) reports no text and no path."""
+    from pipeline.__main__ import find_rundown_article_source
+
+    class FakeDirective:
+        headline = "Nothing Matches This"
+        source = ""
+
+    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert text == ""
+    assert path is None
+
+
+def test_find_rundown_article_text_wrapper_unchanged(tmp_path):
+    """_find_rundown_article_text stays a transparent text-only wrapper."""
+    from pipeline.__main__ import _find_rundown_article_text
+
+    index = {"Some Headline": "articles/00-some-headline.md"}
+    (tmp_path / "articles").mkdir()
+    (tmp_path / "articles" / "00-some-headline.md").write_text(
+        "# Some Headline\n\nURL: u\n\nbody text here", encoding="utf-8"
+    )
+    (tmp_path / "headline_index.json").write_text(json.dumps(index))
+
+    class FakeDirective:
+        headline = "Some Headline"
+        source = ""
+
+    text = _find_rundown_article_text(FakeDirective(), tmp_path)
+    assert "body text here" in text
+
+
 def test_semafor_routing_header_preferred_over_category(tmp_path, monkeypatch):
     """Routing: header overrides Category-based routing for Semafor articles."""
     monkeypatch.setattr(
@@ -761,6 +938,14 @@ def test_semafor_routing_header_preferred_over_category(tmp_path, monkeypatch):
     assert "Gulf Story With TH Routing" in content
     assert "FP Only Article" not in content
     assert "Skipped Article" not in content
+
+    # Finding 5: the two routed-away articles (fp, skip) are candidates that
+    # never reach dedup or the writer -- they must be recorded, not silently
+    # dropped, so IN - ROUTE - DEDUP still accounts for every candidate.
+    sentinel = json.loads((work_dir / "collection_done.json").read_text())
+    assert sentinel["candidates"]["semafor"] == 3
+    assert sentinel["routed_away"]["semafor"] == 2
+    assert sentinel["deduped"]["semafor"] == 0
 
 
 def _run_collector_with_exa(
@@ -1009,3 +1194,102 @@ def test_collector_works_without_levine_links(tmp_path, monkeypatch):
     )
     assert work_dir.exists()
     assert (work_dir / "articles").exists()
+
+
+def _run_collector_basic(tmp_path, monkeypatch):
+    """Run the collector with a single Levine article carrying tier metadata.
+
+    Mirrors the monkeypatch style already used in this file for
+    fetch_all_articles / resolve_redirect_url / generate_rundown_research_plan
+    / sync_zvi_cache. Returns work_dir.
+    """
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles",
+        lambda *a, **kw: [
+            Article(
+                headline="Test Article",
+                url="http://resolved.com",
+                content="Full text here",
+                source_tier="live",
+                extracted_chars=250,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(
+            themes=["Tech"],
+            directives=[
+                RundownStoryDirective(
+                    headline="Test Article",
+                    source="levine",
+                    priority=1,
+                    theme="Tech",
+                    needs_exa=False,
+                    exa_query="",
+                    is_foreign_policy=False,
+                    fp_query="",
+                    include_in_episode=True,
+                )
+            ],
+        ),
+    )
+
+    today = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+    (levine_cache / f"{today}.json").write_text(
+        json.dumps([{"raw_url": "http://raw.com", "headline_context": "context"}])
+    )
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    zvi_cache = tmp_path / "zvi-cache"
+    zvi_cache.mkdir()
+    work_dir = tmp_path / "work"
+
+    collect_all_artifacts(
+        "job-basic-test",
+        work_dir,
+        levine_cache_dir=levine_cache,
+        semafor_cache_dir=semafor_cache,
+        zvi_cache_dir=zvi_cache,
+    )
+    return work_dir
+
+
+def test_tiers_sidecar_records_tier_and_chars(tmp_path, monkeypatch):
+    work_dir = _run_collector_basic(tmp_path, monkeypatch)
+    tiers = json.loads((work_dir / "tiers.json").read_text(encoding="utf-8"))
+    entry = next(iter(tiers.values()))
+    assert entry["tier"] in {"live", "paywalled", "http_error", "fetch_error"}
+    assert isinstance(entry["extracted_chars"], int)
+    assert entry["url"]
+
+
+def test_tiers_sidecar_is_keyed_by_relative_article_path(tmp_path, monkeypatch):
+    work_dir = _run_collector_basic(tmp_path, monkeypatch)
+    tiers = json.loads((work_dir / "tiers.json").read_text(encoding="utf-8"))
+    for rel_path in tiers:
+        assert (work_dir / rel_path).exists()
+
+
+def test_sentinel_records_per_source_counts(tmp_path, monkeypatch):
+    work_dir = _run_collector_basic(tmp_path, monkeypatch)
+    sentinel = json.loads((work_dir / "collection_done.json").read_text())
+    assert "started_at" in sentinel
+    for key in ("levine", "semafor", "zvi"):
+        assert key in sentinel["candidates"]
+        assert key in sentinel["deduped"]
+
+
+def test_article_files_have_no_tier_header(tmp_path, monkeypatch):
+    """Tier metadata must not leak into the writer prompt."""
+    work_dir = _run_collector_basic(tmp_path, monkeypatch)
+    for f in (work_dir / "articles").glob("*.md"):
+        assert "Source-Tier" not in f.read_text(encoding="utf-8")

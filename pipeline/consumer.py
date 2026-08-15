@@ -31,6 +31,17 @@ RUNDOWN_SCRIPT_ARCHIVE_DIR = Path("/persist/my-podcasts/scripts/the-rundown")
 FP_DIGEST_SCRIPT_ARCHIVE_DIR = Path("/persist/my-podcasts/scripts/fp-digest")
 
 
+def _work_dir_base() -> Path:
+    """Return the base directory where daily-job work directories live.
+
+    Production default is exactly "/tmp" (deployed code, systemd-managed,
+    in-flight jobs on disk). Overridable via MY_PODCASTS_WORK_DIR_BASE so
+    tests can point work dirs at tmp_path instead of littering the host's
+    real /tmp.
+    """
+    return Path(os.getenv("MY_PODCASTS_WORK_DIR_BASE", "/tmp"))
+
+
 def _compute_lookback(
     store: StateStore, feed_slug: str, default: int = 2, cap: int = 14
 ) -> int:
@@ -39,6 +50,67 @@ def _compute_lookback(
     if days is None:
         return default
     return min(max(2, days + 1), cap)
+
+
+def _report_run_stats(
+    work_dir: Path, job_id: str, date_str: str, reused_collection: bool = False
+) -> None:
+    """Emit the content-acquisition funnel for a finished script stage.
+
+    Deliberately total: this runs after script.txt, summary.txt and covered.json
+    are already on disk, and swallows everything, so a reporting bug can never
+    fail a job or burn retry budget.
+
+    The three sinks below (local JSON, durable JSONL, Telegram) are guarded
+    independently rather than under one try/except. They previously shared a
+    single try, so a disk failure in the JSONL append (e.g. a full /persist)
+    would skip the Telegram send entirely -- suppressing the human-visible
+    report on exactly the day an operator most needs it. Now each sink's
+    failure is isolated to that sink; send_alert already logs the rendered
+    report to journald when it can't reach Telegram, so as long as the send
+    step still runs, the report reaches an operator one way or another.
+
+    The run_stats_sent marker keeps a retry (which reuses collection but reruns
+    the writer) from sending a second message. A /tmp marker is safe here
+    because the retry budget is ~12 hours and /tmp is reaped at 10 days.
+    """
+    try:
+        from pipeline.run_stats import collect_run_stats
+
+        stats = collect_run_stats(
+            work_dir,
+            job_id=job_id,
+            date_str=date_str,
+            reused_collection=reused_collection,
+        )
+    except Exception as exc:
+        print(f"[consumer] run stats collection failed: {exc}")
+        return
+
+    try:
+        (work_dir / "run_stats.json").write_text(
+            stats.model_dump_json(indent=2), encoding="utf-8"
+        )
+    except Exception as exc:
+        print(f"[consumer] run stats json write failed: {exc}")
+
+    try:
+        from pipeline.run_stats import append_jsonl
+
+        append_jsonl(stats, Path("/persist/my-podcasts/run-stats.jsonl"))
+    except Exception as exc:
+        print(f"[consumer] run stats jsonl append failed: {exc}")
+
+    try:
+        from pipeline.alerts import send_alert
+        from pipeline.run_stats import render_report
+
+        marker = work_dir / "run_stats_sent"
+        if not marker.exists():
+            if send_alert(render_report(stats), severity="info"):
+                marker.touch()
+    except Exception as exc:
+        print(f"[consumer] run stats send failed: {exc}")
 
 
 @dataclass(frozen=True)
@@ -135,7 +207,7 @@ class CloudflareQueueConsumer:
 def _cleanup_old_work_dirs(max_age_days: int = 180) -> None:
     """Remove things-happen and fp-digest work directories older than max_age_days."""
     cutoff = datetime.now(tz=UTC) - timedelta(days=max_age_days)
-    tmp = Path("/tmp")
+    tmp = _work_dir_base()
     for pattern in ("things-happen-*", "the-rundown-*", "fp-digest-*"):
         for d in tmp.glob(pattern):
             if not d.is_dir():
@@ -272,7 +344,7 @@ def consume_forever(
             due_jobs = store.list_due_the_rundown()
             for job in due_jobs:
                 try:
-                    work_dir = Path(f"/tmp/the-rundown-{job['id']}")
+                    work_dir = _work_dir_base() / f"the-rundown-{job['id']}"
                     script_file = work_dir / "script.txt"
 
                     if script_file.exists():
@@ -317,7 +389,7 @@ def consume_forever(
 
                     else:
                         # No script yet — run the full synchronous pipeline.
-                        from pipeline.__main__ import _find_rundown_article_text
+                        from pipeline.__main__ import find_rundown_article_source
                         from pipeline.rundown_writer import generate_rundown_script
                         from pipeline.things_happen_collector import (
                             collect_all_artifacts,
@@ -327,7 +399,10 @@ def consume_forever(
                         collection_sentinel = work_dir / "collection_done.json"
                         plan_path = work_dir / "plan.json"
 
-                        if collection_sentinel.exists() and plan_path.exists():
+                        reused_collection = (
+                            collection_sentinel.exists() and plan_path.exists()
+                        )
+                        if reused_collection:
                             print(
                                 f"Reusing prior collection for Rundown: "
                                 f"{job['id']} ({job['date_str']})"
@@ -373,14 +448,28 @@ def consume_forever(
                         )
 
                         rundown_articles_by_theme: dict[str, list[str]] = {}
+                        writer_inputs: list[dict] = []
                         for directive in plan.directives:
                             if not directive.include_in_episode:
                                 continue
-                            text = _find_rundown_article_text(directive, work_dir)
+                            text, src = find_rundown_article_source(directive, work_dir)
+                            writer_inputs.append(
+                                {
+                                    "headline": directive.headline,
+                                    "theme": directive.theme,
+                                    "source_path": src,
+                                    "chars": len(text),
+                                }
+                            )
                             if text:
                                 rundown_articles_by_theme.setdefault(
                                     directive.theme, []
                                 ).append(text)
+                        # A directive resolving to nothing used to vanish here
+                        # with no counter and no log.
+                        (work_dir / "writer_inputs.json").write_text(
+                            json.dumps(writer_inputs, indent=2), encoding="utf-8"
+                        )
 
                         context_scripts: list[str] = []
                         context_dir = work_dir / "context"
@@ -409,6 +498,12 @@ def consume_forever(
                                 _json.dumps(writer_output.covered_headlines),
                                 encoding="utf-8",
                             )
+                        _report_run_stats(
+                            work_dir,
+                            job_id=job["id"],
+                            date_str=job["date_str"],
+                            reused_collection=reused_collection,
+                        )
                         # Next loop will pick up the script and run TTS
 
                 except Exception as exc:
@@ -432,7 +527,7 @@ def consume_forever(
             fp_jobs = store.list_due_fp_digest()
             for job in fp_jobs:
                 try:
-                    work_dir = Path(f"/tmp/fp-digest-{job['id']}")
+                    work_dir = _work_dir_base() / f"fp-digest-{job['id']}"
                     script_file = work_dir / "script.txt"
 
                     if script_file.exists():
