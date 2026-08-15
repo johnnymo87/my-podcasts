@@ -317,7 +317,7 @@ def consume_forever(
 
                     else:
                         # No script yet — run the full synchronous pipeline.
-                        from pipeline.__main__ import _find_rundown_article_text
+                        from pipeline.__main__ import find_rundown_article_source
                         from pipeline.rundown_writer import generate_rundown_script
                         from pipeline.things_happen_collector import (
                             collect_all_artifacts,
@@ -373,14 +373,28 @@ def consume_forever(
                         )
 
                         rundown_articles_by_theme: dict[str, list[str]] = {}
+                        writer_inputs: list[dict] = []
                         for directive in plan.directives:
                             if not directive.include_in_episode:
                                 continue
-                            text = _find_rundown_article_text(directive, work_dir)
+                            text, src = find_rundown_article_source(directive, work_dir)
+                            writer_inputs.append(
+                                {
+                                    "headline": directive.headline,
+                                    "theme": directive.theme,
+                                    "source_path": src,
+                                    "chars": len(text),
+                                }
+                            )
                             if text:
                                 rundown_articles_by_theme.setdefault(
                                     directive.theme, []
                                 ).append(text)
+                        # A directive resolving to nothing used to vanish here
+                        # with no counter and no log.
+                        (work_dir / "writer_inputs.json").write_text(
+                            json.dumps(writer_inputs, indent=2), encoding="utf-8"
+                        )
 
                         context_scripts: list[str] = []
                         context_dir = work_dir / "context"

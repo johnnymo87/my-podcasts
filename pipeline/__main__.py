@@ -25,15 +25,32 @@ from pipeline.zvi_cache import sync_zvi_cache
 def _find_rundown_article_text(directive: Any, work_dir: Path) -> str:
     """Find article text for a Rundown directive.
 
+    Thin wrapper over find_rundown_article_source() for callers that only
+    need the text, not the resolved source path.
+    """
+    text, _path = find_rundown_article_source(directive, work_dir)
+    return text
+
+
+def find_rundown_article_source(
+    directive: Any, work_dir: Path
+) -> tuple[str, str | None]:
+    """Find article text and its work-dir-relative source path for a directive.
+
     Searches (in order):
     1. headline_index.json — exact match on original headline
     2. headline_index.json — best word-overlap match for the directive's source
     3. Slug-based file matching (legacy fallback)
     4. Exa enrichment by slug
+
+    Returns (text, source_path). source_path is None on a miss, and is
+    always relative to work_dir (matching the keys used in tiers.json and
+    headline_index.json) so callers can join resolution results against
+    those files.
     """
     import json as _json
 
-    from pipeline.exa_client import exa_text_if_hit
+    from pipeline.exa_client import exa_file_path, exa_text_if_hit
     from pipeline.things_happen_collector import _slugify
 
     headline = directive.headline
@@ -49,9 +66,10 @@ def _find_rundown_article_text(directive: Any, work_dir: Path) -> str:
 
         # Exact match
         if headline in index:
-            fpath = work_dir / index[headline]
+            rel_path = index[headline]
+            fpath = work_dir / rel_path
             if fpath.exists():
-                return fpath.read_text(encoding="utf-8")
+                return fpath.read_text(encoding="utf-8"), rel_path
 
         # Word-overlap match: pick the file whose content best matches
         # the directive headline. The editor reformulates headlines, but
@@ -77,7 +95,7 @@ def _find_rundown_article_text(directive: Any, work_dir: Path) -> str:
                         best_path = rel_path
                 if best_path and best_score > 0:
                     fpath = work_dir / best_path
-                    return fpath.read_text(encoding="utf-8")
+                    return fpath.read_text(encoding="utf-8"), best_path
 
     # --- Legacy slug-based fallback ---
     # Flat Levine articles (e.g. "00-headline.md")
@@ -85,25 +103,35 @@ def _find_rundown_article_text(directive: Any, work_dir: Path) -> str:
     if articles_dir.exists():
         for match in articles_dir.glob(f"*{slug}.md"):
             if match.parent == articles_dir:  # Only top-level, not subdirs
-                return match.read_text(encoding="utf-8")
+                return (
+                    match.read_text(encoding="utf-8"),
+                    str(match.relative_to(work_dir)),
+                )
 
     # Semafor articles
     semafor_file = work_dir / "articles" / "semafor" / f"{slug}.md"
     if semafor_file.exists():
-        return semafor_file.read_text(encoding="utf-8")
+        return (
+            semafor_file.read_text(encoding="utf-8"),
+            str(semafor_file.relative_to(work_dir)),
+        )
 
     # Zvi articles
     zvi_dir = work_dir / "articles" / "zvi"
     if zvi_dir.exists():
         for match in zvi_dir.glob(f"*{slug}*.md"):
-            return match.read_text(encoding="utf-8")
+            return (
+                match.read_text(encoding="utf-8"),
+                str(match.relative_to(work_dir)),
+            )
 
     # Exa enrichment
     exa_text = exa_text_if_hit(work_dir, slug)
     if exa_text:
-        return exa_text
+        exa_path = exa_file_path(work_dir, slug)
+        return exa_text, str(exa_path.relative_to(work_dir))
 
-    return ""
+    return "", None
 
 
 def _default_state_db_path() -> Path:
