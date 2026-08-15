@@ -336,8 +336,9 @@ def test_generate_script_prompt_asks_for_covered_tags():
     )
     # The instruction is prepended in generate_rundown_script, not in the prompt
     # itself. Check the instruction text instead.
-    from pipeline.rundown_writer import generate_rundown_script
     import inspect
+
+    from pipeline.rundown_writer import generate_rundown_script
 
     source = inspect.getsource(generate_rundown_script)
     assert "<covered>" in source
@@ -345,10 +346,11 @@ def test_generate_script_prompt_asks_for_covered_tags():
 
 def test_rundown_editor_uses_coverage_ledger_over_scripts(monkeypatch):
     """When coverage_ledger is provided, scripts are not included in prompt."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
+
     from pipeline.things_happen_editor import (
-        generate_rundown_research_plan,
         RundownResearchPlan,
+        generate_rundown_research_plan,
     )
 
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
@@ -504,10 +506,11 @@ def test_does_not_persist_when_wait_for_idle_times_out(
 
 def test_rundown_editor_falls_back_to_scripts(monkeypatch):
     """When no coverage_ledger, context_scripts are used."""
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import patch
+
     from pipeline.things_happen_editor import (
-        generate_rundown_research_plan,
         RundownResearchPlan,
+        generate_rundown_research_plan,
     )
 
     monkeypatch.setenv("GEMINI_API_KEY", "fake")

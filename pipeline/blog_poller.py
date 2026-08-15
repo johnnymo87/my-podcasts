@@ -21,6 +21,7 @@ from pipeline.blog_sources import BLOG_SOURCES
 from pipeline.feed import regenerate_and_upload_feed
 from pipeline.script_processor import TTS_MODEL
 
+
 if TYPE_CHECKING:
     from pipeline.blog_sources import BlogSource
     from pipeline.db import StateStore

@@ -2,13 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pipeline.rundown_writer import (
-    WriterOutput,
-    _extract_script,
-    parse_covered,
-    parse_summary,
-)
-
 from pipeline.opencode_client import (
     create_session,
     delete_session,
@@ -16,6 +9,12 @@ from pipeline.opencode_client import (
     get_messages,
     send_prompt_async,
     wait_for_idle,
+)
+from pipeline.rundown_writer import (
+    WriterOutput,
+    _extract_script,
+    parse_covered,
+    parse_summary,
 )
 
 

@@ -19,6 +19,7 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
+
 # Simulation parameters
 DATES = ["2026-03-09", "2026-03-10", "2026-03-11"]
 SIM_DIR = Path("/tmp/fp-rotation-sim")
@@ -144,7 +145,7 @@ def run_day(
         print(f"  Prior URLs to exclude: {len(prior_urls)}")
 
     # Run collection with freshness annotation + URL dedup
-    print(f"\n  Collecting sources (lookback=2)...")
+    print("\n  Collecting sources (lookback=2)...")
     collect_fp_artifacts(
         run_id,
         work_dir,
@@ -179,7 +180,7 @@ def run_day(
     actual_script = SCRIPTS_DIR / f"{date_str}.txt"
     if actual_script.exists():
         sim_scripts[date_str] = actual_script.read_text(encoding="utf-8")
-        print(f"\n  Using actual script as context for next day")
+        print("\n  Using actual script as context for next day")
     else:
         print(f"\n  No actual script available for {date_str}")
 

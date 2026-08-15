@@ -975,10 +975,10 @@ def episode_command(
 )
 def poll_blogs_command(dry_run: bool) -> None:
     """Poll all blog RSS feeds and process new posts."""
-    from pipeline.blog_poller import poll_all_blogs, parse_blog_feed, adapt_for_audio
-    from pipeline.blog_sources import BLOG_SOURCES
-
     import requests
+
+    from pipeline.blog_poller import adapt_for_audio, parse_blog_feed, poll_all_blogs
+    from pipeline.blog_sources import BLOG_SOURCES
 
     if dry_run:
         for source in BLOG_SOURCES:

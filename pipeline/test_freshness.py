@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from pipeline.freshness import (
-    format_coverage_ledger,
+    HeadlineClassification,
     annotate_headlines,
     build_freshness_prompt,
-    HeadlineClassification,
+    format_coverage_ledger,
 )
 
 
@@ -99,8 +99,9 @@ def test_build_freshness_prompt_includes_themes_and_headlines():
 def test_extract_themes_returns_coverage_format():
     """Verify extract_themes_from_scripts returns coverage-compatible dicts."""
     import os
-    from unittest.mock import patch, MagicMock
-    from pipeline.freshness import extract_themes_from_scripts, ScriptThemes
+    from unittest.mock import MagicMock, patch
+
+    from pipeline.freshness import ScriptThemes, extract_themes_from_scripts
 
     mock_response = MagicMock()
     mock_response.parsed = ScriptThemes(themes=["Iran War", "THAAD Transfer"])
