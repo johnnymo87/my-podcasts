@@ -32,10 +32,19 @@ _EXA_BUCKETS = ("hit", "empty", "no_key", "error")
 # Buckets a writer_inputs.json entry can classify into. "live"/"paywalled"/
 # "http_error"/"fetch_error" come from the tiers.json join (Levine articles,
 # which were fetched); "cache" is a Semafor/Zvi path (copied, never fetched,
-# so it has no tiers.json entry); "unknown" is the catch-all for anything
-# that doesn't match a known shape (e.g. an Exa-sourced path, or a work dir
+# so it has no tiers.json entry); "exa" is Exa-enriched text under
+# enrichment/exa/ (also never fetched via tiers.json); "unknown" is the
+# catch-all for anything that doesn't match a known shape (e.g. a work dir
 # with no tiers.json to join against at all).
-_WRITE_TIERS = ("live", "paywalled", "http_error", "fetch_error", "cache", "unknown")
+_WRITE_TIERS = (
+    "live",
+    "paywalled",
+    "http_error",
+    "fetch_error",
+    "cache",
+    "exa",
+    "unknown",
+)
 
 _TOP_DOMAINS = 8
 _MAX_REPORT_CHARS = 4000
@@ -57,6 +66,13 @@ class RunStats(BaseModel):
     lookback_days: int | None = None
     candidates: dict[str, int] = Field(default_factory=dict)
     deduped: dict[str, int] = Field(default_factory=dict)
+    # Candidates routed away before further work (currently Semafor's
+    # fp/skip routing filter, which sits between the candidates count and
+    # the dedup check). Zero for sources with no such filter. Keeping this
+    # separate from `deduped` preserves the distinction between "already
+    # covered" and "not ours to cover" while still letting a reader account
+    # for every candidate: candidates - routed_away - deduped.
+    routed_away: dict[str, int] = Field(default_factory=dict)
     levine_articles: int | None = None
 
     # From tiers.json (Levine articles only -- Semafor/Zvi are cache copies
@@ -191,6 +207,9 @@ def collect_run_stats(
         sentinel.get("candidates"), ("levine", "semafor", "zvi")
     )
     stats.deduped = _int_counts(sentinel.get("deduped"), ("levine", "semafor", "zvi"))
+    stats.routed_away = _int_counts(
+        sentinel.get("routed_away"), ("levine", "semafor", "zvi")
+    )
 
     levine_articles = sentinel.get("levine_articles")
     stats.levine_articles = (
@@ -305,6 +324,8 @@ def collect_run_stats(
             "articles/zvi/"
         ):
             write_buckets["cache"] += 1
+        elif source_path.startswith("enrichment/exa/"):
+            write_buckets["exa"] += 1
         else:
             write_buckets["unknown"] += 1
 
@@ -368,6 +389,13 @@ def render_report(stats: RunStats) -> str:
     in_total = sum(stats.candidates.values())
     in_parts = ", ".join(f"{k} {v}" for k, v in stats.candidates.items())
     lines.append(f"IN     {in_total} = {in_parts}")
+
+    route_total = sum(stats.routed_away.values())
+    if route_total:
+        route_breakdown = ", ".join(
+            f"{k} {v}" for k, v in stats.routed_away.items() if v
+        )
+        lines.append(f"ROUTE  -{route_total} ({route_breakdown}, fp/skip)")
 
     dedup_total = sum(stats.deduped.values())
     dedup_breakdown = ", ".join(f"{k} {v}" for k, v in stats.deduped.items() if v)

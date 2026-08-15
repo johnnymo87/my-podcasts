@@ -131,6 +131,7 @@ def collect_all_artifacts(
     _semafor_cache = semafor_cache_dir or Path("/persist/my-podcasts/semafor-cache")
     semafor_candidates = 0
     semafor_deduped = 0
+    semafor_routed_away = 0
     if not _semafor_cache.exists():
         print(f"[collector] WARNING: Semafor cache not found at {_semafor_cache}")
     if _semafor_cache.exists():
@@ -155,6 +156,10 @@ def collect_all_artifacts(
             if not routing:
                 routing = categorize_semafor_article(category)
             if routing not in ("th", "both"):
+                # Routed exclusively to FP Digest (or explicitly skipped) --
+                # counted as a candidate above, so it must be accounted for
+                # here rather than silently vanishing from the funnel.
+                semafor_routed_away += 1
                 continue
             if url and url in _prior:
                 semafor_deduped += 1
@@ -360,6 +365,18 @@ def collect_all_artifacts(
             "levine": levine_deduped,
             "semafor": semafor_deduped,
             "zvi": zvi_deduped,
+        },
+        # Candidates routed away before further work -- currently only
+        # Semafor, whose routing filter (fp/skip) sits between the
+        # candidates count and the dedup check. Levine and Zvi have no such
+        # filter, so they are always 0. Recorded so IN - ROUTE - DEDUP still
+        # accounts for every candidate: this is the FP-flagged/skip-routed
+        # slice that Semafor candidates counted but the funnel would
+        # otherwise silently drop.
+        "routed_away": {
+            "levine": 0,
+            "semafor": semafor_routed_away,
+            "zvi": 0,
         },
         # Per-slug Exa status, so a miss is legible from the archived sentinel
         # rather than only from a work dir that /tmp reaps after 10 days. Note

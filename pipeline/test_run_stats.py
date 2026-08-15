@@ -228,7 +228,8 @@ def test_fully_populated_fixture_every_number_exact(tmp_path):
         "http_error": 0,
         "fetch_error": 0,
         "cache": 2,
-        "unknown": 1,
+        "exa": 1,
+        "unknown": 0,
     }
 
     assert stats.script_words == 25

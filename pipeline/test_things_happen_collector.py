@@ -939,6 +939,14 @@ def test_semafor_routing_header_preferred_over_category(tmp_path, monkeypatch):
     assert "FP Only Article" not in content
     assert "Skipped Article" not in content
 
+    # Finding 5: the two routed-away articles (fp, skip) are candidates that
+    # never reach dedup or the writer -- they must be recorded, not silently
+    # dropped, so IN - ROUTE - DEDUP still accounts for every candidate.
+    sentinel = json.loads((work_dir / "collection_done.json").read_text())
+    assert sentinel["candidates"]["semafor"] == 3
+    assert sentinel["routed_away"]["semafor"] == 2
+    assert sentinel["deduped"]["semafor"] == 0
+
 
 def _run_collector_with_exa(
     tmp_path,
