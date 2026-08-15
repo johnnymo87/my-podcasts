@@ -17,6 +17,10 @@ _BROWSER_HEADERS = {
 
 SOURCE_LABELS = {
     "live": "Based on the publicly available portion of the article",
+    "paywalled": "Based on the headline alone",
+    "http_error": "Based on the headline alone",
+    "fetch_error": "Based on the headline alone",
+    # Retained: pre-existing artifacts and the legacy summarizer path use it.
     "headline_only": "Based on the headline alone",
 }
 
@@ -25,7 +29,12 @@ SOURCE_LABELS = {
 class FetchedArticle:
     url: str
     content: str
-    source_tier: str  # "live" or "headline_only"
+    # "live" | "paywalled" | "http_error" | "fetch_error"
+    source_tier: str
+    # Characters extracted from the page body, before the headline fallback.
+    # Recorded because the <200 paywall threshold is a weak proxy and needs to
+    # stay retunable against history rather than by re-fetching.
+    extracted_chars: int = 0
 
     @property
     def source_label(self) -> str:
@@ -39,6 +48,8 @@ class Article:
     headline: str
     url: str
     content: str
+    source_tier: str = "unknown"
+    extracted_chars: int = 0
 
 
 def _extract_article_text(html: str) -> str:
@@ -53,8 +64,14 @@ def _extract_article_text(html: str) -> str:
     return "\n".join(lines)
 
 
-def _try_live_url(url: str) -> str | None:
-    """Try to fetch the article directly."""
+_MIN_ARTICLE_CHARS = 200
+
+
+def _try_live_url(url: str) -> tuple[str | None, str, int]:
+    """Fetch the article, reporting the outcome rather than a bare None.
+
+    Returns ``(text_or_None, tier, extracted_chars)``.
+    """
     try:
         response = requests.get(
             url,
@@ -63,22 +80,26 @@ def _try_live_url(url: str) -> str | None:
             allow_redirects=True,
         )
         if response.status_code != 200:
-            return None
+            return None, "http_error", 0
         text = _extract_article_text(response.text)
-        if len(text) < 200:
-            return None
-        return text
+        if len(text) < _MIN_ARTICLE_CHARS:
+            return None, "paywalled", len(text)
+        return text, "live", len(text)
     except Exception:
-        return None
+        return None, "fetch_error", 0
 
 
 def fetch_article(url: str, headline: str) -> FetchedArticle:
     """Fetch article content with fallback: live URL -> headline only."""
-    content = _try_live_url(url)
+    content, tier, chars = _try_live_url(url)
     if content:
-        return FetchedArticle(url=url, content=content, source_tier="live")
+        return FetchedArticle(
+            url=url, content=content, source_tier=tier, extracted_chars=chars
+        )
 
-    return FetchedArticle(url=url, content=headline, source_tier="headline_only")
+    return FetchedArticle(
+        url=url, content=headline, source_tier=tier, extracted_chars=chars
+    )
 
 
 def fetch_all_articles(
@@ -96,6 +117,8 @@ def fetch_all_articles(
                 headline=link["headline_context"],
                 url=fetched.url,
                 content=fetched.content,
+                source_tier=fetched.source_tier,
+                extracted_chars=fetched.extracted_chars,
             )
         )
     return results
