@@ -447,6 +447,35 @@ def test_render_report_bounded_for_pathologically_large_input(tmp_path):
     assert len(stats.paywalled_domains) == 8
 
 
+def test_mixed_naive_aware_sentinel_timestamps_never_raise(tmp_path):
+    """Finding 2: a sentinel with one naive and one timezone-aware timestamp
+    parses fine individually via datetime.fromisoformat, but subtracting
+    them raises TypeError ("can't subtract offset-naive and offset-aware
+    datetimes"). collect_run_stats's docstring and module header both claim
+    it never raises -- this pins that a mixed pair degrades to a None
+    duration instead of propagating.
+    """
+    work_dir = tmp_path / "the-rundown-mixed-tz"
+    work_dir.mkdir()
+    _write_json(
+        work_dir / "collection_done.json",
+        {
+            "started_at": "2026-08-15T04:00:00",  # naive
+            "completed_at": "2026-08-15T04:04:12-04:00",  # aware
+        },
+    )
+
+    stats = collect_run_stats(work_dir, job_id="j", date_str="2026-08-15")  # no raise
+
+    assert stats.collect_duration_seconds is None
+    # The raw strings are still surfaced -- only the derived duration is lost.
+    assert stats.collect_started_at == "2026-08-15T04:00:00"
+    assert stats.collect_completed_at == "2026-08-15T04:04:12-04:00"
+
+    report = render_report(stats)  # must also not raise
+    assert "script stage" in report
+
+
 def test_append_jsonl_writes_one_line_and_creates_parent_dir(tmp_path):
     work_dir = tmp_path / "the-rundown-append"
     work_dir.mkdir()

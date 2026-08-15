@@ -373,7 +373,10 @@ def consume_forever(
                         collection_sentinel = work_dir / "collection_done.json"
                         plan_path = work_dir / "plan.json"
 
-                        if collection_sentinel.exists() and plan_path.exists():
+                        reused_collection = (
+                            collection_sentinel.exists() and plan_path.exists()
+                        )
+                        if reused_collection:
                             print(
                                 f"Reusing prior collection for Rundown: "
                                 f"{job['id']} ({job['date_str']})"
@@ -473,7 +476,7 @@ def consume_forever(
                             work_dir,
                             job_id=job["id"],
                             date_str=job["date_str"],
-                            reused_collection=job.get("failure_count", 0) > 0,
+                            reused_collection=reused_collection,
                         )
                         # Next loop will pick up the script and run TTS
 

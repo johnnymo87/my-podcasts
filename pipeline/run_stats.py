@@ -134,9 +134,9 @@ def _duration_seconds(started_at: object, completed_at: object) -> float | None:
     try:
         start = datetime.fromisoformat(started_at)
         end = datetime.fromisoformat(completed_at)
+        return (end - start).total_seconds()
     except Exception:
         return None
-    return (end - start).total_seconds()
 
 
 def _domain(url: object) -> str | None:
