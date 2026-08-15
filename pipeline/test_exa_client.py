@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pipeline.exa_client import ExaResult, search_related
+from pipeline.exa_client import ExaResult, search_related, search_related_status
 
 
 def _make_mock_result(title: str, url: str, text: str) -> MagicMock:
@@ -85,6 +85,68 @@ def test_search_related_returns_empty_on_error(monkeypatch: pytest.MonkeyPatch) 
 
     with patch("pipeline.exa_client.Exa") as MockExa:
         MockExa.side_effect = RuntimeError("connection failed")
+
+        results = search_related("some headline")
+
+    assert results == []
+
+
+def test_search_related_status_returns_no_key_when_env_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No EXA_API_KEY env var → ([], "no_key")."""
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+
+    results, status = search_related_status("some headline")
+
+    assert results == []
+    assert status == "no_key"
+
+
+def test_search_related_status_returns_empty_when_no_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Key set, search returns response with empty results → ([], "empty")."""
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+
+    mock_response = MagicMock()
+    mock_response.results = []
+
+    with patch("pipeline.exa_client.Exa") as MockExa:
+        mock_exa_instance = MockExa.return_value
+        mock_exa_instance.search.return_value = mock_response
+
+        results, status = search_related_status("some headline")
+
+    assert results == []
+    assert status == "empty"
+
+
+def test_search_related_status_returns_error_with_exception_class_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Key set, search raises TimeoutError → ([], "error:TimeoutError")."""
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+
+    with patch("pipeline.exa_client.Exa") as MockExa:
+        mock_exa_instance = MockExa.return_value
+        mock_exa_instance.search.side_effect = TimeoutError("timed out")
+
+        results, status = search_related_status("some headline")
+
+    assert results == []
+    assert status == "error:TimeoutError"
+
+
+def test_search_related_still_swallows_errors_and_returns_empty_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """search_related (FP contract) keeps returning [] on error, no status."""
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+
+    with patch("pipeline.exa_client.Exa") as MockExa:
+        mock_exa_instance = MockExa.return_value
+        mock_exa_instance.search.side_effect = RuntimeError("connection failed")
 
         results = search_related("some headline")
 
