@@ -215,6 +215,9 @@ def test_fully_populated_fixture_every_number_exact(tmp_path):
     assert stats.exa_outcomes == {
         "hit": 3,
         "empty": 3,
+        # Always present, distinct from "empty": Exa returned results but the
+        # deny-list rejected all of them (paywalled origin or bypass mirror).
+        "filtered": 0,
         "no_key": 0,
         "error": 1,
     }

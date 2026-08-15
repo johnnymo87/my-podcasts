@@ -388,9 +388,15 @@ def collect_all_artifacts(
         # Defence in depth: exclude_domains is a request parameter honored by a
         # third-party API. Ethics policy must not depend on Exa's compliance,
         # so drop banned hosts from the results locally too.
-        exa_results = [r for r in exa_results if not _host_banned(r.url, origin)]
-        if not exa_results and status == "hit":
-            status = "empty"
+        kept = [r for r in exa_results if not _host_banned(r.url, origin)]
+        if status == "hit" and not kept and exa_results:
+            # Distinct from "empty": Exa DID find coverage, we rejected all of
+            # it as the paywalled origin or a bypass mirror. Collapsing this
+            # into "empty" would hide a compliance failure -- if Exa ever stops
+            # honouring exclude_domains, the funnel would show a mysterious
+            # empty-rate spike with no recorded cause.
+            status = "filtered"
+        exa_results = kept
         exa_outcomes[slug] = status
 
         # Written unconditionally: an absent file cannot distinguish "we never

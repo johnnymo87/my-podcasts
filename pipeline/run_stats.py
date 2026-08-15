@@ -27,7 +27,11 @@ _FETCH_TIERS = ("live", "paywalled", "http_error", "fetch_error")
 
 # Outcome buckets for an Exa search, per exa_client.search_related_status.
 # "error:{ExcClass}" collapses into "error"; anything unrecognized -> "other".
-_EXA_BUCKETS = ("hit", "empty", "no_key", "error")
+# "filtered" means Exa returned results but every one was rejected locally as
+# the paywalled origin or a bypass mirror. It is deliberately distinct from
+# "empty" (Exa found nothing), because the two have completely different
+# causes and only one of them indicates the deny-list is doing work.
+_EXA_BUCKETS = ("hit", "empty", "filtered", "no_key", "error")
 
 # Buckets a writer_inputs.json entry can classify into. "live"/"paywalled"/
 # "http_error"/"fetch_error" come from the tiers.json join (Levine articles,

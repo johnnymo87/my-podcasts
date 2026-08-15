@@ -1566,8 +1566,14 @@ def test_exa_filters_bypass_domain_result_locally(tmp_path, monkeypatch):
     assert "Result: hit" in text
 
 
-def test_exa_downgrades_status_when_local_filter_empties_a_hit(tmp_path, monkeypatch):
-    """A hit whose only result gets filtered locally must not report a hit."""
+def test_exa_reports_filtered_when_local_filter_empties_a_hit(tmp_path, monkeypatch):
+    """A hit whose only result is rejected locally reports "filtered".
+
+    Deliberately NOT "empty": Exa did find coverage and the deny-list rejected
+    all of it. Collapsing the two together would hide a compliance failure --
+    if Exa ever stopped honouring exclude_domains, the funnel would show an
+    unexplained empty-rate spike with no recorded cause.
+    """
     article = Article(
         headline="Paywalled Piece",
         url="https://www.bloomberg.com/news/x",
@@ -1598,9 +1604,10 @@ def test_exa_downgrades_status_when_local_filter_empties_a_hit(tmp_path, monkeyp
     )
     slug = _slugify(directive.headline)
     text = (work_dir / "enrichment" / "exa" / f"{slug}.md").read_text(encoding="utf-8")
-    assert "Result: empty" in text
+    assert "Result: filtered" in text
+    assert "archive.ph" not in text
     sentinel = json.loads((work_dir / "collection_done.json").read_text())
-    assert sentinel["exa_outcomes"][slug] == "empty"
+    assert sentinel["exa_outcomes"][slug] == "filtered"
 
 
 def test_double_space_headline_slug_match_regression(tmp_path, monkeypatch):
