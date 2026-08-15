@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 _BLOG_POLL_INTERVAL = 6 * 3600  # 6 hours
 _last_blog_poll = 0.0
 
+RUNDOWN_SCRIPT_ARCHIVE_DIR = Path("/persist/my-podcasts/scripts/the-rundown")
+FP_DIGEST_SCRIPT_ARCHIVE_DIR = Path("/persist/my-podcasts/scripts/fp-digest")
+
 
 def _compute_lookback(
     store: StateStore, feed_slug: str, default: int = 2, cap: int = 14
@@ -305,9 +308,7 @@ def consume_forever(
                                 print(f"Completed Rundown job: {job['id']}")
 
                             # Copy to persistent storage
-                            persist_dir = Path(
-                                "/persist/my-podcasts/scripts/the-rundown"
-                            )
+                            persist_dir = RUNDOWN_SCRIPT_ARCHIVE_DIR
                             persist_dir.mkdir(parents=True, exist_ok=True)
                             persist_path = persist_dir / f"{job['date_str']}.txt"
                             shutil.copy(script_file, persist_path)
@@ -462,7 +463,7 @@ def consume_forever(
                             )
                             print(f"Completed FP digest: {job['id']}")
                         # Copy to persistent storage
-                        persist_dir = Path("/persist/my-podcasts/scripts/fp-digest")
+                        persist_dir = FP_DIGEST_SCRIPT_ARCHIVE_DIR
                         persist_dir.mkdir(parents=True, exist_ok=True)
                         shutil.copy(script_file, persist_dir / f"{job['date_str']}.txt")
                     else:

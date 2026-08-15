@@ -209,6 +209,9 @@ def test_publish_script_end_to_end(tmp_path, monkeypatch) -> None:
         "pipeline.script_processor.regenerate_and_upload_feed",
         lambda s, r: feed_regen_called.append(True),
     )
+    monkeypatch.setattr(
+        "pipeline.script_processor.SCRIPT_ARCHIVE_ROOT", tmp_path / "persisted-scripts"
+    )
 
     result = publish_script(
         script_file=script_file,
@@ -272,6 +275,9 @@ def test_publish_script_without_show_notes(tmp_path, monkeypatch) -> None:
         "pipeline.script_processor.regenerate_and_upload_feed",
         lambda s, r: None,
     )
+    monkeypatch.setattr(
+        "pipeline.script_processor.SCRIPT_ARCHIVE_ROOT", tmp_path / "persisted-scripts"
+    )
 
     publish_script(
         script_file=script_file,
@@ -320,6 +326,9 @@ def test_publish_script_tts_receives_stripped_text(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(
         "pipeline.script_processor.regenerate_and_upload_feed",
         lambda s, r: None,
+    )
+    monkeypatch.setattr(
+        "pipeline.script_processor.SCRIPT_ARCHIVE_ROOT", tmp_path / "persisted-scripts"
     )
 
     publish_script(
