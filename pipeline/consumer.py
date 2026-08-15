@@ -41,6 +41,41 @@ def _compute_lookback(
     return min(max(2, days + 1), cap)
 
 
+def _report_run_stats(
+    work_dir: Path, job_id: str, date_str: str, reused_collection: bool = False
+) -> None:
+    """Emit the content-acquisition funnel for a finished script stage.
+
+    Deliberately total: this runs after script.txt, summary.txt and covered.json
+    are already on disk, and swallows everything, so a reporting bug can never
+    fail a job or burn retry budget.
+
+    The run_stats_sent marker keeps a retry (which reuses collection but reruns
+    the writer) from sending a second message. A /tmp marker is safe here
+    because the retry budget is ~12 hours and /tmp is reaped at 10 days.
+    """
+    try:
+        from pipeline.alerts import send_alert
+        from pipeline.run_stats import append_jsonl, collect_run_stats, render_report
+
+        stats = collect_run_stats(
+            work_dir,
+            job_id=job_id,
+            date_str=date_str,
+            reused_collection=reused_collection,
+        )
+        (work_dir / "run_stats.json").write_text(
+            stats.model_dump_json(indent=2), encoding="utf-8"
+        )
+        append_jsonl(stats, Path("/persist/my-podcasts/run-stats.jsonl"))
+        marker = work_dir / "run_stats_sent"
+        if not marker.exists():
+            if send_alert(render_report(stats), severity="info"):
+                marker.touch()
+    except Exception as exc:
+        print(f"[consumer] run stats reporting failed: {exc}")
+
+
 @dataclass(frozen=True)
 class QueueMessage:
     id: str
@@ -423,6 +458,12 @@ def consume_forever(
                                 _json.dumps(writer_output.covered_headlines),
                                 encoding="utf-8",
                             )
+                        _report_run_stats(
+                            work_dir,
+                            job_id=job["id"],
+                            date_str=job["date_str"],
+                            reused_collection=job.get("failure_count", 0) > 0,
+                        )
                         # Next loop will pick up the script and run TTS
 
                 except Exception as exc:
