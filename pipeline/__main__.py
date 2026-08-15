@@ -8,6 +8,7 @@ from typing import Any
 import click
 
 from pipeline import script_processor
+from pipeline.consumer import _work_dir_base as _consumer_work_dir_base
 from pipeline.consumer import consume_forever
 from pipeline.db import StateStore
 from pipeline.feed import regenerate_and_upload_feed
@@ -139,8 +140,12 @@ def _default_state_db_path() -> Path:
 
 
 def _jobs_work_dir_base() -> Path:
-    """Return the base directory where daily-job work directories live."""
-    return Path("/tmp")
+    """Return the base directory where daily-job work directories live.
+
+    Delegates to pipeline.consumer._work_dir_base so there is a single
+    implementation of the /tmp override seam (MY_PODCASTS_WORK_DIR_BASE).
+    """
+    return _consumer_work_dir_base()
 
 
 # ---------------------------------------------------------------------------

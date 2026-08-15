@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from pipeline.consumer import (
@@ -59,9 +58,10 @@ def test_consume_forever_processes_rundown_script(monkeypatch, tmp_path) -> None
 
     archive_dir = tmp_path / "rundown-archive"
     monkeypatch.setattr("pipeline.consumer.RUNDOWN_SCRIPT_ARCHIVE_DIR", archive_dir)
+    monkeypatch.setattr("pipeline.consumer._work_dir_base", lambda: tmp_path)
 
     job_id = "job-rundown-tts-test-11111"
-    work_dir = Path(f"/tmp/the-rundown-{job_id}")
+    work_dir = tmp_path / f"the-rundown-{job_id}"
     work_dir.mkdir(parents=True, exist_ok=True)
     script = work_dir / "script.txt"
     script.write_text("rundown script content")
@@ -122,10 +122,11 @@ def test_consume_forever_dry_run_skips_tts(monkeypatch, tmp_path) -> None:
 
     archive_dir = tmp_path / "rundown-archive"
     monkeypatch.setattr("pipeline.consumer.RUNDOWN_SCRIPT_ARCHIVE_DIR", archive_dir)
+    monkeypatch.setattr("pipeline.consumer._work_dir_base", lambda: tmp_path)
 
-    # Use a unique job ID, create the work dir and script at /tmp/the-rundown-<id>
+    # Use a unique job ID, create the work dir and script under tmp_path
     job_id = "job-dry-test-unique-12345"
-    work_dir = Path(f"/tmp/the-rundown-{job_id}")
+    work_dir = tmp_path / f"the-rundown-{job_id}"
     work_dir.mkdir(parents=True, exist_ok=True)
     script = work_dir / "script.txt"
     script.write_text("test script content")
@@ -186,9 +187,11 @@ def test_consume_forever_cleanup_on_tts_failure(monkeypatch, tmp_path) -> None:
     store = MagicMock()
     r2_client = MagicMock()
 
-    # Use a unique job ID, create the work dir and script at /tmp/the-rundown-<id>
+    monkeypatch.setattr("pipeline.consumer._work_dir_base", lambda: tmp_path)
+
+    # Use a unique job ID, create the work dir and script under tmp_path
     job_id = "job-fail-test-unique-67890"
-    work_dir = Path(f"/tmp/the-rundown-{job_id}")
+    work_dir = tmp_path / f"the-rundown-{job_id}"
     work_dir.mkdir(parents=True, exist_ok=True)
     script = work_dir / "script.txt"
     script.write_text("test script content")
@@ -263,8 +266,9 @@ def test_consume_forever_schedules_fp_retry_after_writer_failure(
         lambda *a, **kw: None,
         raising=False,
     )
+    monkeypatch.setattr("pipeline.consumer._work_dir_base", lambda: tmp_path)
 
-    work_dir = Path(f"/tmp/fp-digest-{job_id}")
+    work_dir = tmp_path / f"fp-digest-{job_id}"
     work_dir.mkdir(parents=True, exist_ok=True)
     (work_dir / "plan.json").write_text('{"themes": ["A"], "directives": []}')
     (work_dir / "collection_done.json").write_text("{}")
@@ -313,8 +317,9 @@ def test_consume_forever_schedules_rundown_retry_after_writer_failure(
     mock_consumer = MagicMock()
     mock_consumer.pull.side_effect = fake_pull
     monkeypatch.setattr(time, "sleep", lambda n: None)
+    monkeypatch.setattr("pipeline.consumer._work_dir_base", lambda: tmp_path)
 
-    work_dir = Path(f"/tmp/the-rundown-{job_id}")
+    work_dir = tmp_path / f"the-rundown-{job_id}"
     work_dir.mkdir(parents=True, exist_ok=True)
     (work_dir / "plan.json").write_text('{"themes": ["A"], "directives": []}')
     (work_dir / "collection_done.json").write_text("{}")
@@ -368,8 +373,9 @@ def test_consume_forever_marks_fp_job_errored_after_retry_budget(
     mock_consumer = MagicMock()
     mock_consumer.pull.side_effect = fake_pull
     monkeypatch.setattr(time, "sleep", lambda n: None)
+    monkeypatch.setattr("pipeline.consumer._work_dir_base", lambda: tmp_path)
 
-    work_dir = Path(f"/tmp/fp-digest-{job_id}")
+    work_dir = tmp_path / f"fp-digest-{job_id}"
     work_dir.mkdir(parents=True, exist_ok=True)
     (work_dir / "plan.json").write_text('{"themes": ["A"], "directives": []}')
     (work_dir / "collection_done.json").write_text("{}")

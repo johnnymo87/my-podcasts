@@ -31,6 +31,17 @@ RUNDOWN_SCRIPT_ARCHIVE_DIR = Path("/persist/my-podcasts/scripts/the-rundown")
 FP_DIGEST_SCRIPT_ARCHIVE_DIR = Path("/persist/my-podcasts/scripts/fp-digest")
 
 
+def _work_dir_base() -> Path:
+    """Return the base directory where daily-job work directories live.
+
+    Production default is exactly "/tmp" (deployed code, systemd-managed,
+    in-flight jobs on disk). Overridable via MY_PODCASTS_WORK_DIR_BASE so
+    tests can point work dirs at tmp_path instead of littering the host's
+    real /tmp.
+    """
+    return Path(os.getenv("MY_PODCASTS_WORK_DIR_BASE", "/tmp"))
+
+
 def _compute_lookback(
     store: StateStore, feed_slug: str, default: int = 2, cap: int = 14
 ) -> int:
@@ -170,7 +181,7 @@ class CloudflareQueueConsumer:
 def _cleanup_old_work_dirs(max_age_days: int = 180) -> None:
     """Remove things-happen and fp-digest work directories older than max_age_days."""
     cutoff = datetime.now(tz=UTC) - timedelta(days=max_age_days)
-    tmp = Path("/tmp")
+    tmp = _work_dir_base()
     for pattern in ("things-happen-*", "the-rundown-*", "fp-digest-*"):
         for d in tmp.glob(pattern):
             if not d.is_dir():
@@ -307,7 +318,7 @@ def consume_forever(
             due_jobs = store.list_due_the_rundown()
             for job in due_jobs:
                 try:
-                    work_dir = Path(f"/tmp/the-rundown-{job['id']}")
+                    work_dir = _work_dir_base() / f"the-rundown-{job['id']}"
                     script_file = work_dir / "script.txt"
 
                     if script_file.exists():
@@ -487,7 +498,7 @@ def consume_forever(
             fp_jobs = store.list_due_fp_digest()
             for job in fp_jobs:
                 try:
-                    work_dir = Path(f"/tmp/fp-digest-{job['id']}")
+                    work_dir = _work_dir_base() / f"fp-digest-{job['id']}"
                     script_file = work_dir / "script.txt"
 
                     if script_file.exists():
