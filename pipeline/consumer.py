@@ -22,6 +22,7 @@ from pipeline.things_happen_processor import process_things_happen_job
 if TYPE_CHECKING:
     from pipeline.db import StateStore
     from pipeline.r2 import R2Client
+    from pipeline.things_happen_editor import RundownResearchPlan
 
 
 _BLOG_POLL_INTERVAL = 6 * 3600  # 6 hours
@@ -306,6 +307,31 @@ def _find_article_text(directive: Any, work_dir: Path) -> str:
     return ""
 
 
+def _assemble_writer_inputs(
+    plan: RundownResearchPlan, work_dir: Path
+) -> tuple[dict[str, list[str]], list[dict]]:
+    """Resolve each selected directive to article text. Pure function of disk state."""
+    from pipeline.__main__ import find_rundown_article_source
+
+    rundown_articles_by_theme: dict[str, list[str]] = {}
+    writer_inputs: list[dict] = []
+    for directive in plan.directives:
+        if not directive.include_in_episode:
+            continue
+        text, src = find_rundown_article_source(directive, work_dir)
+        writer_inputs.append(
+            {
+                "headline": directive.headline,
+                "theme": directive.theme,
+                "source_path": src,
+                "chars": len(text),
+            }
+        )
+        if text:
+            rundown_articles_by_theme.setdefault(directive.theme, []).append(text)
+    return rundown_articles_by_theme, writer_inputs
+
+
 def consume_forever(
     store: StateStore,
     r2_client: R2Client,
@@ -389,7 +415,6 @@ def consume_forever(
 
                     else:
                         # No script yet — run the full synchronous pipeline.
-                        from pipeline.__main__ import find_rundown_article_source
                         from pipeline.rundown_writer import generate_rundown_script
                         from pipeline.things_happen_collector import (
                             collect_all_artifacts,
@@ -447,24 +472,9 @@ def consume_forever(
                             plan_path.read_text()
                         )
 
-                        rundown_articles_by_theme: dict[str, list[str]] = {}
-                        writer_inputs: list[dict] = []
-                        for directive in plan.directives:
-                            if not directive.include_in_episode:
-                                continue
-                            text, src = find_rundown_article_source(directive, work_dir)
-                            writer_inputs.append(
-                                {
-                                    "headline": directive.headline,
-                                    "theme": directive.theme,
-                                    "source_path": src,
-                                    "chars": len(text),
-                                }
-                            )
-                            if text:
-                                rundown_articles_by_theme.setdefault(
-                                    directive.theme, []
-                                ).append(text)
+                        rundown_articles_by_theme, writer_inputs = (
+                            _assemble_writer_inputs(plan, work_dir)
+                        )
                         # A directive resolving to nothing used to vanish here
                         # with no counter and no log.
                         (work_dir / "writer_inputs.json").write_text(
