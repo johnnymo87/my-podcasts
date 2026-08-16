@@ -357,6 +357,14 @@ def _assemble_writer_inputs(
             if exa_extra:
                 text = f"{text}\n\n{_OPEN_ACCESS_HEADING}\n\n{exa_extra}"
 
+        # Truthful only because the prompt is now genuinely built from
+        # `sections` (build_rundown_prompt renders sections verbatim, and
+        # nothing downstream re-derives or drops a theme -- see Task 1/3).
+        # Every non-empty `text` is appended to `by_theme` below, under
+        # either its plan theme or as an orphan, and every entry in
+        # `by_theme` becomes a rendered section. So "text is non-empty" and
+        # "text is in a section that reaches the prompt" are the same
+        # predicate by construction: bool(text) is exactly reached_prompt.
         writer_inputs.append(
             {
                 "headline": directive.headline,
@@ -365,6 +373,7 @@ def _assemble_writer_inputs(
                 "chars": len(text),
                 "exa_appended": bool(exa_extra),
                 "exa_chars": len(exa_extra),
+                "reached_prompt": bool(text),
             }
         )
         if text:

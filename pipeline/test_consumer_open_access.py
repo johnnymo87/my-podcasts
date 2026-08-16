@@ -168,6 +168,43 @@ def test_exa_not_hit_contributes_nothing(tmp_path):
     assert text == stub_text
 
 
+def test_writer_inputs_marks_resolved_directive_as_reached_prompt(tmp_path):
+    headline = "Widget Maker Announces New Product"
+    work_dir = tmp_path / "work"
+    _write_stub(work_dir, headline, "Widget Maker Announces New Product")
+
+    _sections, writer_inputs = _assemble_writer_inputs(_plan(headline), work_dir)
+
+    assert writer_inputs[0]["reached_prompt"] is True
+
+
+def test_writer_inputs_marks_unresolved_directive_as_not_reached_prompt(tmp_path):
+    """source_path is None -> reached_prompt is False."""
+    headline = "Nothing Resolves For This Headline"
+    work_dir = tmp_path / "work"
+
+    _sections, writer_inputs = _assemble_writer_inputs(_plan(headline), work_dir)
+
+    entry = writer_inputs[0]
+    assert entry["source_path"] is None
+    assert entry["reached_prompt"] is False
+
+
+def test_orphan_directive_is_reached_prompt(tmp_path):
+    """Regression guard for a3x: the orphan genuinely reaches the model now."""
+    work_dir = tmp_path / "work"
+    headline_orphan = "Orphan Story About Gizmos"
+    _write_stub(work_dir, headline_orphan, "Orphan article text")
+    plan = _plan_multi(
+        themes=["Alpha"],
+        directives=[(headline_orphan, "Invented Name")],
+    )
+
+    _sections, writer_inputs = _assemble_writer_inputs(plan, work_dir)
+
+    assert writer_inputs[0]["reached_prompt"] is True
+
+
 def test_assembly_keeps_plan_theme_order(tmp_path):
     """Sections follow plan.themes order, not directive arrival order."""
     work_dir = tmp_path / "work"
