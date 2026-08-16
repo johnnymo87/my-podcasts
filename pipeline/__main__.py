@@ -650,13 +650,33 @@ def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) ->
 
 
 def _audit_previous_daily_run(store: StateStore, feed_slug: str, today: str) -> None:
-    """Placeholder for the enqueue-time audit; implemented in Task 6.
+    """Alert if a previous run of *feed_slug* was enqueued but never finished.
 
-    Deliberately a no-op stub rather than an undefined name: consumer.py:323
-    lazily imports pipeline.__main__ from disk, so a call to a name that does
-    not exist here would surface as an AttributeError mid-job in the running
-    consumer rather than at import time.
+    The timer is now the watchdog for its own previous fire. Since the CLI only
+    enqueues, a green timer unit no longer implies an episode shipped, and this
+    is what closes that gap without needing a change to the Nix-managed units.
+
+    Never raises: a monitoring failure must not break the enqueue.
     """
+    try:
+        stale = _stale_daily_jobs(store, feed_slug, today)
+        if not stale:
+            return
+
+        from pipeline.alerts import send_alert
+
+        label = _DAILY_FEED_LABELS.get(feed_slug, feed_slug)
+        lines = [f"{label}: {len(stale)} earlier job(s) never completed."]
+        for row in stale:
+            lines.append(
+                f"  {row['date_str']} status={row['status']} "
+                f"failures={row['failure_count']} last_error={row['last_error']}"
+            )
+        lines.append("The consumer may be stopped or wedged. Check:")
+        lines.append("  systemctl status my-podcasts-consumer")
+        send_alert("\n".join(lines), severity="warning")
+    except Exception as exc:  # noqa: BLE001 - monitoring must never break the job
+        print(f"[daily-audit] skipped ({type(exc).__name__}: {exc})")
 
 
 @cli.command("publish-script")

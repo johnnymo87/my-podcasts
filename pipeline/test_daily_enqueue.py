@@ -5,7 +5,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 
-from pipeline.__main__ import _enqueue_daily_job, _stale_daily_jobs, cli
+from pipeline.__main__ import (
+    _audit_previous_daily_run,
+    _enqueue_daily_job,
+    _stale_daily_jobs,
+    cli,
+)
 from pipeline.db import StateStore
 
 
@@ -358,3 +363,35 @@ def test_fp_lookback_still_works_with_dry_run():
     with patch("pipeline.__main__._fp_digest_dry_run") as dry:
         CliRunner().invoke(cli, ["fp-digest", "--dry-run", "--lookback", "5"])
     assert 5 in dry.call_args.args or 5 in dry.call_args.kwargs.values()
+
+
+# ---------------------------------------------------------------------------
+# Task 6: alert when a previous daily run never completed
+# ---------------------------------------------------------------------------
+
+
+def test_audit_alerts_on_a_stale_pending_row(tmp_path):
+    store = StateStore(tmp_path / "s.db")
+    store.insert_pending_the_rundown("2026-08-14")
+    with patch("pipeline.alerts.send_alert") as alert:
+        _audit_previous_daily_run(store, "the-rundown", "2026-08-17")
+    assert alert.called
+    assert "2026-08-14" in alert.call_args[0][0]
+    store.close()
+
+
+def test_audit_is_silent_on_a_healthy_board(tmp_path):
+    store = StateStore(tmp_path / "s.db")
+    store.insert_pending_the_rundown("2026-08-17")
+    with patch("pipeline.alerts.send_alert") as alert:
+        _audit_previous_daily_run(store, "the-rundown", "2026-08-17")
+    assert not alert.called
+    store.close()
+
+
+def test_audit_never_raises(tmp_path):
+    """The audit must never be able to break the enqueue that precedes it."""
+    store = StateStore(tmp_path / "s.db")
+    with patch("pipeline.__main__._stale_daily_jobs", side_effect=RuntimeError("x")):
+        _audit_previous_daily_run(store, "the-rundown", "2026-08-17")  # must not raise
+    store.close()
