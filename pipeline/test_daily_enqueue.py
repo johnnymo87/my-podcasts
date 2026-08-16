@@ -219,7 +219,10 @@ def test_shared_helpers_survive():
     import pipeline.__main__ as m
 
     assert hasattr(m, "find_rundown_article_source")
-    assert hasattr(m, "_find_rundown_article_text")  # still used by --dry-run
+    # _find_rundown_article_text was the dry-run path's own drifted
+    # duplicate of consumer._assemble_writer_inputs; --dry-run now calls
+    # the real assembler directly, so the wrapper is dead and was deleted.
+    assert not hasattr(m, "_find_rundown_article_text")
 
 
 # ---------------------------------------------------------------------------

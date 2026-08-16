@@ -24,16 +24,6 @@ from pipeline.source_cache import (
 from pipeline.zvi_cache import sync_zvi_cache
 
 
-def _find_rundown_article_text(directive: Any, work_dir: Path) -> str:
-    """Find article text for a Rundown directive.
-
-    Thin wrapper over find_rundown_article_source() for callers that only
-    need the text, not the resolved source path.
-    """
-    text, _path = find_rundown_article_source(directive, work_dir)
-    return text
-
-
 def find_rundown_article_source(
     directive: Any, work_dir: Path
 ) -> tuple[str, str | None]:
@@ -665,6 +655,7 @@ def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) ->
     """Run collection + script generation without touching the DB."""
     import uuid
 
+    from pipeline.consumer import _assemble_writer_inputs
     from pipeline.rundown_writer import generate_rundown_script
     from pipeline.things_happen_collector import collect_all_artifacts
     from pipeline.things_happen_editor import RundownResearchPlan
@@ -694,13 +685,10 @@ def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) ->
     selected = sum(1 for d in plan.directives if d.include_in_episode)
     click.echo(f"Selected {selected} stories")
 
-    articles_by_theme: dict[str, list[str]] = {}
-    for directive in plan.directives:
-        if not directive.include_in_episode:
-            continue
-        text = _find_rundown_article_text(directive, work_dir)
-        if text:
-            articles_by_theme.setdefault(directive.theme, []).append(text)
+    sections, writer_inputs = _assemble_writer_inputs(plan, work_dir)
+    (work_dir / "writer_inputs.json").write_text(
+        json.dumps(writer_inputs, indent=2), encoding="utf-8"
+    )
 
     context_scripts = []
     context_dir = work_dir / "context"
@@ -711,7 +699,9 @@ def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) ->
     click.echo("Generating script...")
     writer_output = generate_rundown_script(
         themes=plan.themes,
-        articles_by_theme=articles_by_theme,
+        # TODO(task 3): pass sections directly once build_rundown_prompt
+        # renders from sections.
+        articles_by_theme=dict(sections),
         date_str=date_str,
         context_scripts=context_scripts,
         work_dir=work_dir,

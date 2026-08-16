@@ -575,57 +575,17 @@ def test_headline_index_includes_zvi(tmp_path, monkeypatch):
     assert "zvi/" in index["Chip City"]
 
 
-def test_find_rundown_article_text_fuzzy_matches_zvi(tmp_path):
-    """Fuzzy lookup finds Zvi article when editor reformulates the headline."""
-    # Setup a work dir with a Zvi article and headline index
-    articles_dir = tmp_path / "articles" / "zvi"
-    articles_dir.mkdir(parents=True)
-    zvi_file = articles_dir / "2026-03-19-chip-city.md"
-    zvi_file.write_text(
-        "# Chip City\n\nPost: AI Weekly\nURL: https://zvi.com/ai\n\n"
-        "Nvidia to spend $26 billion to build open weight AI models. "
-        "The company announced plans for inference workloads."
-    )
+def test_find_rundown_article_source_no_false_match(tmp_path):
+    """Word-overlap match does not match unrelated articles.
 
-    index = {"Chip City": "articles/zvi/2026-03-19-chip-city.md"}
-    (tmp_path / "headline_index.json").write_text(json.dumps(index))
-
-    from pipeline.__main__ import _find_rundown_article_text
-
-    class FakeDirective:
-        # Editor reformulated "Chip City" into a descriptive headline
-        headline = "Nvidia to spend $26 billion to build open weight AI models"
-        source = "zvi"
-
-    text = _find_rundown_article_text(FakeDirective(), tmp_path)
-    assert text
-    assert "Chip City" in text
-    assert "Nvidia" in text
-
-
-def test_find_rundown_article_text_exact_match(tmp_path):
-    """Exact headline match in index takes priority."""
-    articles_dir = tmp_path / "articles"
-    articles_dir.mkdir(parents=True)
-    art_file = articles_dir / "00-test-article.md"
-    art_file.write_text("# Test Article\n\nURL: http://example.com\n\nContent here.")
-
-    index = {"Test Article": "articles/00-test-article.md"}
-    (tmp_path / "headline_index.json").write_text(json.dumps(index))
-
-    from pipeline.__main__ import _find_rundown_article_text
-
-    class FakeDirective:
-        headline = "Test Article"
-        source = "levine"
-
-    text = _find_rundown_article_text(FakeDirective(), tmp_path)
-    assert text
-    assert "Test Article" in text
-
-
-def test_find_rundown_article_text_no_false_match(tmp_path):
-    """Fuzzy lookup does not match unrelated articles."""
+    Was test_find_rundown_article_text_no_false_match, exercised through the
+    now-deleted _find_rundown_article_text wrapper. _find_rundown_article_text
+    was the dry-run path's own drifted duplicate of
+    consumer._assemble_writer_inputs (my-podcasts-a3x); --dry-run now calls
+    the real assembler, so the wrapper is gone. This scenario has no
+    equivalent among the find_rundown_article_source tests below, so it is
+    kept, converted to call the underlying resolver directly.
+    """
     articles_dir = tmp_path / "articles" / "zvi"
     articles_dir.mkdir(parents=True)
     zvi_file = articles_dir / "2026-03-19-dog-story.md"
@@ -637,60 +597,27 @@ def test_find_rundown_article_text_no_false_match(tmp_path):
     index = {"The Lighter Side": "articles/zvi/2026-03-19-dog-story.md"}
     (tmp_path / "headline_index.json").write_text(json.dumps(index))
 
-    from pipeline.__main__ import _find_rundown_article_text
+    from pipeline.__main__ import find_rundown_article_source
 
     class FakeDirective:
         # Completely unrelated headline
         headline = "Federal Reserve raises interest rates to combat inflation"
         source = "zvi"
 
-    text = _find_rundown_article_text(FakeDirective(), tmp_path)
+    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
     assert text == ""
+    assert path is None
 
 
-def test_find_rundown_article_text_exa_hit(tmp_path):
-    """Exa fallback returns the body when the file reports a hit."""
-    exa_dir = tmp_path / "enrichment" / "exa"
-    exa_dir.mkdir(parents=True)
-    slug = _slugify("Paywalled Story")
-    # Production shape (things_happen_collector.py Phase 3): bookkeeping
-    # headers followed by "## [title](url)" result sections.
-    (exa_dir / f"{slug}.md").write_text(
-        "# Exa Results for: Paywalled Story\nResult: hit\nQuery: paywalled story\n\n"
-        "## [Paywalled Story](https://example.com/paywalled)\n"
-        "Full article text recovered via Exa search.\n\n"
-    )
-
-    from pipeline.__main__ import _find_rundown_article_text
-
-    class FakeDirective:
-        headline = "Paywalled Story"
-        source = "levine"
-
-    text = _find_rundown_article_text(FakeDirective(), tmp_path)
-    assert "Full article text recovered via Exa search." in text
-
-
-def test_find_rundown_article_text_exa_empty_result_gated(tmp_path):
-    """Exa fallback must not surface a `Result: empty` stub as article text."""
-    exa_dir = tmp_path / "enrichment" / "exa"
-    exa_dir.mkdir(parents=True)
-    slug = _slugify("No Results Story")
-    (exa_dir / f"{slug}.md").write_text("Result: empty\n\nNo results found for query.")
-
-    from pipeline.__main__ import _find_rundown_article_text
-
-    class FakeDirective:
-        headline = "No Results Story"
-        source = "levine"
-
-    text = _find_rundown_article_text(FakeDirective(), tmp_path)
-    assert text == ""
-
-
-def test_find_rundown_article_text_exa_headerless_file_no_longer_surfaced(tmp_path):
+def test_find_rundown_article_source_exa_headerless_file_no_longer_surfaced(tmp_path):
     """Headerless Exa files (FP format, no `## [title](url)` sections) are no
     longer surfaced by the Rundown resolver's Exa fallback.
+
+    Was test_find_rundown_article_text_exa_headerless_file_no_longer_surfaced,
+    exercised through the now-deleted _find_rundown_article_text wrapper (see
+    test_find_rundown_article_source_no_false_match above for why). No
+    equivalent exists among the tests below, so it is kept, converted to
+    call the underlying resolver directly.
 
     Before this change the resolver used `exa_text_if_hit`, which trusts any
     headerless file unconditionally (that trust is still correct and is
@@ -711,14 +638,15 @@ def test_find_rundown_article_text_exa_headerless_file_no_longer_surfaced(tmp_pa
         "Article text with no Result header at all."
     )
 
-    from pipeline.__main__ import _find_rundown_article_text
+    from pipeline.__main__ import find_rundown_article_source
 
     class FakeDirective:
         headline = "Legacy Format Story"
         source = "levine"
 
-    text = _find_rundown_article_text(FakeDirective(), tmp_path)
+    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
     assert text == ""
+    assert path is None
 
 
 def test_find_rundown_article_source_reports_path_on_exact_match(tmp_path):
@@ -907,25 +835,6 @@ def test_exa_fallback_has_no_bookkeeping_headers(tmp_path):
     assert "Result:" not in text
     assert "Query:" not in text
     assert src == f"enrichment/exa/{slug}.md"
-
-
-def test_find_rundown_article_text_wrapper_unchanged(tmp_path):
-    """_find_rundown_article_text stays a transparent text-only wrapper."""
-    from pipeline.__main__ import _find_rundown_article_text
-
-    index = {"Some Headline": "articles/00-some-headline.md"}
-    (tmp_path / "articles").mkdir()
-    (tmp_path / "articles" / "00-some-headline.md").write_text(
-        "# Some Headline\n\nURL: u\n\nbody text here", encoding="utf-8"
-    )
-    (tmp_path / "headline_index.json").write_text(json.dumps(index))
-
-    class FakeDirective:
-        headline = "Some Headline"
-        source = ""
-
-    text = _find_rundown_article_text(FakeDirective(), tmp_path)
-    assert "body text here" in text
 
 
 def test_semafor_routing_header_preferred_over_category(tmp_path, monkeypatch):
@@ -1193,13 +1102,13 @@ def test_exa_reader_e2e_fallback_matches_writer(tmp_path, monkeypatch):
     assert exa_headline not in index
     assert "Local Bakery Wins Award" in index
 
-    from pipeline.__main__ import _find_rundown_article_text
+    from pipeline.__main__ import find_rundown_article_source
 
     class FakeDirective:
         headline = exa_headline
         source = "levine"
 
-    text = _find_rundown_article_text(FakeDirective(), work_dir)
+    text, _path = find_rundown_article_source(FakeDirective(), work_dir)
     assert "Exa recovered body text." in text
 
     # Prove this isn't a tautology: remove the Exa file the collector wrote
@@ -1208,7 +1117,9 @@ def test_exa_reader_e2e_fallback_matches_writer(tmp_path, monkeypatch):
     exa_file = work_dir / "enrichment" / "exa" / f"{_slugify(exa_headline)}.md"
     assert exa_file.exists()
     exa_file.unlink()
-    text_after_removal = _find_rundown_article_text(FakeDirective(), work_dir)
+    text_after_removal, _path_after_removal = find_rundown_article_source(
+        FakeDirective(), work_dir
+    )
     assert text_after_removal == ""
 
 
