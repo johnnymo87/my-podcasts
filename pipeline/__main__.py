@@ -435,15 +435,22 @@ def fp_digest_command(
     date_str: str | None, dry_run: bool, lookback_days: int | None
 ) -> None:
     """Create and process an FP Digest episode."""
-    from datetime import UTC, datetime
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
     if date_str is None:
-        date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+        date_str = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
 
     if dry_run:
         _fp_digest_dry_run(date_str, lookback_days)
-    else:
-        _fp_digest_full_run(date_str, lookback_days)
+        return
+
+    store = StateStore(_default_state_db_path())
+    try:
+        _enqueue_daily_job(store, "fp-digest", date_str)
+        _audit_previous_daily_run(store, "fp-digest", date_str)
+    finally:
+        store.close()
 
 
 def _fp_digest_dry_run(date_str: str, lookback_override: int | None = None) -> None:
@@ -515,116 +522,6 @@ def _fp_digest_dry_run(date_str: str, lookback_override: int | None = None) -> N
 
     click.echo(f"Dry run complete. Script saved to: {script_file}")
     click.echo(f"Work directory: {work_dir}")
-
-
-def _fp_digest_full_run(date_str: str, lookback_override: int | None = None) -> None:
-    """Run the full pipeline: collect, generate script, TTS, publish."""
-    import shutil
-
-    from pipeline.consumer import _compute_lookback
-    from pipeline.fp_collector import collect_fp_artifacts
-    from pipeline.fp_editor import FPResearchPlan
-    from pipeline.fp_processor import process_fp_digest_job
-    from pipeline.fp_writer import generate_fp_script
-
-    store = StateStore(_default_state_db_path())
-    try:
-        r2_client = R2Client()
-
-        job_id = store.insert_pending_fp_digest(date_str)
-        if job_id is None:
-            click.echo(f"FP Digest job already exists for {date_str}")
-            due = store.list_due_fp_digest()
-            job = next((j for j in due if j["date_str"] == date_str), None)
-            if job is None:
-                click.echo("Job exists but is not pending.")
-                return
-        else:
-            click.echo(f"Created FP Digest job {job_id} for {date_str}")
-            due = store.list_due_fp_digest()
-            job = next((j for j in due if j["id"] == job_id), None)
-            if job is None:
-                click.echo("Error: job not found")
-                return
-
-        lookback = lookback_override or _compute_lookback(store, "fp-digest")
-        work_dir = Path(f"/tmp/fp-digest-{job['id']}")
-        fp_coverage = store.recent_coverage_summary("fp-digest", days=3)
-        fp_prior_urls = store.recent_article_urls("fp-digest", days=3)
-        click.echo("Collecting sources...")
-        collect_fp_artifacts(
-            job["id"],
-            work_dir,
-            homepage_cache_dir=Path("/persist/my-podcasts/antiwar-homepage-cache"),
-            antiwar_rss_cache_dir=Path("/persist/my-podcasts/antiwar-rss-cache"),
-            semafor_cache_dir=Path("/persist/my-podcasts/semafor-cache"),
-            lookback_days=lookback,
-            coverage_summary=fp_coverage,
-            prior_urls=fp_prior_urls,
-        )
-
-        plan_path = work_dir / "plan.json"
-        if not plan_path.exists():
-            click.echo("Error: no plan generated")
-            return
-
-        plan = FPResearchPlan.model_validate_json(plan_path.read_text())
-        click.echo(f"Themes: {', '.join(plan.themes)}")
-        selected = sum(1 for d in plan.directives if d.include_in_episode)
-        click.echo(f"Selected {selected} stories")
-
-        from pipeline.consumer import _find_article_text
-
-        articles_by_theme: dict[str, list[str]] = {}
-        for directive in plan.directives:
-            if not directive.include_in_episode:
-                continue
-            text = _find_article_text(directive, work_dir)
-            if text:
-                articles_by_theme.setdefault(directive.theme, []).append(text)
-
-        context_scripts = []
-        context_dir = work_dir / "context"
-        if context_dir.exists():
-            for f in sorted(context_dir.glob("*.txt"), reverse=True):
-                context_scripts.append(f.read_text(encoding="utf-8"))
-
-        click.echo("Generating script...")
-        writer_output = generate_fp_script(
-            themes=plan.themes,
-            articles_by_theme=articles_by_theme,
-            date_str=date_str,
-            context_scripts=context_scripts,
-            work_dir=work_dir,
-        )
-
-        script_file = work_dir / "script.txt"
-        script_file.write_text(writer_output.script, encoding="utf-8")
-        summary_file = work_dir / "summary.txt"
-        summary_file.write_text(writer_output.summary, encoding="utf-8")
-        if writer_output.covered_headlines:
-            covered_file = work_dir / "covered.json"
-            covered_file.write_text(
-                json.dumps(writer_output.covered_headlines), encoding="utf-8"
-            )
-
-        click.echo("Running TTS...")
-        process_fp_digest_job(
-            job,
-            store,
-            r2_client,
-            script_path=script_file,
-            work_dir=work_dir,
-            summary=writer_output.summary,
-        )
-
-        persist_dir = Path("/persist/my-podcasts/scripts/fp-digest")
-        persist_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy(script_file, persist_dir / f"{date_str}.txt")
-
-        click.echo(f"Published FP Digest for {date_str}")
-    finally:
-        store.close()
 
 
 @cli.command("the-rundown")
