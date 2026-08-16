@@ -346,7 +346,7 @@ def collect_all_artifacts(
         routed_path.write_text(json.dumps(routed_data, indent=2), encoding="utf-8")
 
     # Phase 3: Deep Enrichment (non-FP only)
-    # The filename must be the bare slug: __main__._find_rundown_article_text
+    # The filename must be the bare slug: __main__.find_rundown_article_source
     # and show_notes._find_article_file both look up `{slug}.md` exactly. An
     # index prefix here is how enrichment silently went undelivered for months.
     exa_outcomes: dict[str, str] = {}

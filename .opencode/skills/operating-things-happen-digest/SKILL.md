@@ -15,6 +15,15 @@ Recent hardening changed the operational behavior:
 - retries reuse prior collection when `collection_done.json` and `plan.json` exist
 - empty script output is rejected at the writer boundary
 - retries back off and eventually become `status='errored'` instead of retrying forever
+- the writer prompt is built from an ordered list of `(theme, article_texts)`
+  sections (`consumer._assemble_writer_inputs` builds it, `rundown_writer.build_rundown_prompt`
+  renders it verbatim) — a theme with no resolved articles is never announced as a bare
+  header, and a directive whose theme the editor invented (absent from `plan.json`'s
+  `themes` list) still reaches the model, as its own trailing section under its own name
+- `--dry-run` calls the same `_assemble_writer_inputs` the consumer uses (including the
+  Exa open-access append) and now also writes `writer_inputs.json` into the dry-run work
+  dir, so `run-stats --work-dir` works on dry-run dirs the same as production ones — a
+  `--dry-run` + `publish-script` episode matches what the consumer would have produced
 
 ## Quick checks
 
@@ -145,6 +154,27 @@ matched the wrong story.
 - Alert thresholds for any of this remain deliberately unset
   (`my-podcasts-3qs`) until that history exists — don't invent a guessed
   threshold from one day's numbers.
+
+### Reading `writer_inputs.json` directly: `reached_prompt` and `miss_reason`
+
+Each entry in `work_dir/writer_inputs.json` carries `reached_prompt` (bool) and
+`miss_reason` (`no_index` / `index_unreadable` / `index_no_overlap`, or `None` on a hit).
+`reached_prompt` is true only if the directive both resolved to text AND its theme
+survived into a section that actually got rendered into the prompt — so it is a genuine
+check on section assembly, not a restatement of `chars > 0`.
+
+If the funnel's `WRITE` line shows a trailing `, N DROPPED-AFTER-RESOLVE(!)`, that is
+`dropped_before_prompt`: directives that resolved to real text but whose theme did not
+make it into any section actually built. **This should always read 0.** If you see it
+non-zero, section assembly lost a story that had text — treat it as a bug in
+`consumer._assemble_writer_inputs`, not as a normal-variance statistic, and go read that
+function's ordering rules before assuming anything else. A bracketed
+`[misses: no_index 2, index_no_overlap 1]` on the same line is the `miss_reason`
+histogram (only shown when non-empty) — `no_index` means `headline_index.json` was
+missing from the work dir entirely, `index_unreadable` means it existed but failed to
+parse, `index_no_overlap` means it parsed fine but neither exact-match nor word-overlap
+found the article. Historical work dirs predate both fields; a missing key reads as
+"unknown," not as a miss, so old dirs never falsely trip the canary.
 
 Beware two false alarms:
 

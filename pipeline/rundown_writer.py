@@ -72,8 +72,7 @@ STORIES BY THEME:
 
 
 def build_rundown_prompt(
-    themes: list[str],
-    articles_by_theme: dict[str, list[str]],
+    sections: list[tuple[str, list[str]]],
     date_str: str,
     context_scripts: list[str] | None = None,
 ) -> str:
@@ -103,11 +102,21 @@ def build_rundown_prompt(
     else:
         context_block = ""
 
-    themes_list = "\n".join(f"- {theme}" for theme in themes)
+    # A section with no articles must never reach the model as a bare
+    # '## Theme' header under STORIES BY THEME -- this is unread, fully
+    # automated output. Today's only caller (consumer._assemble_writer_inputs)
+    # already omits empty sections, but that guarantee lives one caller deep;
+    # skipping here too closes the gap for any future caller (e.g. the FP
+    # Digest port, my-podcasts-tj9) that might not uphold it. Filtering here
+    # keeps the announced TODAY'S THEMES list and the rendered sections in
+    # sync by construction, the same way sections replaced the old
+    # themes/articles_by_theme pair.
+    non_empty_sections = [(theme, articles) for theme, articles in sections if articles]
+
+    themes_list = "\n".join(f"- {theme}" for theme, _ in non_empty_sections)
 
     story_sections: list[str] = []
-    for theme in themes:
-        articles = articles_by_theme.get(theme, [])
+    for theme, articles in non_empty_sections:
         section_lines = [f"## {theme}"]
         for j, article_text in enumerate(articles, 1):
             section_lines.append(f"### Source {j}")
@@ -173,8 +182,7 @@ def _extract_script(text: str) -> str:
 
 
 def generate_rundown_script(
-    themes: list[str],
-    articles_by_theme: dict[str, list[str]],
+    sections: list[tuple[str, list[str]]],
     date_str: str,
     context_scripts: list[str] | None = None,
     work_dir: Path | None = None,
@@ -188,14 +196,23 @@ def generate_rundown_script(
     deleted so the next retry regenerates instead of looping on the same
     broken content.
     """
+    # Refuse to generate from nothing. If every directive failed to resolve
+    # (a corrupt headline_index.json, a collection that wrote no files), the
+    # prompt would carry an empty STORIES BY THEME block while still telling
+    # the model to "produce a spoken briefing" -- and it would, entirely from
+    # parametric memory, published unread. Raising instead lets the consumer
+    # back off and retry, and the retry-exhaustion alert fires if it never
+    # recovers. Checked before the raw_writer_output.txt reuse path so a
+    # retry cannot launder a fabricated script from an earlier empty run.
+    if not any(articles for _, articles in sections):
+        raise RuntimeError("Rundown writer refused: no section has any article text")
+
     raw_path = work_dir / "raw_writer_output.txt" if work_dir else None
 
     if raw_path is not None and raw_path.exists():
         full_text = raw_path.read_text(encoding="utf-8")
     else:
-        prompt = build_rundown_prompt(
-            themes, articles_by_theme, date_str, context_scripts
-        )
+        prompt = build_rundown_prompt(sections, date_str, context_scripts)
         instruction = (
             "Read the following prompt and generate the podcast briefing script. "
             "First, write a 2-3 sentence summary of today's episode wrapped in "

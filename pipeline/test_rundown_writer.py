@@ -14,11 +14,10 @@ from pipeline.rundown_writer import (
 
 def test_build_prompt_basic():
     prompt = build_rundown_prompt(
-        themes=["Tech", "Finance"],
-        articles_by_theme={
-            "Tech": ["Article about tech"],
-            "Finance": ["Article about finance"],
-        },
+        sections=[
+            ("Tech", ["Article about tech"]),
+            ("Finance", ["Article about finance"]),
+        ],
         date_str="2026-03-10",
     )
     assert "2026-03-10" in prompt
@@ -31,8 +30,7 @@ def test_build_prompt_basic():
 
 def test_build_prompt_instructs_outlet_attribution_for_open_access():
     prompt = build_rundown_prompt(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article about tech"]},
+        sections=[("Tech", ["Article about tech"])],
         date_str="2026-03-10",
     )
     assert "Related coverage from other outlets" in prompt
@@ -41,8 +39,7 @@ def test_build_prompt_instructs_outlet_attribution_for_open_access():
 
 def test_build_prompt_with_context():
     prompt = build_rundown_prompt(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["New article"]},
+        sections=[("Tech", ["New article"])],
         date_str="2026-03-10",
         context_scripts=["Yesterday's script content"],
     )
@@ -52,12 +49,69 @@ def test_build_prompt_with_context():
 
 def test_build_prompt_without_context():
     prompt = build_rundown_prompt(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article"]},
+        sections=[("Tech", ["Article"])],
         date_str="2026-03-10",
         context_scripts=None,
     )
     assert "PRIOR EPISODES" not in prompt
+
+
+def test_prompt_themes_list_matches_sections_exactly():
+    """No theme is announced that has no material beneath it."""
+    prompt = build_rundown_prompt(
+        sections=[("Tech", ["Article about tech"])], date_str="2026-03-10"
+    )
+    assert "- Tech" in prompt and "## Tech" in prompt
+
+
+def test_prompt_renders_orphan_section_under_its_own_name():
+    prompt = build_rundown_prompt(
+        sections=[("Alpha", ["a"]), ("Invented Name", ["b"])], date_str="2026-03-10"
+    )
+    assert "## Invented Name" in prompt and "b" in prompt
+
+
+def test_prompt_never_renders_a_theme_header_with_no_articles():
+    """Boundary hardening: the renderer itself must never emit a bare header.
+
+    Task 1's assembler guarantees this today by construction, but the FP
+    Digest port (my-podcasts-tj9) will call this same renderer with sections
+    built by different code. A section with an empty article list must not
+    appear anywhere in the prompt -- not as a rendered '## Empty' header, and
+    not in the derived TODAY'S THEMES list either, so the two stay
+    consistent with each other.
+    """
+    prompt = build_rundown_prompt(
+        sections=[("Alpha", ["real"]), ("Empty", [])], date_str="2026-03-10"
+    )
+    assert "Empty" not in prompt
+    assert "## Alpha" in prompt
+
+
+def test_prompt_matches_legacy_rendering_when_there_is_nothing_to_fix():
+    """Permanent guard: on a normal day the prompt is byte-identical to the old one.
+
+    Carries the OLD rendering logic inline as a reference implementation. For input
+    where every plan theme has >=1 article and there are no orphans -- i.e. the
+    overwhelmingly common case -- the new builder must produce exactly what the old
+    one did. This pins 'identical except the two intended changes' in CI, which the
+    one-time manual diff in Task 6 cannot do.
+    """
+    themes = ["Alpha", "Beta"]
+    articles = {"Alpha": ["a1", "a2"], "Beta": ["b1"]}
+    legacy_sections = []
+    for theme in themes:  # old logic, verbatim
+        lines = [f"## {theme}"]
+        for j, art in enumerate(articles[theme], 1):
+            lines.append(f"### Source {j}")
+            lines.append(art)
+        legacy_sections.append("\n".join(lines))
+    legacy_block = "\n\n".join(legacy_sections)
+
+    prompt = build_rundown_prompt(
+        sections=[(t, articles[t]) for t in themes], date_str="2026-03-10"
+    )
+    assert legacy_block in prompt
 
 
 @patch("pipeline.rundown_writer.delete_session")
@@ -81,8 +135,7 @@ def test_generate_script(
     mock_text.return_value = "Generated podcast script here"
 
     result = generate_rundown_script(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article"]},
+        sections=[("Tech", ["Article"])],
         date_str="2026-03-10",
         work_dir=tmp_path,
     )
@@ -107,8 +160,7 @@ def test_generate_script_timeout_raises(
 
     try:
         generate_rundown_script(
-            themes=["Tech"],
-            articles_by_theme={"Tech": ["Article"]},
+            sections=[("Tech", ["Article"])],
             date_str="2026-03-10",
             work_dir=tmp_path,
         )
@@ -142,8 +194,7 @@ def test_generate_script_extracts_script_tags(
     )
 
     result = generate_rundown_script(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article"]},
+        sections=[("Tech", ["Article"])],
         date_str="2026-03-10",
         work_dir=tmp_path,
     )
@@ -174,8 +225,7 @@ def test_generate_rundown_script_rejects_empty_output(
 
     try:
         generate_rundown_script(
-            themes=["Tech"],
-            articles_by_theme={"Tech": ["Article"]},
+            sections=[("Tech", ["Article"])],
             date_str="2026-03-10",
             work_dir=tmp_path,
         )
@@ -258,8 +308,7 @@ def test_generate_rundown_returns_writer_output_with_summary(
     mock_text.return_value = "<summary>Today's summary.</summary>\n\nThe script text."
 
     result = generate_rundown_script(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article"]},
+        sections=[("Tech", ["Article"])],
         date_str="2026-03-10",
         work_dir=tmp_path,
     )
@@ -351,8 +400,7 @@ def test_generate_script_parses_covered_tags(
     )
 
     result = generate_rundown_script(
-        themes=["Finance"],
-        articles_by_theme={"Finance": ["Article"]},
+        sections=[("Finance", ["Article"])],
         date_str="2026-03-12",
         work_dir=tmp_path,
     )
@@ -431,8 +479,7 @@ def test_persists_raw_output_before_parsing(
     )
 
     result = generate_rundown_script(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article"]},
+        sections=[("Tech", ["Article"])],
         date_str="2026-03-10",
         work_dir=tmp_path,
     )
@@ -469,8 +516,7 @@ def test_reuses_persisted_output_when_present(
     )
 
     result = generate_rundown_script(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article"]},
+        sections=[("Tech", ["Article"])],
         date_str="2026-03-10",
         work_dir=tmp_path,
     )
@@ -509,8 +555,7 @@ def test_deletes_persisted_output_on_parse_failure(
 
     try:
         generate_rundown_script(
-            themes=["Tech"],
-            articles_by_theme={"Tech": ["Article"]},
+            sections=[("Tech", ["Article"])],
             date_str="2026-03-10",
             work_dir=tmp_path,
         )
@@ -535,8 +580,7 @@ def test_does_not_persist_when_wait_for_idle_times_out(
 
     try:
         generate_rundown_script(
-            themes=["Tech"],
-            articles_by_theme={"Tech": ["Article"]},
+            sections=[("Tech", ["Article"])],
             date_str="2026-03-10",
             work_dir=tmp_path,
         )
@@ -579,3 +623,31 @@ def test_rundown_editor_falls_back_to_scripts(monkeypatch):
         prompt_used = mock_client.models.generate_content.call_args[1]["contents"]
         assert "Script from yesterday" in prompt_used
         assert "Previous episodes" in prompt_used
+
+
+def test_generate_refuses_to_write_from_zero_sections():
+    """A total resolution failure must not yield a fabricated episode.
+
+    If every directive fails to resolve, the prompt would carry an empty
+    STORIES BY THEME block while still instructing the model to produce a
+    briefing -- and it would, entirely from parametric memory, published
+    unread. The writer must refuse so the consumer backs off and retries.
+    """
+    import pytest
+
+    with pytest.raises(RuntimeError, match="no section has any article text"):
+        generate_rundown_script(
+            sections=[],
+            date_str="2026-03-10",
+        )
+
+
+def test_generate_refuses_when_sections_exist_but_all_are_empty():
+    """Same guard, but for sections present with no article text in them."""
+    import pytest
+
+    with pytest.raises(RuntimeError, match="no section has any article text"):
+        generate_rundown_script(
+            sections=[("Alpha", []), ("Beta", [])],
+            date_str="2026-03-10",
+        )

@@ -624,3 +624,122 @@ def test_append_jsonl_appends_across_calls(tmp_path):
     assert len(lines) == 2
     assert json.loads(lines[0])["job_id"] == "j1"
     assert json.loads(lines[1])["job_id"] == "j2"
+
+
+def test_dropped_before_prompt_counts_text_that_never_reached_the_model(tmp_path):
+    """reached_prompt False with chars > 0 is a regression canary: text was
+    resolved (has a source_path and length) but never rendered into a
+    section. Should be zero on every healthy run."""
+    work_dir = tmp_path / "the-rundown-regression"
+    work_dir.mkdir()
+    _write_json(
+        work_dir / "writer_inputs.json",
+        [
+            {
+                "headline": "Orphaned story",
+                "theme": "Ghost Theme",
+                "source_path": "articles/00-live0.md",
+                "chars": 500,
+                "reached_prompt": False,
+                "miss_reason": None,
+            }
+        ],
+    )
+
+    stats = collect_run_stats(work_dir, job_id="j", date_str="2026-08-15")
+
+    assert stats.writer_dropped_before_prompt == 1
+
+    report = render_report(stats)
+    assert "DROPPED-AFTER-RESOLVE" in report
+
+
+def test_missing_reached_prompt_key_is_not_counted_as_dropped(tmp_path):
+    """Historical writer_inputs.json predates the field; must not false-alarm."""
+    work_dir = tmp_path / "the-rundown-legacy"
+    work_dir.mkdir()
+    _write_json(
+        work_dir / "writer_inputs.json",
+        [
+            {
+                "headline": "Legacy story",
+                "theme": "Theme A",
+                "source_path": "articles/00-live0.md",
+                "chars": 500,
+            }
+        ],
+    )
+
+    stats = collect_run_stats(work_dir, job_id="j", date_str="2026-08-15")
+
+    assert stats.writer_dropped_before_prompt == 0
+
+    report = render_report(stats)
+    assert "DROPPED-AFTER-RESOLVE" not in report
+
+
+def test_render_report_shows_miss_reason_histogram(tmp_path):
+    work_dir = tmp_path / "the-rundown-misses"
+    work_dir.mkdir()
+    _write_json(
+        work_dir / "writer_inputs.json",
+        [
+            {
+                "headline": "Miss one",
+                "theme": "Theme A",
+                "source_path": None,
+                "chars": 0,
+                "reached_prompt": False,
+                "miss_reason": "no_index",
+            },
+            {
+                "headline": "Miss two",
+                "theme": "Theme A",
+                "source_path": None,
+                "chars": 0,
+                "reached_prompt": False,
+                "miss_reason": "index_no_overlap",
+            },
+            {
+                "headline": "Miss three",
+                "theme": "Theme A",
+                "source_path": None,
+                "chars": 0,
+                "reached_prompt": False,
+                "miss_reason": "index_no_overlap",
+            },
+        ],
+    )
+
+    stats = collect_run_stats(work_dir, job_id="j", date_str="2026-08-15")
+
+    assert stats.writer_miss_reasons == {"no_index": 1, "index_no_overlap": 2}
+
+    report = render_report(stats)
+    assert "no_index 1" in report
+    assert "index_no_overlap 2" in report
+
+
+def test_missing_miss_reason_key_produces_no_histogram_entry(tmp_path):
+    """Historical writer_inputs.json predates miss_reason; must not invent data."""
+    work_dir = tmp_path / "the-rundown-legacy-miss"
+    work_dir.mkdir()
+    _write_json(
+        work_dir / "writer_inputs.json",
+        [
+            {
+                "headline": "Legacy miss",
+                "theme": "Theme A",
+                "source_path": None,
+                "chars": 0,
+            }
+        ],
+    )
+
+    stats = collect_run_stats(work_dir, job_id="j", date_str="2026-08-15")
+
+    assert stats.writer_miss_reasons == {}
+    assert stats.writer_dropped == 1
+
+    report = render_report(stats)
+    assert "misses" not in report

@@ -318,18 +318,30 @@ def _find_article_text(directive: Any, work_dir: Path) -> str:
 
 def _assemble_writer_inputs(
     plan: RundownResearchPlan, work_dir: Path
-) -> tuple[dict[str, list[str]], list[dict]]:
-    """Resolve each selected directive to article text. Pure function of disk state."""
+) -> tuple[list[tuple[str, list[str]]], list[dict]]:
+    """Resolve each selected directive to article text. Pure function of disk state.
+
+    Returns (sections, writer_inputs). `sections` is an ordered list of
+    (theme, article_texts) built once here so nothing downstream can
+    re-derive or drop a theme: plan themes keep plan.themes order and omit
+    themes with zero resolved articles (no bare headers); a directive whose
+    theme is absent from plan.themes (an orphan -- the editor invented a
+    near-miss name) gets appended as its own trailing section in
+    first-seen order, under its own name, never folded into a similar
+    plan theme.
+    """
     from pipeline.__main__ import find_rundown_article_source
     from pipeline.exa_client import exa_result_sections
     from pipeline.things_happen_collector import _slugify as _th_slugify
 
-    rundown_articles_by_theme: dict[str, list[str]] = {}
+    plan_theme_order = {theme: i for i, theme in enumerate(plan.themes)}
+    by_theme: dict[str, list[str]] = {}
+    orphan_order: list[str] = []
     writer_inputs: list[dict] = []
     for directive in plan.directives:
         if not directive.include_in_episode:
             continue
-        text, src = find_rundown_article_source(directive, work_dir)
+        text, src, miss_reason = find_rundown_article_source(directive, work_dir)
 
         # A stub always wins the word-overlap match ahead of Exa (it IS the
         # headline text, so it shares words with the directive by
@@ -345,6 +357,18 @@ def _assemble_writer_inputs(
             if exa_extra:
                 text = f"{text}\n\n{_OPEN_ACCESS_HEADING}\n\n{exa_extra}"
 
+        # reached_prompt is filled in after `sections` is built, by checking
+        # actual membership -- deliberately NOT set to bool(text) here.
+        # bool(text) would be a tautology against "chars": len(text) in this
+        # same dict literal, so the funnel's dropped_before_prompt canary
+        # could never fire no matter how badly section assembly broke. Deriving
+        # it from the built sections instead makes it an independent check:
+        # if any future change to the section-building below drops a theme
+        # that has text, this goes False and the funnel says so.
+        # miss_reason is None on a hit; see find_rundown_article_source's
+        # docstring for the taxonomy (no_index / index_unreadable /
+        # index_no_overlap) and why the cascade only supports one reason
+        # per miss, not a reason per lookup stage.
         writer_inputs.append(
             {
                 "headline": directive.headline,
@@ -353,11 +377,37 @@ def _assemble_writer_inputs(
                 "chars": len(text),
                 "exa_appended": bool(exa_extra),
                 "exa_chars": len(exa_extra),
+                "miss_reason": miss_reason,
             }
         )
         if text:
-            rundown_articles_by_theme.setdefault(directive.theme, []).append(text)
-    return rundown_articles_by_theme, writer_inputs
+            if (
+                directive.theme not in plan_theme_order
+                and directive.theme not in by_theme
+            ):
+                orphan_order.append(directive.theme)
+            by_theme.setdefault(directive.theme, []).append(text)
+
+    # `plan.themes` comes from an LLM and carries no uniqueness constraint, so
+    # a repeated theme name would otherwise render its articles twice in the
+    # prompt. Deduplicate on first occurrence, preserving plan order.
+    _seen: set[str] = set()
+    sections: list[tuple[str, list[str]]] = [
+        (theme, by_theme[theme])
+        for theme in plan.themes
+        if by_theme.get(theme) and not (theme in _seen or _seen.add(theme))
+    ]
+    sections += [(theme, by_theme[theme]) for theme in orphan_order]
+
+    # Derived from the sections that were actually built, not from bool(text),
+    # so this is a genuine cross-check rather than a restatement of "chars".
+    # A directive reached the prompt iff it resolved to text AND its theme
+    # survived into a rendered section.
+    section_names = {theme for theme, _ in sections}
+    for entry in writer_inputs:
+        entry["reached_prompt"] = entry["chars"] > 0 and entry["theme"] in section_names
+
+    return sections, writer_inputs
 
 
 def consume_forever(
@@ -500,8 +550,8 @@ def consume_forever(
                             plan_path.read_text()
                         )
 
-                        rundown_articles_by_theme, writer_inputs = (
-                            _assemble_writer_inputs(plan, work_dir)
+                        sections, writer_inputs = _assemble_writer_inputs(
+                            plan, work_dir
                         )
                         # A directive resolving to nothing used to vanish here
                         # with no counter and no log.
@@ -516,8 +566,7 @@ def consume_forever(
                                 context_scripts.append(f.read_text(encoding="utf-8"))
 
                         writer_output = generate_rundown_script(
-                            themes=plan.themes,
-                            articles_by_theme=rundown_articles_by_theme,
+                            sections=sections,
                             date_str=job["date_str"],
                             context_scripts=context_scripts,
                             work_dir=work_dir,

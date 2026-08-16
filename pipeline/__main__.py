@@ -24,19 +24,9 @@ from pipeline.source_cache import (
 from pipeline.zvi_cache import sync_zvi_cache
 
 
-def _find_rundown_article_text(directive: Any, work_dir: Path) -> str:
-    """Find article text for a Rundown directive.
-
-    Thin wrapper over find_rundown_article_source() for callers that only
-    need the text, not the resolved source path.
-    """
-    text, _path = find_rundown_article_source(directive, work_dir)
-    return text
-
-
 def find_rundown_article_source(
     directive: Any, work_dir: Path
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, str | None]:
     """Find article text and its work-dir-relative source path for a directive.
 
     Searches (in order):
@@ -45,10 +35,22 @@ def find_rundown_article_source(
     3. Slug-based file matching (legacy fallback)
     4. Exa enrichment by slug
 
-    Returns (text, source_path). source_path is None on a miss, and is
-    always relative to work_dir (matching the keys used in tiers.json and
-    headline_index.json) so callers can join resolution results against
-    those files.
+    Returns (text, source_path, miss_reason). source_path is None on a
+    miss, and is always relative to work_dir (matching the keys used in
+    tiers.json and headline_index.json) so callers can join resolution
+    results against those files.
+
+    miss_reason is None on any hit. There is exactly one miss return (the
+    final one, below) because every lookup above cascades into the next --
+    so a miss there means the index lookup AND the legacy slug fallback AND
+    the Exa fallback all missed. There is no separate "slug missed" or "exa
+    missed" reason; the only thing that varies across a miss is the state
+    of headline_index.json at the point the cascade started, so that is
+    what miss_reason describes:
+    - "no_index": headline_index.json did not exist.
+    - "index_unreadable": it existed but failed to parse.
+    - "index_no_overlap": it parsed, but neither the exact-match nor the
+      word-overlap lookup found a hit.
     """
     import json as _json
 
@@ -58,20 +60,29 @@ def find_rundown_article_source(
     headline = directive.headline
     slug = _slugify(headline)
 
+    miss_reason = "no_index"
+
     # --- Index-based lookup (handles editor headline reformulation) ---
     index_path = work_dir / "headline_index.json"
     if index_path.exists():
         try:
-            index: dict[str, str] = _json.loads(index_path.read_text(encoding="utf-8"))
+            index = _json.loads(index_path.read_text(encoding="utf-8"))
+            # Valid JSON of the wrong shape (e.g. a list) would otherwise reach
+            # index.items() below and raise AttributeError mid-job, wedging the
+            # job into retry backoff rather than degrading to the fallbacks.
+            if not isinstance(index, dict):
+                raise ValueError("headline_index.json is not an object")
+            miss_reason = "index_no_overlap"
         except Exception:
             index = {}
+            miss_reason = "index_unreadable"
 
         # Exact match
         if headline in index:
             rel_path = index[headline]
             fpath = work_dir / rel_path
             if fpath.exists():
-                return fpath.read_text(encoding="utf-8"), rel_path
+                return fpath.read_text(encoding="utf-8"), rel_path, None
 
         # Word-overlap match: pick the file whose content best matches
         # the directive headline. The editor reformulates headlines, but
@@ -97,7 +108,7 @@ def find_rundown_article_source(
                         best_path = rel_path
                 if best_path and best_score > 0:
                     fpath = work_dir / best_path
-                    return fpath.read_text(encoding="utf-8"), best_path
+                    return fpath.read_text(encoding="utf-8"), best_path, None
 
     # --- Legacy slug-based fallback ---
     # Flat Levine articles (e.g. "00-headline.md")
@@ -108,6 +119,7 @@ def find_rundown_article_source(
                 return (
                     match.read_text(encoding="utf-8"),
                     str(match.relative_to(work_dir)),
+                    None,
                 )
 
     # Semafor articles
@@ -116,6 +128,7 @@ def find_rundown_article_source(
         return (
             semafor_file.read_text(encoding="utf-8"),
             str(semafor_file.relative_to(work_dir)),
+            None,
         )
 
     # Zvi articles
@@ -125,15 +138,16 @@ def find_rundown_article_source(
             return (
                 match.read_text(encoding="utf-8"),
                 str(match.relative_to(work_dir)),
+                None,
             )
 
     # Exa enrichment
     exa_text = exa_result_sections(work_dir, slug)
     if exa_text:
         exa_path = exa_file_path(work_dir, slug)
-        return exa_text, str(exa_path.relative_to(work_dir))
+        return exa_text, str(exa_path.relative_to(work_dir)), None
 
-    return "", None
+    return "", None, miss_reason
 
 
 def _default_state_db_path() -> Path:
@@ -665,6 +679,7 @@ def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) ->
     """Run collection + script generation without touching the DB."""
     import uuid
 
+    from pipeline.consumer import _assemble_writer_inputs
     from pipeline.rundown_writer import generate_rundown_script
     from pipeline.things_happen_collector import collect_all_artifacts
     from pipeline.things_happen_editor import RundownResearchPlan
@@ -694,13 +709,10 @@ def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) ->
     selected = sum(1 for d in plan.directives if d.include_in_episode)
     click.echo(f"Selected {selected} stories")
 
-    articles_by_theme: dict[str, list[str]] = {}
-    for directive in plan.directives:
-        if not directive.include_in_episode:
-            continue
-        text = _find_rundown_article_text(directive, work_dir)
-        if text:
-            articles_by_theme.setdefault(directive.theme, []).append(text)
+    sections, writer_inputs = _assemble_writer_inputs(plan, work_dir)
+    (work_dir / "writer_inputs.json").write_text(
+        json.dumps(writer_inputs, indent=2), encoding="utf-8"
+    )
 
     context_scripts = []
     context_dir = work_dir / "context"
@@ -710,8 +722,7 @@ def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) ->
 
     click.echo("Generating script...")
     writer_output = generate_rundown_script(
-        themes=plan.themes,
-        articles_by_theme=articles_by_theme,
+        sections=sections,
         date_str=date_str,
         context_scripts=context_scripts,
         work_dir=work_dir,

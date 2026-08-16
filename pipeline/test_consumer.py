@@ -328,6 +328,7 @@ def test_consume_forever_schedules_rundown_retry_after_writer_failure(
         patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
         patch(
             "pipeline.rundown_writer.generate_rundown_script",
+            autospec=True,
             side_effect=RuntimeError("upstream timeout"),
         ),
     ):
@@ -452,6 +453,7 @@ def test_consume_forever_passes_reused_collection_true_on_retry(
         patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
         patch(
             "pipeline.rundown_writer.generate_rundown_script",
+            autospec=True,
             return_value=writer_output,
         ),
     ):
@@ -519,6 +521,7 @@ def test_consume_forever_passes_reused_collection_false_on_fresh_collection(
         patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
         patch(
             "pipeline.rundown_writer.generate_rundown_script",
+            autospec=True,
             return_value=writer_output,
         ),
     ):
@@ -599,6 +602,7 @@ def test_consume_forever_alerts_when_rundown_job_exhausts_retry_budget(
         patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
         patch(
             "pipeline.rundown_writer.generate_rundown_script",
+            autospec=True,
             side_effect=RuntimeError("upstream timeout"),
         ),
         patch("pipeline.alerts.send_alert") as alert,
@@ -654,6 +658,7 @@ def test_consume_forever_does_not_alert_on_an_ordinary_rundown_retry(
         patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
         patch(
             "pipeline.rundown_writer.generate_rundown_script",
+            autospec=True,
             side_effect=RuntimeError("upstream timeout"),
         ),
         patch("pipeline.alerts.send_alert") as alert,
