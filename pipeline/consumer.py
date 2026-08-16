@@ -318,13 +318,25 @@ def _find_article_text(directive: Any, work_dir: Path) -> str:
 
 def _assemble_writer_inputs(
     plan: RundownResearchPlan, work_dir: Path
-) -> tuple[dict[str, list[str]], list[dict]]:
-    """Resolve each selected directive to article text. Pure function of disk state."""
+) -> tuple[list[tuple[str, list[str]]], list[dict]]:
+    """Resolve each selected directive to article text. Pure function of disk state.
+
+    Returns (sections, writer_inputs). `sections` is an ordered list of
+    (theme, article_texts) built once here so nothing downstream can
+    re-derive or drop a theme: plan themes keep plan.themes order and omit
+    themes with zero resolved articles (no bare headers); a directive whose
+    theme is absent from plan.themes (an orphan -- the editor invented a
+    near-miss name) gets appended as its own trailing section in
+    first-seen order, under its own name, never folded into a similar
+    plan theme.
+    """
     from pipeline.__main__ import find_rundown_article_source
     from pipeline.exa_client import exa_result_sections
     from pipeline.things_happen_collector import _slugify as _th_slugify
 
-    rundown_articles_by_theme: dict[str, list[str]] = {}
+    plan_theme_order = {theme: i for i, theme in enumerate(plan.themes)}
+    by_theme: dict[str, list[str]] = {}
+    orphan_order: list[str] = []
     writer_inputs: list[dict] = []
     for directive in plan.directives:
         if not directive.include_in_episode:
@@ -356,8 +368,18 @@ def _assemble_writer_inputs(
             }
         )
         if text:
-            rundown_articles_by_theme.setdefault(directive.theme, []).append(text)
-    return rundown_articles_by_theme, writer_inputs
+            if (
+                directive.theme not in plan_theme_order
+                and directive.theme not in by_theme
+            ):
+                orphan_order.append(directive.theme)
+            by_theme.setdefault(directive.theme, []).append(text)
+
+    sections: list[tuple[str, list[str]]] = [
+        (theme, by_theme[theme]) for theme in plan.themes if by_theme.get(theme)
+    ]
+    sections += [(theme, by_theme[theme]) for theme in orphan_order]
+    return sections, writer_inputs
 
 
 def consume_forever(
@@ -500,8 +522,8 @@ def consume_forever(
                             plan_path.read_text()
                         )
 
-                        rundown_articles_by_theme, writer_inputs = (
-                            _assemble_writer_inputs(plan, work_dir)
+                        sections, writer_inputs = _assemble_writer_inputs(
+                            plan, work_dir
                         )
                         # A directive resolving to nothing used to vanish here
                         # with no counter and no log.
@@ -517,7 +539,9 @@ def consume_forever(
 
                         writer_output = generate_rundown_script(
                             themes=plan.themes,
-                            articles_by_theme=rundown_articles_by_theme,
+                            # TODO(task 3): pass sections directly once
+                            # build_rundown_prompt renders from sections.
+                            articles_by_theme=dict(sections),
                             date_str=job["date_str"],
                             context_scripts=context_scripts,
                             work_dir=work_dir,
