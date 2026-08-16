@@ -48,6 +48,7 @@ Work in a fresh worktree (`.worktrees/<name>`), never in the shared checkout.
 | Piece 2 | `vxd`, `nkd` | #8 | Funnel reporter → Telegram + `run-stats.jsonl` |
 | Piece 3 | `85c`, `kyk` | #9 | Open-access substitution for paywalled sources |
 | Piece 4 | `78b` | #10 | Enqueue-only daily CLI — stops the double-publish |
+| Piece 5 | `a3x`, `2sf` | #11 | Writer prompt built from ordered sections |
 
 **Pending verification:** the first production run exercising Pieces 1-4 is the
 next weekday 04:30 ET run. A self-wake is scheduled for 2026-08-17 ~06:00 ET.
@@ -81,18 +82,33 @@ Two lessons worth keeping:
   `UNIQUE(date_str)` would not collide them and the feed would carry two
   episodes for one day. Caught by adversarial review of the diff.
 
-### 1. Stop the writer silently dropping stories — `my-podcasts-a3x` (P2)
+### ~~1. Stop the writer silently dropping stories — `a3x` + `2sf`~~ — DONE (PR #11)
 
-**Why here:** it undermines the instrumentation everything else now depends on.
-`build_rundown_prompt` iterates `plan.themes` and takes
-`articles_by_theme.get(theme, [])`, so a directive whose `theme` doesn't exactly
-match a plan theme has its text dropped from the prompt — while
-`writer_inputs.json` still counts it as "with text". The funnel can therefore
-report a healthy `paywalled+exa` for a story the model never saw. Fixing this
-before trusting a fortnight of `run-stats.jsonl` is cheaper than distrusting the
-data later.
+Shipped 2026-08-16. The two structures that had to agree (a themes list and a
+dict keyed by directive theme) are replaced by one ordered section list built in
+`_assemble_writer_inputs`; the renderer walks it verbatim. Orphan themes get
+their own trailing section and are never fuzzy-matched back onto a plan theme.
 
-### 2. Unify directive→article matching — `3yb` + `5m3` + `4pw` (P2/P3)
+Not hypothetical: replaying real work dirs recovered a genuine Semafor story
+that had been dropped from two episodes under an invented theme name.
+
+Three lessons:
+
+- **Instrumentation can be decorative without being wrong.** `reached_prompt`
+  was first written as `bool(text)` in the same dict literal that set
+  `chars = len(text)` — tautologically equivalent, so the canary could never
+  fire however badly assembly broke. Derive a check from a *different*
+  structure than the one it is checking, or it proves nothing.
+- **Fix the limit case, not just the common one.** Suppressing empty per-theme
+  headers removed the invitation to fabricate a section; it took review to
+  notice that if *every* directive fails to resolve, the model is still asked
+  for a briefing and will write one from memory, published unread.
+- **Task order can be load-bearing.** Reviewing the plan before coding found an
+  ordering that would break the manual-publish path between two commits with
+  nothing to detect it — the suite passes, the import succeeds, and the mocks
+  were not autospec'd.
+
+### 1. Unify directive→article matching — `3yb` + `5m3` + `4pw` + `w6k` (P2/P3)
 
 **Why grouped:** one root cause, three symptoms. Levine headlines come from
 sentence extraction and can carry a double space that Gemini normalizes when it
@@ -106,22 +122,32 @@ Measured: 3 of 38 selected directives. Piece 3 already fixed the third instance
 - `4pw` — `_slugify` is duplicated byte-identically in two modules; drift would
   silently orphan every enrichment file.
 
+- `w6k` — the word-overlap fallback accepts `best_score > 0`, so a single shared
+  common word can bind a directive to the wrong article. That text then anchors
+  the section as the *primary* source, which the append-don't-replace protection
+  does not cover. Measure the score distribution before choosing a threshold.
+
 Likely collapses into one helper. Check before doing them separately.
 
-### 3. Exa hardening batch — `avf` + `d8w` + `j7f` + `gz4` (P3)
+### 2. Exa hardening batch — `avf` + `d8w` + `j7f` + `gz4` (P3)
 
 **Why grouped:** all four touch `exa_client.py` or its immediate callers and
 share test surface. None is urgent alone; four separate PRs would be waste.
 Origin exclusion by registrable domain; non-daemon timeout thread; unguarded
 `read_text` + empty-slug glob; FP's ungated Exa reader.
 
-### 4. Writer robustness — `ne0` + `qd5` (P2)
+### 3. Writer robustness — `ne0` + `qd5` + `tj9` (P2)
 
 Malformed closing tags in `_extract_script`; FP Digest hallucinating a "thin
 news day" briefing from an empty plan. Both are "the LLM did something we didn't
 expect and we published it anyway" — same family, sensible together.
 
-### 5. Set funnel thresholds — `my-podcasts-3qs` (P3) — **calendar-gated**
+`tj9` (FP Digest has the identical theme-drop bug plus its own hand-rolled
+dry-run assembler) belongs here now: the Rundown fix in PR #11 is the template,
+and `qd5` is the FP twin of the zero-sections guard that PR added — do them in
+one pass over `fp_writer.py` rather than three.
+
+### 4. Set funnel thresholds — `my-podcasts-3qs` (P3) — **calendar-gated**
 
 Do **not** start before ~2026-08-31. Needs ~2 weeks of real `run-stats.jsonl`
 weekday history. Guessing thresholds inside a project premised on not yet having
@@ -129,10 +155,9 @@ numbers is self-refuting; `include_in_episode` measured 4-5 on ten consecutive
 runs, so any obvious rule fires on normal days. Threshold *ratios* against the
 day's stub count, never absolute counts — see the scale note below.
 
-### 6. Polish — `2sf`, `2v3`, `cqc`, `cgn` (P3/P4)
+### 5. Polish — `2v3`, `cqc`, `cgn` (P3/P4)
 
-Record *why* a directive resolved to nothing; surface open-access URLs in show
-notes; reconcile the funnel design doc with the rendered report; triage 111
+Surface open-access URLs in show notes; reconcile the funnel design doc with the rendered report; triage 111
 mypy errors and make the step blocking.
 
 ---
@@ -195,6 +220,10 @@ Kept because each cost real time and each recurred.
   change would have left the documented consumer-down procedure
   (`publish-script`) reintroducing the duplicate, because it never closed the
   job row. A fix is not done until the manual workaround around it is also safe.
+- **A check derived from the thing it checks proves nothing.** `reached_prompt`
+  as `bool(text)` sat next to `chars = len(text)` and was therefore always
+  consistent with it. Instrumentation must be derived from a different structure
+  than the one it validates.
 - **Measure the remediation, not just the fix.** "Keep the newest row" was
   inherited guidance from a prior cleanup. Re-checking all 16 keys against the
   live R2 objects confirmed it — but the prior measurement had a known 1-in-147
