@@ -311,3 +311,50 @@ def test_full_run_helpers_are_deleted():
 
     assert not hasattr(m, "_the_rundown_full_run")
     assert not hasattr(m, "_fp_digest_full_run")
+
+
+# ---------------------------------------------------------------------------
+# Task 5: --lookback outside --dry-run is an error
+# ---------------------------------------------------------------------------
+
+
+def test_lookback_without_dry_run_is_an_error(tmp_path):
+    db = tmp_path / "s.db"
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(
+            cli, ["the-rundown", "--date", "2026-08-17", "--lookback", "5"]
+        )
+    assert result.exit_code != 0
+    assert "--lookback" in result.output
+    store = StateStore(db)
+    assert store.list_daily_jobs("the-rundown", "pending") == []
+    store.close()
+
+
+def test_fp_lookback_without_dry_run_is_an_error(tmp_path):
+    db = tmp_path / "s.db"
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(
+            cli, ["fp-digest", "--date", "2026-08-17", "--lookback", "5"]
+        )
+    assert result.exit_code != 0
+    assert "--lookback" in result.output
+    store = StateStore(db)
+    assert store.list_daily_jobs("fp-digest", "pending") == []
+    store.close()
+
+
+def test_lookback_still_works_with_dry_run():
+    """--dry-run never touches the DB, so --lookback remains meaningful there."""
+    with patch("pipeline.__main__._the_rundown_dry_run") as dry:
+        CliRunner().invoke(cli, ["the-rundown", "--dry-run", "--lookback", "5"])
+    # Assert on the value, not the call shape, so a later switch to keyword
+    # arguments does not fail a test that still holds.
+    assert 5 in dry.call_args.args or 5 in dry.call_args.kwargs.values()
+
+
+def test_fp_lookback_still_works_with_dry_run():
+    """Symmetric check for fp-digest's --dry-run + --lookback."""
+    with patch("pipeline.__main__._fp_digest_dry_run") as dry:
+        CliRunner().invoke(cli, ["fp-digest", "--dry-run", "--lookback", "5"])
+    assert 5 in dry.call_args.args or 5 in dry.call_args.kwargs.values()

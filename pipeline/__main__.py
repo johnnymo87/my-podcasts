@@ -445,6 +445,12 @@ def fp_digest_command(
         _fp_digest_dry_run(date_str, lookback_days)
         return
 
+    if lookback_days is not None:
+        raise click.UsageError(
+            "--lookback only applies to --dry-run. The consumer computes the "
+            "lookback window when it executes the job."
+        )
+
     store = StateStore(_default_state_db_path())
     try:
         _enqueue_daily_job(store, "fp-digest", date_str)
@@ -558,6 +564,12 @@ def the_rundown_command(
     if dry_run:
         _the_rundown_dry_run(date_str, lookback_days)
         return
+
+    if lookback_days is not None:
+        raise click.UsageError(
+            "--lookback only applies to --dry-run. The consumer computes the "
+            "lookback window when it executes the job."
+        )
 
     store = StateStore(_default_state_db_path())
     try:
