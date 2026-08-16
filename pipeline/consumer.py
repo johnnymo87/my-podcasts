@@ -552,6 +552,15 @@ def consume_forever(
                             f"(retry budget exhausted after #{retry.failure_count}; "
                             f"marked errored)"
                         )
+                        from pipeline.alerts import send_alert
+
+                        label = "The Rundown"
+                        send_alert(
+                            f"{label} job {job['date_str']} gave up after "
+                            f"{retry.failure_count} failures.\n"
+                            f"Last error: {exc}",
+                            severity="error",
+                        )
                     else:
                         print(
                             f"Failed Rundown job {job['id']}: {exc} "
@@ -696,6 +705,15 @@ def consume_forever(
                             f"Failed FP digest job {job['id']}: {exc} "
                             f"(retry budget exhausted after #{retry.failure_count}; "
                             f"marked errored)"
+                        )
+                        from pipeline.alerts import send_alert
+
+                        label = "FP Digest"
+                        send_alert(
+                            f"{label} job {job['date_str']} gave up after "
+                            f"{retry.failure_count} failures.\n"
+                            f"Last error: {exc}",
+                            severity="error",
                         )
                     else:
                         print(

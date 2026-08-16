@@ -554,3 +554,228 @@ def test_compute_lookback_mid_range():
     store = MagicMock()
     store.days_since_last_episode.return_value = 5
     assert _compute_lookback(store, "the-rundown") == 6
+
+
+# ---------------------------------------------------------------------------
+# Task 7: alert when a daily job exhausts its retry budget
+# ---------------------------------------------------------------------------
+
+
+def test_consume_forever_alerts_when_rundown_job_exhausts_retry_budget(
+    monkeypatch, tmp_path
+) -> None:
+    from pipeline.db import MAX_RETRY_FAILURES, StateStore
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+    job_id = store.insert_pending_the_rundown("2026-03-17")
+    assert job_id is not None
+    store._conn.execute(
+        "UPDATE pending_the_rundown SET failure_count = ? WHERE id = ?",
+        (MAX_RETRY_FAILURES - 1, job_id),
+    )
+    store._conn.commit()
+
+    call_count = 0
+
+    def fake_pull(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return []
+        raise _Done("done")
+
+    mock_consumer = MagicMock()
+    mock_consumer.pull.side_effect = fake_pull
+    monkeypatch.setattr(time, "sleep", lambda n: None)
+    monkeypatch.setattr("pipeline.consumer._work_dir_base", lambda: tmp_path)
+
+    work_dir = tmp_path / f"the-rundown-{job_id}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "plan.json").write_text('{"themes": ["A"], "directives": []}')
+    (work_dir / "collection_done.json").write_text("{}")
+
+    with (
+        patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
+        patch(
+            "pipeline.rundown_writer.generate_rundown_script",
+            side_effect=RuntimeError("upstream timeout"),
+        ),
+        patch("pipeline.alerts.send_alert") as alert,
+    ):
+        try:
+            consume_forever(store, r2_client, poll_interval=5)
+        except _Done:
+            pass
+
+    row = store._conn.execute(
+        "SELECT status FROM pending_the_rundown WHERE id = ?", (job_id,)
+    ).fetchone()
+    assert row["status"] == "errored"
+    assert alert.called
+    alert_text = alert.call_args[0][0]
+    assert "The Rundown" in alert_text
+    assert "2026-03-17" in alert_text
+    store.close()
+
+
+def test_consume_forever_does_not_alert_on_an_ordinary_rundown_retry(
+    monkeypatch, tmp_path
+) -> None:
+    """An alert on every retry (not just exhaustion) would page for nothing;
+    a single ordinary failure must stay silent."""
+    from pipeline.db import StateStore
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+    job_id = store.insert_pending_the_rundown("2026-03-17")
+    assert job_id is not None
+
+    call_count = 0
+
+    def fake_pull(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return []
+        raise _Done("done")
+
+    mock_consumer = MagicMock()
+    mock_consumer.pull.side_effect = fake_pull
+    monkeypatch.setattr(time, "sleep", lambda n: None)
+    monkeypatch.setattr("pipeline.consumer._work_dir_base", lambda: tmp_path)
+
+    work_dir = tmp_path / f"the-rundown-{job_id}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "plan.json").write_text('{"themes": ["A"], "directives": []}')
+    (work_dir / "collection_done.json").write_text("{}")
+
+    with (
+        patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
+        patch(
+            "pipeline.rundown_writer.generate_rundown_script",
+            side_effect=RuntimeError("upstream timeout"),
+        ),
+        patch("pipeline.alerts.send_alert") as alert,
+    ):
+        try:
+            consume_forever(store, r2_client, poll_interval=5)
+        except _Done:
+            pass
+
+    row = store._conn.execute(
+        "SELECT status, failure_count FROM pending_the_rundown WHERE id = ?", (job_id,)
+    ).fetchone()
+    assert row["status"] == "pending"
+    assert row["failure_count"] == 1
+    assert not alert.called
+    store.close()
+
+
+def test_consume_forever_alerts_when_fp_job_exhausts_retry_budget(
+    monkeypatch, tmp_path
+) -> None:
+    from pipeline.db import MAX_RETRY_FAILURES, StateStore
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+    job_id = store.insert_pending_fp_digest("2026-03-17")
+    assert job_id is not None
+    store._conn.execute(
+        "UPDATE pending_fp_digest SET failure_count = ? WHERE id = ?",
+        (MAX_RETRY_FAILURES - 1, job_id),
+    )
+    store._conn.commit()
+
+    call_count = 0
+
+    def fake_pull(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return []
+        raise _Done("done")
+
+    mock_consumer = MagicMock()
+    mock_consumer.pull.side_effect = fake_pull
+    monkeypatch.setattr(time, "sleep", lambda n: None)
+    monkeypatch.setattr("pipeline.consumer._work_dir_base", lambda: tmp_path)
+
+    work_dir = tmp_path / f"fp-digest-{job_id}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "plan.json").write_text('{"themes": ["A"], "directives": []}')
+    (work_dir / "collection_done.json").write_text("{}")
+
+    with (
+        patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
+        patch(
+            "pipeline.consumer.generate_fp_script",
+            side_effect=RuntimeError("FP writer returned empty script"),
+        ),
+        patch("pipeline.alerts.send_alert") as alert,
+    ):
+        try:
+            consume_forever(store, r2_client, poll_interval=5)
+        except _Done:
+            pass
+
+    row = store._conn.execute(
+        "SELECT status FROM pending_fp_digest WHERE id = ?", (job_id,)
+    ).fetchone()
+    assert row["status"] == "errored"
+    assert alert.called
+    alert_text = alert.call_args[0][0]
+    assert "FP Digest" in alert_text
+    assert "2026-03-17" in alert_text
+    store.close()
+
+
+def test_consume_forever_does_not_alert_on_an_ordinary_fp_retry(
+    monkeypatch, tmp_path
+) -> None:
+    from pipeline.db import StateStore
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+    job_id = store.insert_pending_fp_digest("2026-03-17")
+    assert job_id is not None
+
+    call_count = 0
+
+    def fake_pull(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return []
+        raise _Done("done")
+
+    mock_consumer = MagicMock()
+    mock_consumer.pull.side_effect = fake_pull
+    monkeypatch.setattr(time, "sleep", lambda n: None)
+    monkeypatch.setattr("pipeline.consumer._work_dir_base", lambda: tmp_path)
+
+    work_dir = tmp_path / f"fp-digest-{job_id}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "plan.json").write_text('{"themes": ["A"], "directives": []}')
+    (work_dir / "collection_done.json").write_text("{}")
+
+    with (
+        patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
+        patch(
+            "pipeline.consumer.generate_fp_script",
+            side_effect=RuntimeError("FP writer returned empty script"),
+        ),
+        patch("pipeline.alerts.send_alert") as alert,
+    ):
+        try:
+            consume_forever(store, r2_client, poll_interval=5)
+        except _Done:
+            pass
+
+    row = store._conn.execute(
+        "SELECT status, failure_count FROM pending_fp_digest WHERE id = ?", (job_id,)
+    ).fetchone()
+    assert row["status"] == "pending"
+    assert row["failure_count"] == 1
+    assert not alert.called
+    store.close()
