@@ -187,7 +187,19 @@ def _enqueue_daily_job(store: StateStore, feed_slug: str, date_str: str) -> str 
     # Reject a malformed date here rather than letting the consumer retry a
     # garbage row for ~12h. The old inline CLI failed loudly in the operator's
     # terminal; enqueue-only would otherwise make the same typo silent.
-    datetime.strptime(date_str, "%Y-%m-%d")
+    #
+    # The round-trip comparison is the load-bearing half, not decoration:
+    # strptime alone accepts non-zero-padded dates, so '2026-8-5' parses and is
+    # stored as a string DISTINCT from '2026-08-05'. UNIQUE(date_str) would not
+    # collide them, the consumer would execute both, and the feed would carry
+    # two episodes for one day with different r2_keys - a fresh instance of the
+    # very bug this module was rewritten to remove. It also enforces the
+    # invariant _stale_daily_jobs relies on for its lexical date comparison.
+    if datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m-%d") != date_str:
+        raise ValueError(
+            f"date must be zero-padded YYYY-MM-DD, got {date_str!r} "
+            f"(did you mean {datetime.strptime(date_str, '%Y-%m-%d'):%Y-%m-%d}?)"
+        )
 
     if feed_slug == "the-rundown":
         job_id = store.insert_pending_the_rundown(date_str)
@@ -359,6 +371,16 @@ def jobs_complete_command(
     if date_str is None and job_id is None:
         raise click.UsageError("Provide --date or --job-id.")
 
+    # Validate the slug before touching the store. list_daily_jobs raises
+    # ValueError for an unknown feed, and on the --date path that call sits
+    # outside the handler below, so an operator typo would surface as a raw
+    # traceback rather than a clean message.
+    if feed_slug not in _DAILY_FEED_LABELS:
+        raise click.UsageError(
+            f"Unknown feed {feed_slug!r}. Expected one of: "
+            f"{', '.join(sorted(_DAILY_FEED_LABELS))}."
+        )
+
     store = StateStore(_default_state_db_path())
     try:
         # Resolve job_id from date_str if needed
@@ -370,6 +392,21 @@ def jobs_complete_command(
                 if row["date_str"] == date_str
             ]
             if not matching:
+                # Distinguish "already done" from "you typo'd the date" - only
+                # pending/errored rows are searched above, so a completed row
+                # would otherwise report as missing and send the operator
+                # hunting for a mistake they did not make.
+                already = [
+                    row
+                    for row in store.list_daily_jobs(feed_slug, "completed")
+                    if row["date_str"] == date_str
+                ]
+                if already:
+                    click.echo(
+                        f"{feed_slug} job for {date_str} is already completed; "
+                        f"nothing to do."
+                    )
+                    return
                 click.echo(
                     f"No job found for feed={feed_slug!r} date={date_str!r}.", err=True
                 )

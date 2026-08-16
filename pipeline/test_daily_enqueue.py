@@ -395,3 +395,24 @@ def test_audit_never_raises(tmp_path):
     with patch("pipeline.__main__._stale_daily_jobs", side_effect=RuntimeError("x")):
         _audit_previous_daily_run(store, "the-rundown", "2026-08-17")  # must not raise
     store.close()
+
+
+def test_enqueue_rejects_a_non_zero_padded_date(tmp_path):
+    """'2026-8-5' parses under strptime but is a DIFFERENT string from
+    '2026-08-05', so UNIQUE(date_str) would not collide them and the consumer
+    would publish a second episode for the same day under a different r2_key -
+    a fresh instance of the double-publish bug this branch removes.
+    """
+    store = StateStore(tmp_path / "s.db")
+    store.insert_pending_the_rundown("2026-08-05")
+    with pytest.raises(ValueError, match="zero-padded"):
+        _enqueue_daily_job(store, "the-rundown", "2026-8-5")
+    # and nothing was inserted alongside the correctly-formed row
+    assert len(store.list_daily_jobs("the-rundown", "pending")) == 1
+    store.close()
+
+
+def test_enqueue_still_accepts_a_correctly_padded_date(tmp_path):
+    store = StateStore(tmp_path / "s.db")
+    assert _enqueue_daily_job(store, "the-rundown", "2026-08-05") is not None
+    store.close()

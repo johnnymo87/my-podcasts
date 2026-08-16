@@ -327,3 +327,32 @@ def test_jobs_reset_nonexistent_job_id_emits_clean_error(tmp_path: Path) -> None
     # Must NOT be an unhandled exception (no traceback)
     assert "Traceback" not in result.output
     assert "ValueError" not in result.output
+
+
+def test_jobs_complete_rejects_an_unknown_feed_cleanly(tmp_path):
+    """The --date path calls list_daily_jobs outside the ValueError handler, so
+    without an up-front guard an operator typo surfaces as a raw traceback."""
+    db = tmp_path / "s.db"
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(
+            cli, ["jobs", "complete", "--feed", "nonsense", "--date", "2026-08-17"]
+        )
+    assert result.exit_code != 0
+    assert "Unknown feed" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_jobs_complete_says_already_completed_rather_than_not_found(tmp_path):
+    db = tmp_path / "s.db"
+    store = StateStore(db)
+    store.insert_pending_the_rundown("2026-08-17")
+    store.mark_the_rundown_completed(
+        store.list_daily_jobs("the-rundown", "pending")[0]["id"]
+    )
+    store.close()
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(
+            cli, ["jobs", "complete", "--feed", "the-rundown", "--date", "2026-08-17"]
+        )
+    assert result.exit_code == 0, result.output
+    assert "already completed" in result.output
