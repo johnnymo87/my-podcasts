@@ -36,7 +36,7 @@ def _find_article_file(headline: str, source: str, work_dir: Path) -> Path | Non
     """Find the article file matching a directive headline.
 
     Uses the same search logic as the consumer's _find_article_text and
-    __main__._find_rundown_article_text functions.
+    __main__.find_rundown_article_source functions.
     """
     slug = _slugify(headline)
     if not slug:

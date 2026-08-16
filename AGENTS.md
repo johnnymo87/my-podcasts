@@ -100,14 +100,38 @@ Daily current-affairs digest covering business, technology, AI, law, media, scie
 6. `rundown_writer.py` generates script via opencode-serve (synchronous, no agent session); the writer prompt is told to name the outlet when it draws facts from that appended coverage
 7. `things_happen_processor.py` runs TTS (`ttsjoin`) + publishes to R2 + updates feed
 
+**Writer prompt assembly (structural, not just descriptive):** `_assemble_writer_inputs`
+builds one ordered `list[tuple[theme, article_texts]]` — "sections" — and
+`build_rundown_prompt` renders that list verbatim. Nothing downstream re-derives or
+filters the theme set. Ordering: plan themes keep `plan.themes` order; a theme with zero
+resolved articles is omitted entirely (no bare `## Theme` header can reach the model); a
+directive whose `theme` is absent from `plan.themes` (an "orphan" — the editor invented a
+near-miss name instead of using a listed one) is appended as its own trailing section,
+under its own name, in first-seen order — **never** fuzzy-matched onto a similar plan
+theme, because that would trade a visible drop for an invisible miscategorization.
+`build_rundown_prompt` derives `TODAY'S THEMES` from the section names it is given, so the
+announced theme list and the rendered `STORIES BY THEME` block are the same set by
+construction; it also independently skips any section with no articles as a second guard.
+Both `--dry-run` and the consumer call the same `_assemble_writer_inputs`, so a
+`--dry-run` + `publish-script` episode matches what the consumer would have produced (this
+was not always true — the dry-run path used to hand-roll its own assembly loop with no Exa
+append, the same "second drifted implementation" shape as `my-podcasts-78b`).
+
+This mattered in practice, not just in theory: replaying 8 historical work dirs through
+the new assembler (pre/post diff) recovered a genuine Semafor story — "White House's AI
+framework close-hold fuels industry concerns," and a sibling piece the next day — that had
+been silently dropped under the invented theme `'AI Safety & Regulation'` in two separate
+episodes. 3 of the 8 plans rendered byte-identical; the other 5 differed only by a removed
+empty header and, in two of them, that recovered story.
+
 **Key modules:**
 - `pipeline/opencode_client.py` — shared HTTP client for the opencode-serve API
-- `pipeline/rundown_writer.py` — synchronous script generator via opencode-serve
+- `pipeline/rundown_writer.py` — synchronous script generator via opencode-serve; `build_rundown_prompt(sections, date_str, context_scripts)` renders the ordered sections built by `_assemble_writer_inputs`
 - `pipeline/things_happen_collector.py` — article collection, Semafor integration, Zvi integration, FP routing
 - `pipeline/things_happen_editor.py` — Gemini AI for themed research plan (story selection, priority, FP flagging)
 - `pipeline/zvi_cache.py` — Zvi RSS fetch, roundup splitting, persistent cache
 - `pipeline/exa_client.py` — Exa search API wrapper (bounded with a 30s timeout, `exclude_domains` support), plus `exa_file_path`/`exa_text_if_hit` (the `Result: hit` gate) and `exa_result_sections` (header-stripped view fed to the writer)
-- `pipeline/consumer.py` — `_assemble_writer_inputs` resolves each selected directive to article text and appends open-access coverage to stubs
+- `pipeline/consumer.py` — `_assemble_writer_inputs` resolves each selected directive to article text via `__main__.find_rundown_article_source`, appends open-access coverage to stubs, and builds the ordered `sections` list described above; also used by the `--dry-run` path
 - `pipeline/rss_sources.py` — RSS source definitions, `SEMAFOR`, `categorize_semafor_article()` (legacy fallback)
 - `pipeline/source_cache.py` — Persistent cache sync for Semafor (with LLM routing), Antiwar RSS, and Antiwar homepage
 - `pipeline/run_stats.py` — content-acquisition funnel: `collect_run_stats`, `render_report`, `append_jsonl`
@@ -143,6 +167,22 @@ are Levine stubs (`[0, 1, 0, 3, 1, 2, 1, 2]` stubs/run) — `EXA 2 flagged` is a
 healthy day, and `EXA 0 flagged` is legitimate on a light one. A single run's
 report cannot confirm or refute whether this feature is working; only a
 week of `run-stats.jsonl` history can.
+
+Each `writer_inputs.json` entry also carries `reached_prompt` (bool) and
+`miss_reason` (`no_index` / `index_unreadable` / `index_no_overlap`, or `None` on a
+hit — see `find_rundown_article_source`'s docstring for why a miss has exactly one
+reason, not one per lookup stage it cascades through). `reached_prompt` is derived
+from whether the directive's theme survived into a section `build_rundown_prompt`
+actually rendered — deliberately not from `bool(text)`, which would be tautological
+against `chars` and could never catch section assembly dropping a story. If `WRITE`
+shows a trailing `, N DROPPED-AFTER-RESOLVE(!)`, that is `dropped_before_prompt`:
+entries with real resolved text (`chars > 0`) whose theme did not make it into any
+rendered section. **This should always be 0.** Non-zero means section assembly lost
+a story that had text — a bug to investigate, not a statistic to shrug at. A
+bracketed `[misses: reason N, ...]` on the same line is the `miss_reason` histogram,
+shown only when non-empty. Both fields are backward-compatible: historical
+`writer_inputs.json` files predate them, and a missing key is treated as "unknown,"
+never as `False` — so old work dirs never false-alarm on the new canary.
 
 Two cautions. It is labeled **script stage** because TTS and publish happen on a
 later consumer loop iteration — the report says nothing about whether an episode
