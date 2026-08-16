@@ -1748,3 +1748,25 @@ def test_host_banned_legitimate_host_passes():
     from pipeline.things_happen_collector import _host_banned
 
     assert _host_banned("https://reuters.com/story", "bloomberg.com") is False
+
+
+def test_index_valid_json_but_wrong_shape_does_not_crash(tmp_path):
+    """A headline_index.json containing valid JSON of the wrong shape.
+
+    A bare list parses fine, so the old code fell through to index.items()
+    and raised AttributeError mid-job -- wedging the job into retry backoff
+    instead of degrading to the slug/Exa fallbacks. It must be treated as
+    unreadable, exactly like a parse failure.
+    """
+    from pipeline.__main__ import find_rundown_article_source
+
+    (tmp_path / "headline_index.json").write_text("[1, 2, 3]", encoding="utf-8")
+
+    class FakeDirective:
+        headline = "Nothing Matches This Headline At All"
+        source = ""
+
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert text == ""
+    assert path is None
+    assert reason == "index_unreadable"

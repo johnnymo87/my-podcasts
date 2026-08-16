@@ -388,8 +388,14 @@ def _assemble_writer_inputs(
                 orphan_order.append(directive.theme)
             by_theme.setdefault(directive.theme, []).append(text)
 
+    # `plan.themes` comes from an LLM and carries no uniqueness constraint, so
+    # a repeated theme name would otherwise render its articles twice in the
+    # prompt. Deduplicate on first occurrence, preserving plan order.
+    _seen: set[str] = set()
     sections: list[tuple[str, list[str]]] = [
-        (theme, by_theme[theme]) for theme in plan.themes if by_theme.get(theme)
+        (theme, by_theme[theme])
+        for theme in plan.themes
+        if by_theme.get(theme) and not (theme in _seen or _seen.add(theme))
     ]
     sections += [(theme, by_theme[theme]) for theme in orphan_order]
 

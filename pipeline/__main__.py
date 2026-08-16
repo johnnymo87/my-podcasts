@@ -66,7 +66,12 @@ def find_rundown_article_source(
     index_path = work_dir / "headline_index.json"
     if index_path.exists():
         try:
-            index: dict[str, str] = _json.loads(index_path.read_text(encoding="utf-8"))
+            index = _json.loads(index_path.read_text(encoding="utf-8"))
+            # Valid JSON of the wrong shape (e.g. a list) would otherwise reach
+            # index.items() below and raise AttributeError mid-job, wedging the
+            # job into retry backoff rather than degrading to the fallbacks.
+            if not isinstance(index, dict):
+                raise ValueError("headline_index.json is not an object")
             miss_reason = "index_no_overlap"
         except Exception:
             index = {}

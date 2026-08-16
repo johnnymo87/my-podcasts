@@ -298,3 +298,23 @@ def test_assembly_does_not_reassign_orphan_to_a_similar_plan_theme(tmp_path):
         "AI safety article text"
         in _section_texts(sections, "AI Safety & Regulation")[0]
     )
+
+
+def test_assembly_deduplicates_a_repeated_plan_theme(tmp_path):
+    """plan.themes comes from an LLM and has no uniqueness constraint.
+
+    A repeated theme name would otherwise emit the section -- and every
+    article in it -- twice in the writer prompt.
+    """
+    work_dir = tmp_path / "work"
+    headline = "Alpha Story About Widgets"
+    _write_stub(work_dir, headline, "Alpha article text")
+    plan = _plan_multi(
+        themes=["Alpha", "Alpha"],
+        directives=[(headline, "Alpha")],
+    )
+
+    sections, _writer_inputs = _assemble_writer_inputs(plan, work_dir)
+
+    assert [theme for theme, _texts in sections] == ["Alpha"]
+    assert sum(len(texts) for _theme, texts in sections) == 1

@@ -109,10 +109,12 @@ class RunStats(BaseModel):
 
     # Entries where `reached_prompt is False` but `chars > 0` -- text was
     # resolved (has length) yet never landed in a rendered section. Per
-    # consumer.py's `_assemble_writer_inputs`, `chars = len(text)` and
-    # `reached_prompt = bool(text)` are set from the same `text` value in
-    # the same commit, so this is zero by construction on every run written
-    # by current code -- a regression canary, not a routine statistic. Uses
+    # consumer.py's `_assemble_writer_inputs`, `reached_prompt` is derived
+    # from membership in the sections actually built, NOT from `bool(text)`
+    # (that earlier form was tautological against `chars` and could never
+    # fire). So this is a genuine cross-check: it goes non-zero if section
+    # assembly ever loses a story that had text. Expect 0 on every healthy
+    # run -- a regression canary, not a routine statistic. Uses
     # `is False`, never truthiness, so a missing key (historical
     # writer_inputs.json predating this field) reads as "unknown", not
     # "dropped" -- see the `exa_appended is True` precedent above.

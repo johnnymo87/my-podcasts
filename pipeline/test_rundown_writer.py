@@ -623,3 +623,31 @@ def test_rundown_editor_falls_back_to_scripts(monkeypatch):
         prompt_used = mock_client.models.generate_content.call_args[1]["contents"]
         assert "Script from yesterday" in prompt_used
         assert "Previous episodes" in prompt_used
+
+
+def test_generate_refuses_to_write_from_zero_sections():
+    """A total resolution failure must not yield a fabricated episode.
+
+    If every directive fails to resolve, the prompt would carry an empty
+    STORIES BY THEME block while still instructing the model to produce a
+    briefing -- and it would, entirely from parametric memory, published
+    unread. The writer must refuse so the consumer backs off and retries.
+    """
+    import pytest
+
+    with pytest.raises(RuntimeError, match="no section has any article text"):
+        generate_rundown_script(
+            sections=[],
+            date_str="2026-03-10",
+        )
+
+
+def test_generate_refuses_when_sections_exist_but_all_are_empty():
+    """Same guard, but for sections present with no article text in them."""
+    import pytest
+
+    with pytest.raises(RuntimeError, match="no section has any article text"):
+        generate_rundown_script(
+            sections=[("Alpha", []), ("Beta", [])],
+            date_str="2026-03-10",
+        )

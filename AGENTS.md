@@ -172,12 +172,15 @@ Each `writer_inputs.json` entry also carries `reached_prompt` (bool) and
 `miss_reason` (`no_index` / `index_unreadable` / `index_no_overlap`, or `None` on a
 hit — see `find_rundown_article_source`'s docstring for why a miss has exactly one
 reason, not one per lookup stage it cascades through). `reached_prompt` is derived
-from whether the directive's theme survived into a section `build_rundown_prompt`
-actually rendered — deliberately not from `bool(text)`, which would be tautological
-against `chars` and could never catch section assembly dropping a story. If `WRITE`
+from whether the directive's theme survived into the section list that
+`_assemble_writer_inputs` built — deliberately not from `bool(text)`, which would be
+tautological against `chars` and could never catch section assembly dropping a story.
+Note the one hop it does *not* cover: it trusts that `build_rundown_prompt` renders
+every non-empty section verbatim (true today, and pinned by the legacy-equivalence
+test), so a future filter added inside the renderer would not show up here. If `WRITE`
 shows a trailing `, N DROPPED-AFTER-RESOLVE(!)`, that is `dropped_before_prompt`:
 entries with real resolved text (`chars > 0`) whose theme did not make it into any
-rendered section. **This should always be 0.** Non-zero means section assembly lost
+assembled section. **This should always be 0.** Non-zero means section assembly lost
 a story that had text — a bug to investigate, not a statistic to shrug at. A
 bracketed `[misses: reason N, ...]` on the same line is the `miss_reason` histogram,
 shown only when non-empty. Both fields are backward-compatible: historical

@@ -196,6 +196,17 @@ def generate_rundown_script(
     deleted so the next retry regenerates instead of looping on the same
     broken content.
     """
+    # Refuse to generate from nothing. If every directive failed to resolve
+    # (a corrupt headline_index.json, a collection that wrote no files), the
+    # prompt would carry an empty STORIES BY THEME block while still telling
+    # the model to "produce a spoken briefing" -- and it would, entirely from
+    # parametric memory, published unread. Raising instead lets the consumer
+    # back off and retry, and the retry-exhaustion alert fires if it never
+    # recovers. Checked before the raw_writer_output.txt reuse path so a
+    # retry cannot launder a fabricated script from an earlier empty run.
+    if not any(articles for _, articles in sections):
+        raise RuntimeError("Rundown writer refused: no section has any article text")
+
     raw_path = work_dir / "raw_writer_output.txt" if work_dir else None
 
     if raw_path is not None and raw_path.exists():
