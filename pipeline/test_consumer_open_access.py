@@ -205,6 +205,27 @@ def test_orphan_directive_is_reached_prompt(tmp_path):
     assert writer_inputs[0]["reached_prompt"] is True
 
 
+def test_writer_inputs_records_miss_reason_for_unresolved_directive(tmp_path):
+    headline = "Nothing Resolves For This Headline"
+    work_dir = tmp_path / "work"
+
+    _sections, writer_inputs = _assemble_writer_inputs(_plan(headline), work_dir)
+
+    entry = writer_inputs[0]
+    assert entry["source_path"] is None
+    assert entry["miss_reason"] == "no_index"
+
+
+def test_writer_inputs_records_no_miss_reason_on_hit(tmp_path):
+    headline = "Widget Maker Announces New Product"
+    work_dir = tmp_path / "work"
+    _write_stub(work_dir, headline, "Widget Maker Announces New Product")
+
+    _sections, writer_inputs = _assemble_writer_inputs(_plan(headline), work_dir)
+
+    assert writer_inputs[0]["miss_reason"] is None
+
+
 def test_assembly_keeps_plan_theme_order(tmp_path):
     """Sections follow plan.themes order, not directive arrival order."""
     work_dir = tmp_path / "work"

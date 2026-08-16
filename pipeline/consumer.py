@@ -341,7 +341,7 @@ def _assemble_writer_inputs(
     for directive in plan.directives:
         if not directive.include_in_episode:
             continue
-        text, src = find_rundown_article_source(directive, work_dir)
+        text, src, miss_reason = find_rundown_article_source(directive, work_dir)
 
         # A stub always wins the word-overlap match ahead of Exa (it IS the
         # headline text, so it shares words with the directive by
@@ -365,6 +365,10 @@ def _assemble_writer_inputs(
         # `by_theme` becomes a rendered section. So "text is non-empty" and
         # "text is in a section that reaches the prompt" are the same
         # predicate by construction: bool(text) is exactly reached_prompt.
+        # miss_reason is None on a hit; see find_rundown_article_source's
+        # docstring for the taxonomy (no_index / index_unreadable /
+        # index_no_overlap) and why the cascade only supports one reason
+        # per miss, not a reason per lookup stage.
         writer_inputs.append(
             {
                 "headline": directive.headline,
@@ -374,6 +378,7 @@ def _assemble_writer_inputs(
                 "exa_appended": bool(exa_extra),
                 "exa_chars": len(exa_extra),
                 "reached_prompt": bool(text),
+                "miss_reason": miss_reason,
             }
         )
         if text:

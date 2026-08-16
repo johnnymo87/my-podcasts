@@ -604,9 +604,10 @@ def test_find_rundown_article_source_no_false_match(tmp_path):
         headline = "Federal Reserve raises interest rates to combat inflation"
         source = "zvi"
 
-    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
     assert text == ""
     assert path is None
+    assert reason == "index_no_overlap"
 
 
 def test_find_rundown_article_source_exa_headerless_file_no_longer_surfaced(tmp_path):
@@ -644,9 +645,10 @@ def test_find_rundown_article_source_exa_headerless_file_no_longer_surfaced(tmp_
         headline = "Legacy Format Story"
         source = "levine"
 
-    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
     assert text == ""
     assert path is None
+    assert reason == "no_index"
 
 
 def test_find_rundown_article_source_reports_path_on_exact_match(tmp_path):
@@ -664,9 +666,10 @@ def test_find_rundown_article_source_reports_path_on_exact_match(tmp_path):
         headline = "Some Headline"
         source = ""
 
-    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
     assert "body text here" in text
     assert path == "articles/00-some-headline.md"
+    assert reason is None
 
 
 def test_find_rundown_article_source_reports_path_on_word_overlap_match(tmp_path):
@@ -690,9 +693,10 @@ def test_find_rundown_article_source_reports_path_on_word_overlap_match(tmp_path
         headline = "Nvidia to spend $26 billion to build open weight AI models"
         source = "zvi"
 
-    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
     assert "Nvidia" in text
     assert path == "articles/zvi/2026-03-19-chip-city.md"
+    assert reason is None
 
 
 def test_find_rundown_article_source_reports_path_on_legacy_flat_match(tmp_path):
@@ -709,9 +713,10 @@ def test_find_rundown_article_source_reports_path_on_legacy_flat_match(tmp_path)
         headline = "Flat Levine Story"
         source = "levine"
 
-    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
     assert "Flat body text." in text
     assert path == f"articles/00-{slug}.md"
+    assert reason is None
 
 
 def test_find_rundown_article_source_reports_path_on_legacy_semafor_match(tmp_path):
@@ -728,9 +733,10 @@ def test_find_rundown_article_source_reports_path_on_legacy_semafor_match(tmp_pa
         headline = "Semafor Story"
         source = "semafor"
 
-    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
     assert "Semafor body text." in text
     assert path == f"articles/semafor/{slug}.md"
+    assert reason is None
 
 
 def test_find_rundown_article_source_reports_path_on_legacy_zvi_glob_match(tmp_path):
@@ -747,9 +753,10 @@ def test_find_rundown_article_source_reports_path_on_legacy_zvi_glob_match(tmp_p
         headline = "Zvi Glob Story"
         source = "zvi"
 
-    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
     assert "Zvi body text." in text
     assert path == f"articles/zvi/2026-03-19-{slug}.md"
+    assert reason is None
 
 
 def test_find_rundown_article_source_reports_path_on_exa_hit(tmp_path):
@@ -772,9 +779,10 @@ def test_find_rundown_article_source_reports_path_on_exa_hit(tmp_path):
         headline = "Paywalled Story"
         source = "levine"
 
-    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
     assert "Full article text recovered via Exa search." in text
     assert path == f"enrichment/exa/{slug}.md"
+    assert reason is None
 
 
 def test_find_rundown_article_source_exa_gated_miss_returns_none(tmp_path):
@@ -792,9 +800,10 @@ def test_find_rundown_article_source_exa_gated_miss_returns_none(tmp_path):
         headline = "No Results Story"
         source = "levine"
 
-    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
     assert text == ""
     assert path is None
+    assert reason == "no_index"
 
 
 def test_find_rundown_article_source_reports_miss(tmp_path):
@@ -805,9 +814,96 @@ def test_find_rundown_article_source_reports_miss(tmp_path):
         headline = "Nothing Matches This"
         source = ""
 
-    text, path = find_rundown_article_source(FakeDirective(), tmp_path)
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
     assert text == ""
     assert path is None
+    assert reason == "no_index"
+
+
+def test_miss_reason_no_index(tmp_path):
+    """headline_index.json does not exist at all -> reason is 'no_index'."""
+    from pipeline.__main__ import find_rundown_article_source
+
+    class FakeDirective:
+        headline = "Nothing Matches This Headline At All"
+        source = ""
+
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert text == ""
+    assert path is None
+    assert reason == "no_index"
+
+
+def test_miss_reason_index_unreadable(tmp_path):
+    """A corrupt headline_index.json (parse failure) -> 'index_unreadable'.
+
+    An operational problem worth distinguishing from a normal miss: this
+    means the index sync step itself is broken, not that today's stories
+    are simply unusual.
+    """
+    from pipeline.__main__ import find_rundown_article_source
+
+    (tmp_path / "headline_index.json").write_text(
+        "{not valid json at all", encoding="utf-8"
+    )
+
+    class FakeDirective:
+        headline = "Nothing Matches This Headline At All"
+        source = ""
+
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert text == ""
+    assert path is None
+    assert reason == "index_unreadable"
+
+
+def test_miss_reason_index_no_overlap(tmp_path):
+    """Index parses fine but no exact/word-overlap hit -> 'index_no_overlap'.
+
+    All the legacy slug and Exa fallbacks below the index lookup also miss
+    here (no article files, no Exa file exist), because the lookups
+    cascade: a miss at the single final return point means every earlier
+    lookup missed too.
+    """
+    from pipeline.__main__ import find_rundown_article_source
+
+    articles_dir = tmp_path / "articles"
+    articles_dir.mkdir()
+    (articles_dir / "00-unrelated.md").write_text(
+        "# Unrelated Headline\n\nURL: u\n\nCompletely unrelated body content.",
+        encoding="utf-8",
+    )
+    index = {"Unrelated Headline": "articles/00-unrelated.md"}
+    (tmp_path / "headline_index.json").write_text(json.dumps(index))
+
+    class FakeDirective:
+        headline = "Federal Reserve raises interest rates today"
+        source = ""
+
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert text == ""
+    assert path is None
+    assert reason == "index_no_overlap"
+
+
+def test_hit_records_no_miss_reason(tmp_path):
+    """Any hit -- exact, overlap, legacy, or Exa -- records reason None."""
+    from pipeline.__main__ import find_rundown_article_source
+
+    (tmp_path / "articles").mkdir()
+    (tmp_path / "articles" / "00-some-headline.md").write_text(
+        "# Some Headline\n\nURL: u\n\nbody text here", encoding="utf-8"
+    )
+    index = {"Some Headline": "articles/00-some-headline.md"}
+    (tmp_path / "headline_index.json").write_text(json.dumps(index))
+
+    class FakeDirective:
+        headline = "Some Headline"
+        source = ""
+
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert text
+    assert reason is None
 
 
 def test_exa_fallback_has_no_bookkeeping_headers(tmp_path):
@@ -830,11 +926,12 @@ def test_exa_fallback_has_no_bookkeeping_headers(tmp_path):
         "## [Widget News](https://w.example)\nReal body text.\n\n",
         encoding="utf-8",
     )
-    text, src = find_rundown_article_source(FakeDirective(), tmp_path)
+    text, src, reason = find_rundown_article_source(FakeDirective(), tmp_path)
     assert "Real body text." in text
     assert "Result:" not in text
     assert "Query:" not in text
     assert src == f"enrichment/exa/{slug}.md"
+    assert reason is None
 
 
 def test_semafor_routing_header_preferred_over_category(tmp_path, monkeypatch):
@@ -1108,7 +1205,7 @@ def test_exa_reader_e2e_fallback_matches_writer(tmp_path, monkeypatch):
         headline = exa_headline
         source = "levine"
 
-    text, _path = find_rundown_article_source(FakeDirective(), work_dir)
+    text, _path, _reason = find_rundown_article_source(FakeDirective(), work_dir)
     assert "Exa recovered body text." in text
 
     # Prove this isn't a tautology: remove the Exa file the collector wrote
@@ -1117,10 +1214,14 @@ def test_exa_reader_e2e_fallback_matches_writer(tmp_path, monkeypatch):
     exa_file = work_dir / "enrichment" / "exa" / f"{_slugify(exa_headline)}.md"
     assert exa_file.exists()
     exa_file.unlink()
-    text_after_removal, _path_after_removal = find_rundown_article_source(
-        FakeDirective(), work_dir
+    text_after_removal, _path_after_removal, reason_after_removal = (
+        find_rundown_article_source(FakeDirective(), work_dir)
     )
     assert text_after_removal == ""
+    # The collector wrote a real headline_index.json above (populated by the
+    # bakery article), so once the Exa file is gone this directive misses
+    # with the index present but no overlap -- not "no_index".
+    assert reason_after_removal == "index_no_overlap"
 
 
 def test_collector_works_without_levine_links(tmp_path, monkeypatch):

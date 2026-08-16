@@ -26,7 +26,7 @@ from pipeline.zvi_cache import sync_zvi_cache
 
 def find_rundown_article_source(
     directive: Any, work_dir: Path
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, str | None]:
     """Find article text and its work-dir-relative source path for a directive.
 
     Searches (in order):
@@ -35,10 +35,22 @@ def find_rundown_article_source(
     3. Slug-based file matching (legacy fallback)
     4. Exa enrichment by slug
 
-    Returns (text, source_path). source_path is None on a miss, and is
-    always relative to work_dir (matching the keys used in tiers.json and
-    headline_index.json) so callers can join resolution results against
-    those files.
+    Returns (text, source_path, miss_reason). source_path is None on a
+    miss, and is always relative to work_dir (matching the keys used in
+    tiers.json and headline_index.json) so callers can join resolution
+    results against those files.
+
+    miss_reason is None on any hit. There is exactly one miss return (the
+    final one, below) because every lookup above cascades into the next --
+    so a miss there means the index lookup AND the legacy slug fallback AND
+    the Exa fallback all missed. There is no separate "slug missed" or "exa
+    missed" reason; the only thing that varies across a miss is the state
+    of headline_index.json at the point the cascade started, so that is
+    what miss_reason describes:
+    - "no_index": headline_index.json did not exist.
+    - "index_unreadable": it existed but failed to parse.
+    - "index_no_overlap": it parsed, but neither the exact-match nor the
+      word-overlap lookup found a hit.
     """
     import json as _json
 
@@ -48,20 +60,24 @@ def find_rundown_article_source(
     headline = directive.headline
     slug = _slugify(headline)
 
+    miss_reason = "no_index"
+
     # --- Index-based lookup (handles editor headline reformulation) ---
     index_path = work_dir / "headline_index.json"
     if index_path.exists():
         try:
             index: dict[str, str] = _json.loads(index_path.read_text(encoding="utf-8"))
+            miss_reason = "index_no_overlap"
         except Exception:
             index = {}
+            miss_reason = "index_unreadable"
 
         # Exact match
         if headline in index:
             rel_path = index[headline]
             fpath = work_dir / rel_path
             if fpath.exists():
-                return fpath.read_text(encoding="utf-8"), rel_path
+                return fpath.read_text(encoding="utf-8"), rel_path, None
 
         # Word-overlap match: pick the file whose content best matches
         # the directive headline. The editor reformulates headlines, but
@@ -87,7 +103,7 @@ def find_rundown_article_source(
                         best_path = rel_path
                 if best_path and best_score > 0:
                     fpath = work_dir / best_path
-                    return fpath.read_text(encoding="utf-8"), best_path
+                    return fpath.read_text(encoding="utf-8"), best_path, None
 
     # --- Legacy slug-based fallback ---
     # Flat Levine articles (e.g. "00-headline.md")
@@ -98,6 +114,7 @@ def find_rundown_article_source(
                 return (
                     match.read_text(encoding="utf-8"),
                     str(match.relative_to(work_dir)),
+                    None,
                 )
 
     # Semafor articles
@@ -106,6 +123,7 @@ def find_rundown_article_source(
         return (
             semafor_file.read_text(encoding="utf-8"),
             str(semafor_file.relative_to(work_dir)),
+            None,
         )
 
     # Zvi articles
@@ -115,15 +133,16 @@ def find_rundown_article_source(
             return (
                 match.read_text(encoding="utf-8"),
                 str(match.relative_to(work_dir)),
+                None,
             )
 
     # Exa enrichment
     exa_text = exa_result_sections(work_dir, slug)
     if exa_text:
         exa_path = exa_file_path(work_dir, slug)
-        return exa_text, str(exa_path.relative_to(work_dir))
+        return exa_text, str(exa_path.relative_to(work_dir)), None
 
-    return "", None
+    return "", None, miss_reason
 
 
 def _default_state_db_path() -> Path:
