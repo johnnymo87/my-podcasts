@@ -660,8 +660,14 @@ def the_rundown_command(
 
     if dry_run:
         _the_rundown_dry_run(date_str, lookback_days)
-    else:
-        _the_rundown_full_run(date_str, lookback_days)
+        return
+
+    store = StateStore(_default_state_db_path())
+    try:
+        _enqueue_daily_job(store, "the-rundown", date_str)
+        _audit_previous_daily_run(store, "the-rundown", date_str)
+    finally:
+        store.close()
 
 
 def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) -> None:
@@ -734,114 +740,14 @@ def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) ->
     click.echo(f"Work directory: {work_dir}")
 
 
-def _the_rundown_full_run(date_str: str, lookback_override: int | None = None) -> None:
-    """Run the full pipeline: collect, generate script, TTS, publish."""
-    import shutil
+def _audit_previous_daily_run(store: StateStore, feed_slug: str, today: str) -> None:
+    """Placeholder for the enqueue-time audit; implemented in Task 6.
 
-    from pipeline.consumer import _compute_lookback
-    from pipeline.rundown_writer import generate_rundown_script
-    from pipeline.things_happen_collector import collect_all_artifacts
-    from pipeline.things_happen_editor import RundownResearchPlan
-    from pipeline.things_happen_processor import process_things_happen_job
-
-    store = StateStore(_default_state_db_path())
-    try:
-        r2_client = R2Client()
-
-        job_id = store.insert_pending_the_rundown(date_str)
-        if job_id is None:
-            click.echo(f"The Rundown job already exists for {date_str}")
-            due = store.list_due_the_rundown()
-            job = next((j for j in due if j["date_str"] == date_str), None)
-            if job is None:
-                click.echo("Job exists but is not pending.")
-                return
-        else:
-            click.echo(f"Created The Rundown job {job_id} for {date_str}")
-            due = store.list_due_the_rundown()
-            job = next((j for j in due if j["id"] == job_id), None)
-            if job is None:
-                click.echo("Error: job not found")
-                return
-
-        lookback = lookback_override or _compute_lookback(store, "the-rundown")
-        work_dir = Path(f"/tmp/the-rundown-{job['id']}")
-        rundown_coverage = store.recent_coverage_summary("the-rundown", days=3)
-        rundown_prior_urls = store.recent_article_urls("the-rundown", days=3)
-        click.echo("Collecting sources...")
-        collect_all_artifacts(
-            job["id"],
-            work_dir,
-            levine_cache_dir=Path("/persist/my-podcasts/levine-cache"),
-            semafor_cache_dir=Path("/persist/my-podcasts/semafor-cache"),
-            zvi_cache_dir=Path("/persist/my-podcasts/zvi-cache"),
-            fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
-            lookback_days=lookback,
-            coverage_summary=rundown_coverage,
-            prior_urls=rundown_prior_urls,
-        )
-
-        plan_path = work_dir / "plan.json"
-        if not plan_path.exists():
-            click.echo("Error: no plan generated")
-            return
-
-        plan = RundownResearchPlan.model_validate_json(plan_path.read_text())
-        click.echo(f"Themes: {', '.join(plan.themes)}")
-        selected = sum(1 for d in plan.directives if d.include_in_episode)
-        click.echo(f"Selected {selected} stories")
-
-        articles_by_theme: dict[str, list[str]] = {}
-        for directive in plan.directives:
-            if not directive.include_in_episode:
-                continue
-            text = _find_rundown_article_text(directive, work_dir)
-            if text:
-                articles_by_theme.setdefault(directive.theme, []).append(text)
-
-        context_scripts = []
-        context_dir = work_dir / "context"
-        if context_dir.exists():
-            for f in sorted(context_dir.glob("*.txt"), reverse=True):
-                context_scripts.append(f.read_text(encoding="utf-8"))
-
-        click.echo("Generating script...")
-        writer_output = generate_rundown_script(
-            themes=plan.themes,
-            articles_by_theme=articles_by_theme,
-            date_str=date_str,
-            context_scripts=context_scripts,
-            work_dir=work_dir,
-        )
-
-        script_file = work_dir / "script.txt"
-        script_file.write_text(writer_output.script, encoding="utf-8")
-        summary_file = work_dir / "summary.txt"
-        summary_file.write_text(writer_output.summary, encoding="utf-8")
-        if writer_output.covered_headlines:
-            covered_file = work_dir / "covered.json"
-            covered_file.write_text(
-                json.dumps(writer_output.covered_headlines), encoding="utf-8"
-            )
-
-        click.echo("Running TTS...")
-        process_things_happen_job(
-            job,
-            store,
-            r2_client,
-            script_path=script_file,
-            work_dir=work_dir,
-            summary=writer_output.summary,
-        )
-        store.mark_the_rundown_completed(job["id"])
-
-        persist_dir = Path("/persist/my-podcasts/scripts/the-rundown")
-        persist_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy(script_file, persist_dir / f"{date_str}.txt")
-
-        click.echo(f"Published The Rundown for {date_str}")
-    finally:
-        store.close()
+    Deliberately a no-op stub rather than an undefined name: consumer.py:323
+    lazily imports pipeline.__main__ from disk, so a call to a name that does
+    not exist here would surface as an AttributeError mid-job in the running
+    consumer rather than at import time.
+    """
 
 
 @cli.command("publish-script")

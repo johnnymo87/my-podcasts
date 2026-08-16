@@ -1,6 +1,9 @@
-import pytest
+from unittest.mock import MagicMock, patch
 
-from pipeline.__main__ import _enqueue_daily_job, _stale_daily_jobs
+import pytest
+from click.testing import CliRunner
+
+from pipeline.__main__ import _enqueue_daily_job, _stale_daily_jobs, cli
 from pipeline.db import StateStore
 
 
@@ -123,3 +126,90 @@ def test_enqueue_reports_completed_status_on_collision(tmp_path, capsys):
     assert result is None
     assert "status=completed" in out
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# Task 3: `the-rundown` enqueue-only
+# ---------------------------------------------------------------------------
+
+
+def test_the_rundown_command_only_enqueues(tmp_path):
+    """The CLI must NOT collect, generate, or publish - only enqueue.
+
+    Patching R2Client is not incidental. BEFORE the implementation lands this
+    test drives the OLD inline pipeline, which would construct a real R2 client
+    and attempt a real ~6-minute collection + LLM + TTS + publish. On a devbox
+    shell the R2 env vars are unset so it dies early by luck; in an operator
+    shell with secrets sourced, running this "failing test" would fire a real
+    production publish out of pytest. The mock makes that impossible, and
+    asserting it was never called is also the only DIRECT proof that the new
+    command performs no pipeline work - absence of the helper name is a
+    resurrection tripwire, not evidence of behavior.
+    """
+    db = tmp_path / "s.db"
+    fake_r2 = MagicMock()
+    with (
+        patch("pipeline.__main__._default_state_db_path", return_value=db),
+        patch("pipeline.__main__.R2Client", fake_r2),
+    ):
+        result = CliRunner().invoke(cli, ["the-rundown", "--date", "2026-08-17"])
+    assert result.exit_code == 0, result.output
+    assert "Queued The Rundown job" in result.output
+    fake_r2.assert_not_called()
+    store = StateStore(db)
+    assert len(store.list_daily_jobs("the-rundown", "pending")) == 1
+    store.close()
+
+
+def test_enqueue_reports_errored_status_and_how_to_reset(tmp_path):
+    """An errored row is NOT eligible for execution; saying "already exists" lies."""
+    db = tmp_path / "s.db"
+    store = StateStore(db)
+    job_id = store.insert_pending_the_rundown("2026-08-17")
+    for _ in range(60):
+        if store.mark_the_rundown_failed(job_id, "boom").exhausted:
+            break
+    store.close()
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(cli, ["the-rundown", "--date", "2026-08-17"])
+    assert "status=errored" in result.output
+    assert "jobs reset" in result.output
+
+
+def test_enqueue_rejects_a_malformed_date_via_cli(tmp_path):
+    db = tmp_path / "s.db"
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(cli, ["the-rundown", "--date", "17-08-2026"])
+    assert result.exit_code != 0
+    store = StateStore(db)
+    assert store.list_daily_jobs("the-rundown", "pending") == []
+    store.close()
+
+
+def test_the_rundown_command_is_idempotent(tmp_path):
+    db = tmp_path / "s.db"
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        runner = CliRunner()
+        runner.invoke(cli, ["the-rundown", "--date", "2026-08-17"])
+        result = runner.invoke(cli, ["the-rundown", "--date", "2026-08-17"])
+    assert result.exit_code == 0
+    assert "already exists" in result.output
+
+
+def test_the_rundown_full_run_helper_is_deleted():
+    """The inline CLI pipeline is the double-publish bug; it must not return.
+
+    Only the Rundown half is asserted here; the FP half is asserted once
+    Task 4 deletes _fp_digest_full_run (see test_full_run_helpers_are_deleted).
+    """
+    import pipeline.__main__ as m
+
+    assert not hasattr(m, "_the_rundown_full_run")
+
+
+def test_shared_helpers_survive():
+    """consumer.py:323 lazily imports find_rundown_article_source from here."""
+    import pipeline.__main__ as m
+
+    assert hasattr(m, "find_rundown_article_source")
+    assert hasattr(m, "_find_rundown_article_text")  # still used by --dry-run
