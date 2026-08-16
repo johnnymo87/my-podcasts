@@ -91,7 +91,8 @@ def test_dry_run_uses_the_same_assembler_as_the_consumer(tmp_path, monkeypatch):
     main_module._the_rundown_dry_run("2026-03-10")
 
     assert writer_mock.called
-    articles_by_theme = writer_mock.call_args.kwargs["articles_by_theme"]
-    assembled_text = "\n".join(articles_by_theme[theme])
+    sections = writer_mock.call_args.kwargs["sections"]
+    by_theme = dict(sections)
+    assembled_text = "\n".join(by_theme[theme])
     assert "Related coverage from other outlets" in assembled_text
     assert "Real open-access body." in assembled_text

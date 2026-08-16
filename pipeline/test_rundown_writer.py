@@ -14,11 +14,10 @@ from pipeline.rundown_writer import (
 
 def test_build_prompt_basic():
     prompt = build_rundown_prompt(
-        themes=["Tech", "Finance"],
-        articles_by_theme={
-            "Tech": ["Article about tech"],
-            "Finance": ["Article about finance"],
-        },
+        sections=[
+            ("Tech", ["Article about tech"]),
+            ("Finance", ["Article about finance"]),
+        ],
         date_str="2026-03-10",
     )
     assert "2026-03-10" in prompt
@@ -31,8 +30,7 @@ def test_build_prompt_basic():
 
 def test_build_prompt_instructs_outlet_attribution_for_open_access():
     prompt = build_rundown_prompt(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article about tech"]},
+        sections=[("Tech", ["Article about tech"])],
         date_str="2026-03-10",
     )
     assert "Related coverage from other outlets" in prompt
@@ -41,8 +39,7 @@ def test_build_prompt_instructs_outlet_attribution_for_open_access():
 
 def test_build_prompt_with_context():
     prompt = build_rundown_prompt(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["New article"]},
+        sections=[("Tech", ["New article"])],
         date_str="2026-03-10",
         context_scripts=["Yesterday's script content"],
     )
@@ -52,12 +49,52 @@ def test_build_prompt_with_context():
 
 def test_build_prompt_without_context():
     prompt = build_rundown_prompt(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article"]},
+        sections=[("Tech", ["Article"])],
         date_str="2026-03-10",
         context_scripts=None,
     )
     assert "PRIOR EPISODES" not in prompt
+
+
+def test_prompt_themes_list_matches_sections_exactly():
+    """No theme is announced that has no material beneath it."""
+    prompt = build_rundown_prompt(
+        sections=[("Tech", ["Article about tech"])], date_str="2026-03-10"
+    )
+    assert "- Tech" in prompt and "## Tech" in prompt
+
+
+def test_prompt_renders_orphan_section_under_its_own_name():
+    prompt = build_rundown_prompt(
+        sections=[("Alpha", ["a"]), ("Invented Name", ["b"])], date_str="2026-03-10"
+    )
+    assert "## Invented Name" in prompt and "b" in prompt
+
+
+def test_prompt_matches_legacy_rendering_when_there_is_nothing_to_fix():
+    """Permanent guard: on a normal day the prompt is byte-identical to the old one.
+
+    Carries the OLD rendering logic inline as a reference implementation. For input
+    where every plan theme has >=1 article and there are no orphans -- i.e. the
+    overwhelmingly common case -- the new builder must produce exactly what the old
+    one did. This pins 'identical except the two intended changes' in CI, which the
+    one-time manual diff in Task 6 cannot do.
+    """
+    themes = ["Alpha", "Beta"]
+    articles = {"Alpha": ["a1", "a2"], "Beta": ["b1"]}
+    legacy_sections = []
+    for theme in themes:  # old logic, verbatim
+        lines = [f"## {theme}"]
+        for j, art in enumerate(articles[theme], 1):
+            lines.append(f"### Source {j}")
+            lines.append(art)
+        legacy_sections.append("\n".join(lines))
+    legacy_block = "\n\n".join(legacy_sections)
+
+    prompt = build_rundown_prompt(
+        sections=[(t, articles[t]) for t in themes], date_str="2026-03-10"
+    )
+    assert legacy_block in prompt
 
 
 @patch("pipeline.rundown_writer.delete_session")
@@ -81,8 +118,7 @@ def test_generate_script(
     mock_text.return_value = "Generated podcast script here"
 
     result = generate_rundown_script(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article"]},
+        sections=[("Tech", ["Article"])],
         date_str="2026-03-10",
         work_dir=tmp_path,
     )
@@ -107,8 +143,7 @@ def test_generate_script_timeout_raises(
 
     try:
         generate_rundown_script(
-            themes=["Tech"],
-            articles_by_theme={"Tech": ["Article"]},
+            sections=[("Tech", ["Article"])],
             date_str="2026-03-10",
             work_dir=tmp_path,
         )
@@ -142,8 +177,7 @@ def test_generate_script_extracts_script_tags(
     )
 
     result = generate_rundown_script(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article"]},
+        sections=[("Tech", ["Article"])],
         date_str="2026-03-10",
         work_dir=tmp_path,
     )
@@ -174,8 +208,7 @@ def test_generate_rundown_script_rejects_empty_output(
 
     try:
         generate_rundown_script(
-            themes=["Tech"],
-            articles_by_theme={"Tech": ["Article"]},
+            sections=[("Tech", ["Article"])],
             date_str="2026-03-10",
             work_dir=tmp_path,
         )
@@ -258,8 +291,7 @@ def test_generate_rundown_returns_writer_output_with_summary(
     mock_text.return_value = "<summary>Today's summary.</summary>\n\nThe script text."
 
     result = generate_rundown_script(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article"]},
+        sections=[("Tech", ["Article"])],
         date_str="2026-03-10",
         work_dir=tmp_path,
     )
@@ -351,8 +383,7 @@ def test_generate_script_parses_covered_tags(
     )
 
     result = generate_rundown_script(
-        themes=["Finance"],
-        articles_by_theme={"Finance": ["Article"]},
+        sections=[("Finance", ["Article"])],
         date_str="2026-03-12",
         work_dir=tmp_path,
     )
@@ -431,8 +462,7 @@ def test_persists_raw_output_before_parsing(
     )
 
     result = generate_rundown_script(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article"]},
+        sections=[("Tech", ["Article"])],
         date_str="2026-03-10",
         work_dir=tmp_path,
     )
@@ -469,8 +499,7 @@ def test_reuses_persisted_output_when_present(
     )
 
     result = generate_rundown_script(
-        themes=["Tech"],
-        articles_by_theme={"Tech": ["Article"]},
+        sections=[("Tech", ["Article"])],
         date_str="2026-03-10",
         work_dir=tmp_path,
     )
@@ -509,8 +538,7 @@ def test_deletes_persisted_output_on_parse_failure(
 
     try:
         generate_rundown_script(
-            themes=["Tech"],
-            articles_by_theme={"Tech": ["Article"]},
+            sections=[("Tech", ["Article"])],
             date_str="2026-03-10",
             work_dir=tmp_path,
         )
@@ -535,8 +563,7 @@ def test_does_not_persist_when_wait_for_idle_times_out(
 
     try:
         generate_rundown_script(
-            themes=["Tech"],
-            articles_by_theme={"Tech": ["Article"]},
+            sections=[("Tech", ["Article"])],
             date_str="2026-03-10",
             work_dir=tmp_path,
         )

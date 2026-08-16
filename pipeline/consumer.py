@@ -538,10 +538,7 @@ def consume_forever(
                                 context_scripts.append(f.read_text(encoding="utf-8"))
 
                         writer_output = generate_rundown_script(
-                            themes=plan.themes,
-                            # TODO(task 3): pass sections directly once
-                            # build_rundown_prompt renders from sections.
-                            articles_by_theme=dict(sections),
+                            sections=sections,
                             date_str=job["date_str"],
                             context_scripts=context_scripts,
                             work_dir=work_dir,
