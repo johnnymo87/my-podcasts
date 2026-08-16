@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -148,6 +149,95 @@ def _jobs_work_dir_base() -> Path:
     return _consumer_work_dir_base()
 
 
+def _stale_daily_jobs(store: StateStore, feed_slug: str, today: str) -> list[dict]:
+    """Return daily job rows for *feed_slug* left unfinished on an earlier date.
+
+    A row still 'pending' or 'errored' for a date before *today* means a
+    previous run was enqueued but never carried to completion - the signal that
+    the consumer is wedged, stopped, or exhausted its retries. Comparison is
+    lexical because date_str is always YYYY-MM-DD.
+    """
+    stale: list[dict] = []
+    for status in ("pending", "errored"):
+        stale.extend(
+            row
+            for row in store.list_daily_jobs(feed_slug, status)
+            if row["date_str"] < today
+        )
+    return sorted(stale, key=lambda r: r["date_str"])
+
+
+_DAILY_FEED_LABELS: dict[str, str] = {
+    "the-rundown": "The Rundown",
+    "fp-digest": "FP Digest",
+}
+
+
+def _enqueue_daily_job(store: StateStore, feed_slug: str, date_str: str) -> str | None:
+    """Insert a pending daily job and report the outcome. Returns the job id.
+
+    Returns None when a row for *date_str* already exists, which is a normal,
+    successful outcome: date_str is UNIQUE, so a Persistent=true timer catch-up
+    fire is idempotent for free.
+    """
+    label = _DAILY_FEED_LABELS.get(feed_slug)
+    if label is None:
+        raise ValueError(f"Unknown feed_slug: {feed_slug!r}")
+
+    # Reject a malformed date here rather than letting the consumer retry a
+    # garbage row for ~12h. The old inline CLI failed loudly in the operator's
+    # terminal; enqueue-only would otherwise make the same typo silent.
+    #
+    # The round-trip comparison is the load-bearing half, not decoration:
+    # strptime alone accepts non-zero-padded dates, so '2026-8-5' parses and is
+    # stored as a string DISTINCT from '2026-08-05'. UNIQUE(date_str) would not
+    # collide them, the consumer would execute both, and the feed would carry
+    # two episodes for one day with different r2_keys - a fresh instance of the
+    # very bug this module was rewritten to remove. It also enforces the
+    # invariant _stale_daily_jobs relies on for its lexical date comparison.
+    if datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m-%d") != date_str:
+        raise ValueError(
+            f"date must be zero-padded YYYY-MM-DD, got {date_str!r} "
+            f"(did you mean {datetime.strptime(date_str, '%Y-%m-%d'):%Y-%m-%d}?)"
+        )
+
+    if feed_slug == "the-rundown":
+        job_id = store.insert_pending_the_rundown(date_str)
+    else:
+        job_id = store.insert_pending_fp_digest(date_str)
+
+    if job_id is not None:
+        click.echo(f"Queued {label} job {job_id} for {date_str}.")
+        click.echo("The consumer will pick it up within ~10s. Follow it with:")
+        click.echo("  journalctl -fu my-podcasts-consumer")
+        return job_id
+
+    # A row already exists. Report its ACTUAL status: 'errored' rows are NOT
+    # eligible for execution (list_due_* filters status='pending'), so a bare
+    # "already exists" would leave the operator believing work was queued when
+    # nothing will ever run.
+    existing = next(
+        (
+            row
+            for status in ("pending", "errored", "completed")
+            for row in store.list_daily_jobs(feed_slug, status)
+            if row["date_str"] == date_str
+        ),
+        None,
+    )
+    status = existing["status"] if existing else "unknown"
+    click.echo(f"{label} job already exists for {date_str} (status={status}).")
+    if status == "errored":
+        click.echo("It is errored, so the consumer will NOT run it. Reset it with:")
+        click.echo(
+            f"  uv run python -m pipeline jobs reset --feed {feed_slug} "
+            f"--date {date_str}"
+        )
+    elif status == "completed":
+        click.echo("Already published; nothing to do.")
+    return None
+
+
 # ---------------------------------------------------------------------------
 # jobs group
 # ---------------------------------------------------------------------------
@@ -264,6 +354,76 @@ def jobs_reset_command(
         store.close()
 
 
+@jobs.command("complete")
+@click.option("--feed", "feed_slug", required=True, type=str, help="Feed slug.")
+@click.option("--date", "date_str", default=None, type=str, help="Date (YYYY-MM-DD).")
+@click.option("--job-id", "job_id", default=None, type=str, help="Job UUID.")
+def jobs_complete_command(
+    feed_slug: str, date_str: str | None, job_id: str | None
+) -> None:
+    """Mark a daily job completed without running the pipeline.
+
+    Closes the manual-publish trap: --dry-run then publish-script publishes
+    an episode but never touches the job row, so the row stays pending and
+    the returning consumer executes it again, publishing a duplicate. Run
+    this immediately after a manual publish to close the row.
+    """
+    if date_str is None and job_id is None:
+        raise click.UsageError("Provide --date or --job-id.")
+
+    # Validate the slug before touching the store. list_daily_jobs raises
+    # ValueError for an unknown feed, and on the --date path that call sits
+    # outside the handler below, so an operator typo would surface as a raw
+    # traceback rather than a clean message.
+    if feed_slug not in _DAILY_FEED_LABELS:
+        raise click.UsageError(
+            f"Unknown feed {feed_slug!r}. Expected one of: "
+            f"{', '.join(sorted(_DAILY_FEED_LABELS))}."
+        )
+
+    store = StateStore(_default_state_db_path())
+    try:
+        # Resolve job_id from date_str if needed
+        if job_id is None:
+            matching = [
+                row
+                for status in ("pending", "errored")
+                for row in store.list_daily_jobs(feed_slug, status)
+                if row["date_str"] == date_str
+            ]
+            if not matching:
+                # Distinguish "already done" from "you typo'd the date" - only
+                # pending/errored rows are searched above, so a completed row
+                # would otherwise report as missing and send the operator
+                # hunting for a mistake they did not make.
+                already = [
+                    row
+                    for row in store.list_daily_jobs(feed_slug, "completed")
+                    if row["date_str"] == date_str
+                ]
+                if already:
+                    click.echo(
+                        f"{feed_slug} job for {date_str} is already completed; "
+                        f"nothing to do."
+                    )
+                    return
+                click.echo(
+                    f"No job found for feed={feed_slug!r} date={date_str!r}.", err=True
+                )
+                raise SystemExit(1)
+            job_id = matching[0]["id"]
+
+        try:
+            store.complete_daily_job(feed_slug, job_id)
+        except ValueError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            raise SystemExit(1) from exc
+
+        click.echo(f"Marked {feed_slug} job {job_id} completed.")
+    finally:
+        store.close()
+
+
 @click.group()
 def cli() -> None:
     """My Podcasts pipeline commands."""
@@ -357,15 +517,28 @@ def fp_digest_command(
     date_str: str | None, dry_run: bool, lookback_days: int | None
 ) -> None:
     """Create and process an FP Digest episode."""
-    from datetime import UTC, datetime
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
     if date_str is None:
-        date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+        date_str = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
 
     if dry_run:
         _fp_digest_dry_run(date_str, lookback_days)
-    else:
-        _fp_digest_full_run(date_str, lookback_days)
+        return
+
+    if lookback_days is not None:
+        raise click.UsageError(
+            "--lookback only applies to --dry-run. The consumer computes the "
+            "lookback window when it executes the job."
+        )
+
+    store = StateStore(_default_state_db_path())
+    try:
+        _enqueue_daily_job(store, "fp-digest", date_str)
+        _audit_previous_daily_run(store, "fp-digest", date_str)
+    finally:
+        store.close()
 
 
 def _fp_digest_dry_run(date_str: str, lookback_override: int | None = None) -> None:
@@ -439,116 +612,6 @@ def _fp_digest_dry_run(date_str: str, lookback_override: int | None = None) -> N
     click.echo(f"Work directory: {work_dir}")
 
 
-def _fp_digest_full_run(date_str: str, lookback_override: int | None = None) -> None:
-    """Run the full pipeline: collect, generate script, TTS, publish."""
-    import shutil
-
-    from pipeline.consumer import _compute_lookback
-    from pipeline.fp_collector import collect_fp_artifacts
-    from pipeline.fp_editor import FPResearchPlan
-    from pipeline.fp_processor import process_fp_digest_job
-    from pipeline.fp_writer import generate_fp_script
-
-    store = StateStore(_default_state_db_path())
-    try:
-        r2_client = R2Client()
-
-        job_id = store.insert_pending_fp_digest(date_str)
-        if job_id is None:
-            click.echo(f"FP Digest job already exists for {date_str}")
-            due = store.list_due_fp_digest()
-            job = next((j for j in due if j["date_str"] == date_str), None)
-            if job is None:
-                click.echo("Job exists but is not pending.")
-                return
-        else:
-            click.echo(f"Created FP Digest job {job_id} for {date_str}")
-            due = store.list_due_fp_digest()
-            job = next((j for j in due if j["id"] == job_id), None)
-            if job is None:
-                click.echo("Error: job not found")
-                return
-
-        lookback = lookback_override or _compute_lookback(store, "fp-digest")
-        work_dir = Path(f"/tmp/fp-digest-{job['id']}")
-        fp_coverage = store.recent_coverage_summary("fp-digest", days=3)
-        fp_prior_urls = store.recent_article_urls("fp-digest", days=3)
-        click.echo("Collecting sources...")
-        collect_fp_artifacts(
-            job["id"],
-            work_dir,
-            homepage_cache_dir=Path("/persist/my-podcasts/antiwar-homepage-cache"),
-            antiwar_rss_cache_dir=Path("/persist/my-podcasts/antiwar-rss-cache"),
-            semafor_cache_dir=Path("/persist/my-podcasts/semafor-cache"),
-            lookback_days=lookback,
-            coverage_summary=fp_coverage,
-            prior_urls=fp_prior_urls,
-        )
-
-        plan_path = work_dir / "plan.json"
-        if not plan_path.exists():
-            click.echo("Error: no plan generated")
-            return
-
-        plan = FPResearchPlan.model_validate_json(plan_path.read_text())
-        click.echo(f"Themes: {', '.join(plan.themes)}")
-        selected = sum(1 for d in plan.directives if d.include_in_episode)
-        click.echo(f"Selected {selected} stories")
-
-        from pipeline.consumer import _find_article_text
-
-        articles_by_theme: dict[str, list[str]] = {}
-        for directive in plan.directives:
-            if not directive.include_in_episode:
-                continue
-            text = _find_article_text(directive, work_dir)
-            if text:
-                articles_by_theme.setdefault(directive.theme, []).append(text)
-
-        context_scripts = []
-        context_dir = work_dir / "context"
-        if context_dir.exists():
-            for f in sorted(context_dir.glob("*.txt"), reverse=True):
-                context_scripts.append(f.read_text(encoding="utf-8"))
-
-        click.echo("Generating script...")
-        writer_output = generate_fp_script(
-            themes=plan.themes,
-            articles_by_theme=articles_by_theme,
-            date_str=date_str,
-            context_scripts=context_scripts,
-            work_dir=work_dir,
-        )
-
-        script_file = work_dir / "script.txt"
-        script_file.write_text(writer_output.script, encoding="utf-8")
-        summary_file = work_dir / "summary.txt"
-        summary_file.write_text(writer_output.summary, encoding="utf-8")
-        if writer_output.covered_headlines:
-            covered_file = work_dir / "covered.json"
-            covered_file.write_text(
-                json.dumps(writer_output.covered_headlines), encoding="utf-8"
-            )
-
-        click.echo("Running TTS...")
-        process_fp_digest_job(
-            job,
-            store,
-            r2_client,
-            script_path=script_file,
-            work_dir=work_dir,
-            summary=writer_output.summary,
-        )
-
-        persist_dir = Path("/persist/my-podcasts/scripts/fp-digest")
-        persist_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy(script_file, persist_dir / f"{date_str}.txt")
-
-        click.echo(f"Published FP Digest for {date_str}")
-    finally:
-        store.close()
-
-
 @cli.command("the-rundown")
 @click.option(
     "--date",
@@ -582,8 +645,20 @@ def the_rundown_command(
 
     if dry_run:
         _the_rundown_dry_run(date_str, lookback_days)
-    else:
-        _the_rundown_full_run(date_str, lookback_days)
+        return
+
+    if lookback_days is not None:
+        raise click.UsageError(
+            "--lookback only applies to --dry-run. The consumer computes the "
+            "lookback window when it executes the job."
+        )
+
+    store = StateStore(_default_state_db_path())
+    try:
+        _enqueue_daily_job(store, "the-rundown", date_str)
+        _audit_previous_daily_run(store, "the-rundown", date_str)
+    finally:
+        store.close()
 
 
 def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) -> None:
@@ -656,114 +731,34 @@ def _the_rundown_dry_run(date_str: str, lookback_override: int | None = None) ->
     click.echo(f"Work directory: {work_dir}")
 
 
-def _the_rundown_full_run(date_str: str, lookback_override: int | None = None) -> None:
-    """Run the full pipeline: collect, generate script, TTS, publish."""
-    import shutil
+def _audit_previous_daily_run(store: StateStore, feed_slug: str, today: str) -> None:
+    """Alert if a previous run of *feed_slug* was enqueued but never finished.
 
-    from pipeline.consumer import _compute_lookback
-    from pipeline.rundown_writer import generate_rundown_script
-    from pipeline.things_happen_collector import collect_all_artifacts
-    from pipeline.things_happen_editor import RundownResearchPlan
-    from pipeline.things_happen_processor import process_things_happen_job
+    The timer is now the watchdog for its own previous fire. Since the CLI only
+    enqueues, a green timer unit no longer implies an episode shipped, and this
+    is what closes that gap without needing a change to the Nix-managed units.
 
-    store = StateStore(_default_state_db_path())
+    Never raises: a monitoring failure must not break the enqueue.
+    """
     try:
-        r2_client = R2Client()
-
-        job_id = store.insert_pending_the_rundown(date_str)
-        if job_id is None:
-            click.echo(f"The Rundown job already exists for {date_str}")
-            due = store.list_due_the_rundown()
-            job = next((j for j in due if j["date_str"] == date_str), None)
-            if job is None:
-                click.echo("Job exists but is not pending.")
-                return
-        else:
-            click.echo(f"Created The Rundown job {job_id} for {date_str}")
-            due = store.list_due_the_rundown()
-            job = next((j for j in due if j["id"] == job_id), None)
-            if job is None:
-                click.echo("Error: job not found")
-                return
-
-        lookback = lookback_override or _compute_lookback(store, "the-rundown")
-        work_dir = Path(f"/tmp/the-rundown-{job['id']}")
-        rundown_coverage = store.recent_coverage_summary("the-rundown", days=3)
-        rundown_prior_urls = store.recent_article_urls("the-rundown", days=3)
-        click.echo("Collecting sources...")
-        collect_all_artifacts(
-            job["id"],
-            work_dir,
-            levine_cache_dir=Path("/persist/my-podcasts/levine-cache"),
-            semafor_cache_dir=Path("/persist/my-podcasts/semafor-cache"),
-            zvi_cache_dir=Path("/persist/my-podcasts/zvi-cache"),
-            fp_routed_dir=Path("/persist/my-podcasts/fp-routed-links"),
-            lookback_days=lookback,
-            coverage_summary=rundown_coverage,
-            prior_urls=rundown_prior_urls,
-        )
-
-        plan_path = work_dir / "plan.json"
-        if not plan_path.exists():
-            click.echo("Error: no plan generated")
+        stale = _stale_daily_jobs(store, feed_slug, today)
+        if not stale:
             return
 
-        plan = RundownResearchPlan.model_validate_json(plan_path.read_text())
-        click.echo(f"Themes: {', '.join(plan.themes)}")
-        selected = sum(1 for d in plan.directives if d.include_in_episode)
-        click.echo(f"Selected {selected} stories")
+        from pipeline.alerts import send_alert
 
-        articles_by_theme: dict[str, list[str]] = {}
-        for directive in plan.directives:
-            if not directive.include_in_episode:
-                continue
-            text = _find_rundown_article_text(directive, work_dir)
-            if text:
-                articles_by_theme.setdefault(directive.theme, []).append(text)
-
-        context_scripts = []
-        context_dir = work_dir / "context"
-        if context_dir.exists():
-            for f in sorted(context_dir.glob("*.txt"), reverse=True):
-                context_scripts.append(f.read_text(encoding="utf-8"))
-
-        click.echo("Generating script...")
-        writer_output = generate_rundown_script(
-            themes=plan.themes,
-            articles_by_theme=articles_by_theme,
-            date_str=date_str,
-            context_scripts=context_scripts,
-            work_dir=work_dir,
-        )
-
-        script_file = work_dir / "script.txt"
-        script_file.write_text(writer_output.script, encoding="utf-8")
-        summary_file = work_dir / "summary.txt"
-        summary_file.write_text(writer_output.summary, encoding="utf-8")
-        if writer_output.covered_headlines:
-            covered_file = work_dir / "covered.json"
-            covered_file.write_text(
-                json.dumps(writer_output.covered_headlines), encoding="utf-8"
+        label = _DAILY_FEED_LABELS.get(feed_slug, feed_slug)
+        lines = [f"{label}: {len(stale)} earlier job(s) never completed."]
+        for row in stale:
+            lines.append(
+                f"  {row['date_str']} status={row['status']} "
+                f"failures={row['failure_count']} last_error={row['last_error']}"
             )
-
-        click.echo("Running TTS...")
-        process_things_happen_job(
-            job,
-            store,
-            r2_client,
-            script_path=script_file,
-            work_dir=work_dir,
-            summary=writer_output.summary,
-        )
-        store.mark_the_rundown_completed(job["id"])
-
-        persist_dir = Path("/persist/my-podcasts/scripts/the-rundown")
-        persist_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy(script_file, persist_dir / f"{date_str}.txt")
-
-        click.echo(f"Published The Rundown for {date_str}")
-    finally:
-        store.close()
+        lines.append("The consumer may be stopped or wedged. Check:")
+        lines.append("  systemctl status my-podcasts-consumer")
+        send_alert("\n".join(lines), severity="warning")
+    except Exception as exc:  # noqa: BLE001 - monitoring must never break the job
+        print(f"[daily-audit] skipped ({type(exc).__name__}: {exc})")
 
 
 @cli.command("publish-script")

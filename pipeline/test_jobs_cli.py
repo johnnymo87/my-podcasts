@@ -233,6 +233,80 @@ def test_jobs_reset_requires_date_or_job_id(tmp_path: Path) -> None:
     assert result.exit_code != 0
 
 
+def test_jobs_complete_marks_a_pending_job_completed(tmp_path: Path) -> None:
+    """jobs complete --feed the-rundown --date ... closes a manual-publish job
+    row so a returning consumer does not republish it."""
+    db = tmp_path / "s.db"
+    store = StateStore(db)
+    store.insert_pending_the_rundown("2026-08-17")
+    store.close()
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(
+            cli, ["jobs", "complete", "--feed", "the-rundown", "--date", "2026-08-17"]
+        )
+    assert result.exit_code == 0, result.output
+    store = StateStore(db)
+    assert store.list_daily_jobs("the-rundown", "pending") == []
+    assert len(store.list_daily_jobs("the-rundown", "completed")) == 1
+    store.close()
+
+
+def test_jobs_complete_rejects_an_unknown_date(tmp_path: Path) -> None:
+    db = tmp_path / "s.db"
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(
+            cli, ["jobs", "complete", "--feed", "the-rundown", "--date", "2026-01-01"]
+        )
+    assert result.exit_code != 0
+
+
+def test_jobs_complete_by_job_id(tmp_path: Path) -> None:
+    db = tmp_path / "s.db"
+    store = StateStore(db)
+    job_id = store.insert_pending_fp_digest("2026-08-17")
+    store.close()
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(
+            cli, ["jobs", "complete", "--feed", "fp-digest", "--job-id", job_id]
+        )
+    assert result.exit_code == 0, result.output
+    store = StateStore(db)
+    assert len(store.list_daily_jobs("fp-digest", "completed")) == 1
+    store.close()
+
+
+def test_jobs_complete_only_affects_the_named_feed(tmp_path: Path) -> None:
+    """A same-date collision across feeds must not let 'complete' close the
+    wrong feed's row."""
+    db = tmp_path / "s.db"
+    store = StateStore(db)
+    store.insert_pending_the_rundown("2026-08-17")
+    store.insert_pending_fp_digest("2026-08-17")
+    store.close()
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(
+            cli, ["jobs", "complete", "--feed", "the-rundown", "--date", "2026-08-17"]
+        )
+    assert result.exit_code == 0, result.output
+    store = StateStore(db)
+    assert len(store.list_daily_jobs("the-rundown", "completed")) == 1
+    assert len(store.list_daily_jobs("fp-digest", "pending")) == 1
+    assert store.list_daily_jobs("fp-digest", "completed") == []
+    store.close()
+
+
+def test_jobs_complete_requires_feed(tmp_path: Path) -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["jobs", "complete", "--date", "2026-08-17"])
+    assert result.exit_code != 0
+
+
+def test_jobs_complete_requires_date_or_job_id(tmp_path: Path) -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli, ["jobs", "complete", "--feed", "the-rundown"])
+    assert result.exit_code != 0
+
+
 def test_jobs_reset_nonexistent_job_id_emits_clean_error(tmp_path: Path) -> None:
     """jobs reset --job-id <bad-id> prints a clean error and exits nonzero (no
     traceback)."""
@@ -253,3 +327,32 @@ def test_jobs_reset_nonexistent_job_id_emits_clean_error(tmp_path: Path) -> None
     # Must NOT be an unhandled exception (no traceback)
     assert "Traceback" not in result.output
     assert "ValueError" not in result.output
+
+
+def test_jobs_complete_rejects_an_unknown_feed_cleanly(tmp_path):
+    """The --date path calls list_daily_jobs outside the ValueError handler, so
+    without an up-front guard an operator typo surfaces as a raw traceback."""
+    db = tmp_path / "s.db"
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(
+            cli, ["jobs", "complete", "--feed", "nonsense", "--date", "2026-08-17"]
+        )
+    assert result.exit_code != 0
+    assert "Unknown feed" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_jobs_complete_says_already_completed_rather_than_not_found(tmp_path):
+    db = tmp_path / "s.db"
+    store = StateStore(db)
+    store.insert_pending_the_rundown("2026-08-17")
+    store.mark_the_rundown_completed(
+        store.list_daily_jobs("the-rundown", "pending")[0]["id"]
+    )
+    store.close()
+    with patch("pipeline.__main__._default_state_db_path", return_value=db):
+        result = CliRunner().invoke(
+            cli, ["jobs", "complete", "--feed", "the-rundown", "--date", "2026-08-17"]
+        )
+    assert result.exit_code == 0, result.output
+    assert "already completed" in result.output

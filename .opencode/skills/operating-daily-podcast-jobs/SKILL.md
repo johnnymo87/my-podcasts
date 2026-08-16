@@ -71,6 +71,44 @@ uv run python -m pipeline jobs reset --feed the-rundown --date 2026-03-17
 
 Restart the consumer only if the service is `inactive` or `failed`; a reset job is picked up on the next loop automatically.
 
+## Forcing a run
+
+The daily CLI is **enqueue-only** — it inserts a job row and exits in under a
+second. The consumer does the work.
+
+```bash
+uv run python -m pipeline the-rundown --date 2026-08-17
+journalctl -fu my-podcasts-consumer     # this is where the run is visible
+```
+
+If it prints `status=errored`, the consumer will NOT run it — `jobs reset` first.
+If it prints `status=completed`, the episode already published; re-running a
+completed date is not supported.
+
+`--lookback` is a hard error unless paired with `--dry-run`; the consumer
+computes the window itself.
+
+## Publishing by hand when the consumer is down
+
+```bash
+uv run python -m pipeline the-rundown --date 2026-08-17 --dry-run   # writes a script
+uv run python -m pipeline publish-script --script-file ... --feed-slug the-rundown ...
+uv run python -m pipeline jobs complete --feed the-rundown --date 2026-08-17
+```
+
+**The third command is not optional.** `publish-script` never touches the job
+row, so without it the row stays `pending` and the consumer publishes a second
+episode the moment it comes back — recreating the double-publish bug
+(`my-podcasts-78b`) through the recovery procedure itself.
+
+## Why a green timer no longer means an episode shipped
+
+The timer unit now completes in seconds because it only enqueues. Two alerts
+cover the difference: an enqueue-time audit (each daily run checks whether an
+*earlier* run is still `pending`/`errored` and alerts if so) and a
+retry-exhaustion alert from the consumer. A consumer that dies mid-week is
+therefore caught at the next weekday 04:30, not immediately.
+
 ## When to use other skills
 
 - Whole-system monitoring: `.opencode/skills/monitoring-my-podcasts-pipeline/SKILL.md`

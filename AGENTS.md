@@ -92,7 +92,7 @@ Daily current-affairs digest covering business, technology, AI, law, media, scie
 **Category:** News
 
 **Flow:**
-1. Systemd timer triggers, or CLI: `uv run python -m pipeline the-rundown [--date YYYY-MM-DD] [--lookback N] [--dry-run]`
+1. Systemd timer triggers, or CLI: `uv run python -m pipeline the-rundown [--date YYYY-MM-DD] [--dry-run [--lookback N]]`. **The CLI only enqueues a job row; the consumer executes it.** See "Daily Job Execution Model" below.
 2. `things_happen_collector.py` reads Levine links from cache, Semafor from cache, syncs Zvi cache — all within adaptive lookback window. Routes FP-flagged links to `/persist/my-podcasts/fp-routed-links/` for FP Digest.
 3. `things_happen_editor.py` (Gemini Flash-Lite) triages into 3-5 themes, selects 8-12 stories, writes `plan.json`
 4. Exa enrichment for selected stories whose Levine article measured a non-`live` `source_tier` (`paywalled`/`http_error`/`fetch_error`), unioned with any directive the editor separately flagged `needs_exa` — the measured fetch tier drives this, not the editor's headline-only guess. Semafor/Zvi stories have no Levine article to match, so the tier half cannot fire for them — they come from cache with real body text already — but they still fire when the editor flags `needs_exa`, which is the union preserving today's behavior. Matching a directive to its Levine article is by slug, not raw headline equality. The search excludes the article's own origin domain plus a fixed deny-list of paywall-circumvention mirrors (`archive.ph` and friends) so retrieved text never launders a paywalled read through a bypass site.
@@ -181,7 +181,53 @@ Daily foreign policy podcast. Fully automated, no human-in-the-loop.
 - `pipeline/rss_sources.py` — RSS source definitions, Semafor category routing (legacy fallback)
 - `pipeline/source_cache.py` — Persistent cache sync for all sources
 
-**CLI:** `uv run python -m pipeline fp-digest [--date YYYY-MM-DD] [--lookback N] [--dry-run]`
+**CLI:** `uv run python -m pipeline fp-digest [--date YYYY-MM-DD] [--dry-run [--lookback N]]` — enqueue-only, same as The Rundown. See "Daily Job Execution Model".
+
+## Daily Job Execution Model
+
+**The daily CLI enqueues; the consumer executes. There is exactly one executor.**
+
+`python -m pipeline the-rundown` (and `fp-digest`) inserts a pending job row,
+prints the job id, and exits in well under a second. The long-lived
+`my-podcasts-consumer` picks it up within ~10s and runs collection, the writer,
+TTS, and publish.
+
+It did not always work this way, and the history is the reason for the rule.
+The CLI used to run the whole pipeline inline while holding the row at
+`status='pending'` — so the consumer, which polls that status with no claim,
+started a *second* pipeline on the same job ~10s later. Two TTS renders, two
+PUTs to one `r2_key`, two `episodes` rows: the feed carried two items for one
+day and the stale one declared the wrong length. That produced 16 duplicated
+keys across 9 weekdays before it was fixed by deleting the inline path
+(`my-podcasts-78b`).
+
+Consequences worth knowing:
+
+- **A green timer unit means "enqueued", not "published."** The unit finishes in
+  seconds now. Two alerts cover the gap: an enqueue-time audit (each run checks
+  whether any *earlier* run is still `pending`/`errored` and alerts if so) and a
+  retry-exhaustion alert from the consumer.
+- **`--lookback` applies to `--dry-run` only** and is a hard error otherwise —
+  the consumer computes the window itself via `_compute_lookback`. It errors
+  rather than being ignored, deliberately.
+- **`--dry-run` still runs collection and generation inline** and touches no DB.
+- **Re-running an already-`completed` date is not supported.** The command
+  reports `status=completed` and does nothing. An `errored` date reports
+  `status=errored` and tells you to `jobs reset`, because the consumer only
+  executes `pending` rows.
+- **Never run a second consumer by hand.** It reintroduces exactly this race.
+- **Manual publish while the consumer is down:** `--dry-run`, then
+  `publish-script`, then **`jobs complete --feed <slug> --date <date>`**.
+  `publish-script` does not touch the job row, so skipping the last step leaves
+  it `pending` and the returning consumer publishes a duplicate.
+
+**Accepted tradeoff:** the old inline run was accidental redundancy — it
+published even when the consumer was dead. Now a dead consumer means no
+episode. That is accepted because `Restart=on-failure` covers crashes, a dead
+consumer also stops the email-driven feeds so it gets noticed, and the
+"redundancy" was corrupting a shared work dir anyway. The honest gap: the
+enqueue-time audit only runs at the *next* weekday 04:30, so a consumer that
+dies Friday morning yields no episode and no alert until Monday (~72h).
 
 ## Content Routing
 
