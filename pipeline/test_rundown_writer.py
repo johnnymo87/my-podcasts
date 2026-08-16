@@ -71,6 +71,23 @@ def test_prompt_renders_orphan_section_under_its_own_name():
     assert "## Invented Name" in prompt and "b" in prompt
 
 
+def test_prompt_never_renders_a_theme_header_with_no_articles():
+    """Boundary hardening: the renderer itself must never emit a bare header.
+
+    Task 1's assembler guarantees this today by construction, but the FP
+    Digest port (my-podcasts-tj9) will call this same renderer with sections
+    built by different code. A section with an empty article list must not
+    appear anywhere in the prompt -- not as a rendered '## Empty' header, and
+    not in the derived TODAY'S THEMES list either, so the two stay
+    consistent with each other.
+    """
+    prompt = build_rundown_prompt(
+        sections=[("Alpha", ["real"]), ("Empty", [])], date_str="2026-03-10"
+    )
+    assert "Empty" not in prompt
+    assert "## Alpha" in prompt
+
+
 def test_prompt_matches_legacy_rendering_when_there_is_nothing_to_fix():
     """Permanent guard: on a normal day the prompt is byte-identical to the old one.
 

@@ -102,10 +102,21 @@ def build_rundown_prompt(
     else:
         context_block = ""
 
-    themes_list = "\n".join(f"- {theme}" for theme, _ in sections)
+    # A section with no articles must never reach the model as a bare
+    # '## Theme' header under STORIES BY THEME -- this is unread, fully
+    # automated output. Today's only caller (consumer._assemble_writer_inputs)
+    # already omits empty sections, but that guarantee lives one caller deep;
+    # skipping here too closes the gap for any future caller (e.g. the FP
+    # Digest port, my-podcasts-tj9) that might not uphold it. Filtering here
+    # keeps the announced TODAY'S THEMES list and the rendered sections in
+    # sync by construction, the same way sections replaced the old
+    # themes/articles_by_theme pair.
+    non_empty_sections = [(theme, articles) for theme, articles in sections if articles]
+
+    themes_list = "\n".join(f"- {theme}" for theme, _ in non_empty_sections)
 
     story_sections: list[str] = []
-    for theme, articles in sections:
+    for theme, articles in non_empty_sections:
         section_lines = [f"## {theme}"]
         for j, article_text in enumerate(articles, 1):
             section_lines.append(f"### Source {j}")
