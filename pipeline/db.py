@@ -649,3 +649,24 @@ class StateStore:
     def reset_the_rundown_job(self, job_id: str) -> None:
         """Reset a the_rundown job back to pending so the consumer will retry it."""
         self._reset_daily_job("pending_the_rundown", job_id)
+
+    def complete_daily_job(self, feed_slug: str, job_id: str) -> None:
+        """Mark a daily job completed directly, without running the pipeline.
+
+        For the consumer-down manual-publish recovery (--dry-run, then
+        publish-script): publish-script never touches the job row, so without
+        this the row stays 'pending' and the returning consumer executes it
+        again, publishing a duplicate episode. Raises ValueError for an
+        unknown feed_slug or a job_id that does not exist under that feed.
+        """
+        table = self._FEED_SLUG_TO_TABLE.get(feed_slug)
+        if table is None:
+            raise ValueError(f"Unknown feed_slug: {feed_slug!r}")
+        cursor = self._conn.execute(
+            f"UPDATE {table} SET status = 'completed', failure_count = 0,"
+            f" last_error = NULL WHERE id = ?",
+            (job_id,),
+        )
+        self._conn.commit()
+        if cursor.rowcount == 0:
+            raise ValueError(f"Unknown job id: {job_id}")

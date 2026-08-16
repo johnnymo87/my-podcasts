@@ -342,6 +342,51 @@ def jobs_reset_command(
         store.close()
 
 
+@jobs.command("complete")
+@click.option("--feed", "feed_slug", required=True, type=str, help="Feed slug.")
+@click.option("--date", "date_str", default=None, type=str, help="Date (YYYY-MM-DD).")
+@click.option("--job-id", "job_id", default=None, type=str, help="Job UUID.")
+def jobs_complete_command(
+    feed_slug: str, date_str: str | None, job_id: str | None
+) -> None:
+    """Mark a daily job completed without running the pipeline.
+
+    Closes the manual-publish trap: --dry-run then publish-script publishes
+    an episode but never touches the job row, so the row stays pending and
+    the returning consumer executes it again, publishing a duplicate. Run
+    this immediately after a manual publish to close the row.
+    """
+    if date_str is None and job_id is None:
+        raise click.UsageError("Provide --date or --job-id.")
+
+    store = StateStore(_default_state_db_path())
+    try:
+        # Resolve job_id from date_str if needed
+        if job_id is None:
+            matching = [
+                row
+                for status in ("pending", "errored")
+                for row in store.list_daily_jobs(feed_slug, status)
+                if row["date_str"] == date_str
+            ]
+            if not matching:
+                click.echo(
+                    f"No job found for feed={feed_slug!r} date={date_str!r}.", err=True
+                )
+                raise SystemExit(1)
+            job_id = matching[0]["id"]
+
+        try:
+            store.complete_daily_job(feed_slug, job_id)
+        except ValueError as exc:
+            click.echo(f"Error: {exc}", err=True)
+            raise SystemExit(1) from exc
+
+        click.echo(f"Marked {feed_slug} job {job_id} completed.")
+    finally:
+        store.close()
+
+
 @click.group()
 def cli() -> None:
     """My Podcasts pipeline commands."""
