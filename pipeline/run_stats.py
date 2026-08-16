@@ -107,6 +107,24 @@ class RunStats(BaseModel):
     writer_exa_appended: int = 0
     writer_exa_chars: int = 0
 
+    # Entries where `reached_prompt is False` but `chars > 0` -- text was
+    # resolved (has length) yet never landed in a rendered section. Per
+    # consumer.py's `_assemble_writer_inputs`, `chars = len(text)` and
+    # `reached_prompt = bool(text)` are set from the same `text` value in
+    # the same commit, so this is zero by construction on every run written
+    # by current code -- a regression canary, not a routine statistic. Uses
+    # `is False`, never truthiness, so a missing key (historical
+    # writer_inputs.json predating this field) reads as "unknown", not
+    # "dropped" -- see the `exa_appended is True` precedent above.
+    writer_dropped_before_prompt: int = 0
+
+    # Histogram of `miss_reason` values (see find_rundown_article_source's
+    # docstring for the taxonomy). Only entries carrying a real string
+    # `miss_reason` are counted; a missing key (historical data predating
+    # the field) is skipped rather than bucketed as "unknown", since we
+    # have no evidence to attribute -- it simply does not appear here.
+    writer_miss_reasons: dict[str, int] = Field(default_factory=dict)
+
     # From script.txt / covered.json.
     script_words: int | None = None
     covered_headlines: int | None = None
@@ -308,6 +326,8 @@ def collect_run_stats(
     dropped = 0
     writer_exa_appended = 0
     writer_exa_chars = 0
+    dropped_before_prompt = 0
+    miss_reasons: dict[str, int] = {}
     for item in writer_inputs:
         if not isinstance(item, dict):
             write_buckets["unknown"] = write_buckets.get("unknown", 0) + 1
@@ -325,6 +345,16 @@ def collect_run_stats(
         source_path = item.get("source_path")
         chars = item.get("chars")
         has_text = isinstance(chars, int) and not isinstance(chars, bool) and chars > 0
+
+        # `is False`, never truthiness: a missing `reached_prompt` key
+        # (historical writer_inputs.json) must read as "unknown", not
+        # "dropped", or every historical work dir false-alarms.
+        if item.get("reached_prompt") is False and has_text:
+            dropped_before_prompt += 1
+
+        miss_reason = item.get("miss_reason")
+        if isinstance(miss_reason, str) and miss_reason:
+            miss_reasons[miss_reason] = miss_reasons.get(miss_reason, 0) + 1
 
         if source_path is None:
             dropped += 1
@@ -360,6 +390,8 @@ def collect_run_stats(
     stats.writer_buckets = write_buckets
     stats.writer_exa_appended = writer_exa_appended
     stats.writer_exa_chars = writer_exa_chars
+    stats.writer_dropped_before_prompt = dropped_before_prompt
+    stats.writer_miss_reasons = miss_reasons
 
     # --- script.txt / covered.json ----------------------------------------
     script_path = work_dir / "script.txt"
@@ -461,6 +493,16 @@ def render_report(stats: RunStats) -> str:
     write_line += f", {stats.writer_dropped} dropped"
     if stats.writer_exa_appended:
         write_line += f", {stats.writer_exa_appended} +open-access"
+    # Regression canary, not a routine statistic -- see RunStats docstring.
+    # Only ever surfaced when non-zero, so a healthy run's report carries no
+    # noise and this cannot cry wolf on the common case.
+    if stats.writer_dropped_before_prompt:
+        write_line += f", {stats.writer_dropped_before_prompt} DROPPED-AFTER-RESOLVE(!)"
+    miss_breakdown = ", ".join(
+        f"{k} {v}" for k, v in stats.writer_miss_reasons.items() if v
+    )
+    if miss_breakdown:
+        write_line += f" [misses: {miss_breakdown}]"
     lines.append(write_line)
 
     out_parts = []
