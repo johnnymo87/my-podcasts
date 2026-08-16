@@ -357,14 +357,14 @@ def _assemble_writer_inputs(
             if exa_extra:
                 text = f"{text}\n\n{_OPEN_ACCESS_HEADING}\n\n{exa_extra}"
 
-        # Truthful only because the prompt is now genuinely built from
-        # `sections` (build_rundown_prompt renders sections verbatim, and
-        # nothing downstream re-derives or drops a theme -- see Task 1/3).
-        # Every non-empty `text` is appended to `by_theme` below, under
-        # either its plan theme or as an orphan, and every entry in
-        # `by_theme` becomes a rendered section. So "text is non-empty" and
-        # "text is in a section that reaches the prompt" are the same
-        # predicate by construction: bool(text) is exactly reached_prompt.
+        # reached_prompt is filled in after `sections` is built, by checking
+        # actual membership -- deliberately NOT set to bool(text) here.
+        # bool(text) would be a tautology against "chars": len(text) in this
+        # same dict literal, so the funnel's dropped_before_prompt canary
+        # could never fire no matter how badly section assembly broke. Deriving
+        # it from the built sections instead makes it an independent check:
+        # if any future change to the section-building below drops a theme
+        # that has text, this goes False and the funnel says so.
         # miss_reason is None on a hit; see find_rundown_article_source's
         # docstring for the taxonomy (no_index / index_unreadable /
         # index_no_overlap) and why the cascade only supports one reason
@@ -377,7 +377,6 @@ def _assemble_writer_inputs(
                 "chars": len(text),
                 "exa_appended": bool(exa_extra),
                 "exa_chars": len(exa_extra),
-                "reached_prompt": bool(text),
                 "miss_reason": miss_reason,
             }
         )
@@ -393,6 +392,15 @@ def _assemble_writer_inputs(
         (theme, by_theme[theme]) for theme in plan.themes if by_theme.get(theme)
     ]
     sections += [(theme, by_theme[theme]) for theme in orphan_order]
+
+    # Derived from the sections that were actually built, not from bool(text),
+    # so this is a genuine cross-check rather than a restatement of "chars".
+    # A directive reached the prompt iff it resolved to text AND its theme
+    # survived into a rendered section.
+    section_names = {theme for theme, _ in sections}
+    for entry in writer_inputs:
+        entry["reached_prompt"] = entry["chars"] > 0 and entry["theme"] in section_names
+
     return sections, writer_inputs
 
 
