@@ -47,10 +47,13 @@ Work in a fresh worktree (`.worktrees/<name>`), never in the shared checkout.
 | Piece 1 | `6yo` | #7 | Repaired the dead Exa enrichment path |
 | Piece 2 | `vxd`, `nkd` | #8 | Funnel reporter → Telegram + `run-stats.jsonl` |
 | Piece 3 | `85c`, `kyk` | #9 | Open-access substitution for paywalled sources |
+| Piece 4 | `78b` | #10 | Enqueue-only daily CLI — stops the double-publish |
 
-**Pending verification:** the first production run exercising Pieces 1-3 is the
+**Pending verification:** the first production run exercising Pieces 1-4 is the
 next weekday 04:30 ET run. A self-wake is scheduled for 2026-08-17 ~06:00 ET.
-`/persist/my-podcasts/run-stats.jsonl` did not exist as of 2026-08-15.
+`/persist/my-podcasts/run-stats.jsonl` did not exist as of 2026-08-15. On that
+run expect **exactly one** episodes row per feed, a funnel report in Telegram,
+and the timer units completing in seconds rather than minutes.
 
 ---
 
@@ -59,30 +62,26 @@ next weekday 04:30 ET run. A self-wake is scheduled for 2026-08-17 ~06:00 ET.
 Ordered. The rationale for the order matters more than the order itself — if a
 reason stops holding, re-order.
 
-### 1. Fix the daily double-publish race — `my-podcasts-78b` (P1)
+### ~~1. Fix the daily double-publish race — `my-podcasts-78b`~~ — DONE (PR #10)
 
-**Why first:** it is the only open bug that degrades the actual podcast, and it
-fires automatically every Mon-Fri without anyone doing anything. Re-measured
-2026-08-15: **16 duplicated `r2_key`s, 16 stale extra rows, 9 affected days**
-since the 2026-07-30 cleanup, most recently 2026-08-14. Both daily feeds every
-run; email-driven feeds are clean, which is the control group confirming the
-timer-CLI-plus-consumer dual runner is the cause.
+Shipped 2026-08-15. The CLI is now enqueue-only and the consumer is the single
+executor; the race is gone by construction rather than coordinated around. The
+16 duplicated keys were resolved against the **live R2 objects** (newest matched
+15/16; the 16th was byte-identical, so keep-newest held) and the feeds
+regenerated — 115/116 items, one per date, enclosure lengths verified.
 
-It also confounds the Monday verification of Piece 3 — a run that
-double-publishes gives a muddy read on the open-access feature.
+Two lessons worth keeping:
 
-**Done when:** a weekday run produces exactly one episode row per feed per day,
-and the existing 16 stale rows are cleaned *after* the fix lands (cleaning
-first just restarts the clock — that already happened once, on 2026-07-30, when
-149 rows were deleted without fixing the cause).
+- The atomic-claim option was rejected on purpose. It needs lease/timeout
+  machinery to survive a crashed runner — real complexity spent protecting a
+  duplicate code path that should not exist. Deleting the second executor was
+  both smaller and stronger. Prefer removing a participant to coordinating one.
+- **The fix nearly reintroduced its own bug.** The first date guard used a bare
+  `strptime`, which accepts `2026-8-5` — a string distinct from `2026-08-05`, so
+  `UNIQUE(date_str)` would not collide them and the feed would carry two
+  episodes for one day. Caught by adversarial review of the diff.
 
-**Design fork worth an oracle consult:** atomic claim
-(`UPDATE ... SET status='running' WHERE status='pending' RETURNING`) versus a
-per-feed `flock`. The claim is more correct but a crashed runner leaves a job
-stuck in `running` forever, so it needs a lease — it is **not** automatically
-the safer choice. Retry/backoff semantics must survive either way.
-
-### 2. Stop the writer silently dropping stories — `my-podcasts-a3x` (P2)
+### 1. Stop the writer silently dropping stories — `my-podcasts-a3x` (P2)
 
 **Why here:** it undermines the instrumentation everything else now depends on.
 `build_rundown_prompt` iterates `plan.themes` and takes
@@ -93,7 +92,7 @@ report a healthy `paywalled+exa` for a story the model never saw. Fixing this
 before trusting a fortnight of `run-stats.jsonl` is cheaper than distrusting the
 data later.
 
-### 3. Unify directive→article matching — `3yb` + `5m3` + `4pw` (P2/P3)
+### 2. Unify directive→article matching — `3yb` + `5m3` + `4pw` (P2/P3)
 
 **Why grouped:** one root cause, three symptoms. Levine headlines come from
 sentence extraction and can carry a double space that Gemini normalizes when it
@@ -109,20 +108,20 @@ Measured: 3 of 38 selected directives. Piece 3 already fixed the third instance
 
 Likely collapses into one helper. Check before doing them separately.
 
-### 4. Exa hardening batch — `avf` + `d8w` + `j7f` + `gz4` (P3)
+### 3. Exa hardening batch — `avf` + `d8w` + `j7f` + `gz4` (P3)
 
 **Why grouped:** all four touch `exa_client.py` or its immediate callers and
 share test surface. None is urgent alone; four separate PRs would be waste.
 Origin exclusion by registrable domain; non-daemon timeout thread; unguarded
 `read_text` + empty-slug glob; FP's ungated Exa reader.
 
-### 5. Writer robustness — `ne0` + `qd5` (P2)
+### 4. Writer robustness — `ne0` + `qd5` (P2)
 
 Malformed closing tags in `_extract_script`; FP Digest hallucinating a "thin
 news day" briefing from an empty plan. Both are "the LLM did something we didn't
 expect and we published it anyway" — same family, sensible together.
 
-### 6. Set funnel thresholds — `my-podcasts-3qs` (P3) — **calendar-gated**
+### 5. Set funnel thresholds — `my-podcasts-3qs` (P3) — **calendar-gated**
 
 Do **not** start before ~2026-08-31. Needs ~2 weeks of real `run-stats.jsonl`
 weekday history. Guessing thresholds inside a project premised on not yet having
@@ -130,7 +129,7 @@ numbers is self-refuting; `include_in_episode` measured 4-5 on ten consecutive
 runs, so any obvious rule fires on normal days. Threshold *ratios* against the
 day's stub count, never absolute counts — see the scale note below.
 
-### 7. Polish — `2sf`, `2v3`, `cqc`, `cgn` (P3/P4)
+### 6. Polish — `2sf`, `2v3`, `cqc`, `cgn` (P3/P4)
 
 Record *why* a directive resolved to nothing; surface open-access URLs in show
 notes; reconcile the funnel design doc with the rendered report; triage 111
@@ -188,3 +187,16 @@ Kept because each cost real time and each recurred.
 - **The worst outcome is a feature that looks live and delivers nothing.** This
   project has shipped that twice. When building one, ask what would make its
   absence visible, and build that at the same time.
+- **Prefer removing a participant to coordinating participants.** The
+  double-publish race had two obvious fixes (a DB claim, a file lock) and one
+  better one: delete the second executor. Coordination would have preserved a
+  duplicate code path that had already silently drifted behind its twin.
+- **Check the recovery path for the bug you just fixed.** The enqueue-only
+  change would have left the documented consumer-down procedure
+  (`publish-script`) reintroducing the duplicate, because it never closed the
+  job row. A fix is not done until the manual workaround around it is also safe.
+- **Measure the remediation, not just the fix.** "Keep the newest row" was
+  inherited guidance from a prior cleanup. Re-checking all 16 keys against the
+  live R2 objects confirmed it — but the prior measurement had a known 1-in-147
+  mismatch, so confirming took one command and assuming would have silently
+  pointed a feed entry at the wrong artifact.
