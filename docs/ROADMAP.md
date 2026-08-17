@@ -63,7 +63,7 @@ and the timer units completing in seconds rather than minutes.
 Ordered. The rationale for the order matters more than the order itself — if a
 reason stops holding, re-order.
 
-### ~~1. Fix the daily double-publish race — `my-podcasts-78b`~~ — DONE (PR #10)
+### ~~Fix the daily double-publish race — `my-podcasts-78b`~~ — DONE (PR #10)
 
 Shipped 2026-08-15. The CLI is now enqueue-only and the consumer is the single
 executor; the race is gone by construction rather than coordinated around. The
@@ -82,7 +82,7 @@ Two lessons worth keeping:
   `UNIQUE(date_str)` would not collide them and the feed would carry two
   episodes for one day. Caught by adversarial review of the diff.
 
-### ~~1. Stop the writer silently dropping stories — `a3x` + `2sf`~~ — DONE (PR #11)
+### ~~Stop the writer silently dropping stories — `a3x` + `2sf`~~ — DONE (PR #11)
 
 Shipped 2026-08-16. The two structures that had to agree (a themes list and a
 dict keyed by directive theme) are replaced by one ordered section list built in
@@ -108,26 +108,52 @@ Three lessons:
   nothing to detect it — the suite passes, the import succeeds, and the mocks
   were not autospec'd.
 
-### 1. Unify directive→article matching — `3yb` + `5m3` + `4pw` + `mr1` (P2/P3)
+### ~~Unify directive→article matching — `3yb` + `4pw` + `mr1`~~ — DONE (PR #12)
 
-**Why grouped:** one root cause, three symptoms. Levine headlines come from
-sentence extraction and can carry a double space that Gemini normalizes when it
-echoes them back; anything matching on raw headline equality loses those.
-Measured: 3 of 38 selected directives. Piece 3 already fixed the third instance
-(the Exa trigger) by matching on slug.
+Shipped 2026-08-16. One leaf resolver (`pipeline/article_resolver.py`) now owns the
+cascade — **exact headline, then _unique_ slug, nothing else** — and delivery, the
+Exa trigger, and show notes all call it.
 
-- `3yb` — the Exa trigger and the delivery resolver use *two different joins*
-  that agree today only by coincidence.
-- `5m3` — FP routing writes an empty url/snippet on a miss.
-- `4pw` — `_slugify` is duplicated byte-identically in two modules; drift would
-  silently orphan every enrichment file.
+The word-overlap tier is deleted rather than thresholded, because measurement showed
+a threshold cannot work: a *wrong* article scored ≥1 query word in **50 of 54** real
+directives and **tied the correct one at a perfect 4/4** in one case. Replay against
+real work dirs found the tier actively binding directives to unrelated articles —
+17.6 KB of a Mets ETF story under "Trade tensions mount ahead of Trump-Xi summit".
+All four instances were `include_in_episode=False`, so nothing shipped wrong; the
+81 directives that *do* ship resolved identically before and after.
 
-- `mr1` — the word-overlap fallback accepts `best_score > 0`, so a single shared
-  common word can bind a directive to the wrong article. That text then anchors
-  the section as the *primary* source, which the append-don't-replace protection
-  does not cover. Measure the score distribution before choosing a threshold.
+Four lessons:
 
-Likely collapses into one helper. Check before doing them separately.
+- **A statistical fix can be unavailable, not just imperfect.** The bead proposed a
+  minimum-score threshold. The distributions overlap at the top — a tie at a perfect
+  score — so no threshold exists. Measuring the *separation* between right and wrong
+  candidates, not just the hit rate, is what revealed that.
+- **Ask when a fallback runs, not just how often it's wrong.** This one only ran when
+  the earlier tiers missed, and a main cause of that is the correct article being
+  absent entirely — where "best match above zero" is *guaranteed* wrong. A tier's
+  worst regime is the one it exists for.
+- **Fix a defect everywhere it lives, in the same change.** Delivery was fixed and the
+  identical coin-flip was left in show notes — then documented as "agrees by
+  construction." Review caught it. Grep for the shape, not the symptom.
+- **A mutation that doesn't bite is a finding.** Removing the anchoring regex broke no
+  test, because the narrowed glob already covered the tested case. The regex was still
+  load-bearing for a different filename shape, which now has its own test.
+
+### 1. FP routing gets empty URLs — `5m3` (P3) — **premise corrected**
+
+PR2 of the join work, deliberately split out: it changes **another podcast's input**.
+
+The bead says exact-headline matching loses ~8% of links to a whitespace quirk.
+Measurement says otherwise: **all 12** routed links on disk have an empty `url`
+(100%), because **16/16** FP-flagged directives are Semafor while the join searches
+the Levine-only `articles` list. The bead's one-line slug fix would not have fixed it.
+Resolve through `headline_index` (which spans all sources) and read the `URL:` header —
+`article_resolver.extract_url` already ships, unused, for this.
+
+Two hazards to handle in that PR: routed links are labelled `levine-routed`
+(`fp_collector.py:232,342`), already wrong for 16/16; and filling in URLs enables a
+dedup that empty URLs silently disabled, so a `Routing: both` Semafor article could
+arrive twice in one run.
 
 ### 2. Exa hardening batch — `avf` + `d8w` + `j7f` + `gz4` (P3)
 
@@ -220,6 +246,13 @@ Kept because each cost real time and each recurred.
   change would have left the documented consumer-down procedure
   (`publish-script`) reintroducing the duplicate, because it never closed the
   job row. A fix is not done until the manual workaround around it is also safe.
+- **Measure the separation, not just the rate.** A matcher's hit rate says nothing
+  about whether a threshold can save it. The word-overlap tier was killed by
+  scoring the best *wrong* candidate per directive and finding it tied the right
+  one at a perfect score — a question the hit rate could never have answered.
+- **A mutation that fails to bite is a finding, not a formality.** Twice now the
+  honest report of "I broke it and no test failed" located a real gap: once a
+  missing test, once a fact about the code nobody knew.
 - **Verify a bead ID before writing it into anything durable.** Two IDs in this
   file (and in a merged PR description) were invented from memory rather than
   read back from `bd`, and pointed at nothing. `bd create` prints the id —
