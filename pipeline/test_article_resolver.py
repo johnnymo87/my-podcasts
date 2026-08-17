@@ -78,3 +78,12 @@ def test_empty_slug_headline_does_not_match_anything():
     # Both slugify to "". Matching on an empty slug would pair arbitrary
     # punctuation-only headlines with each other.
     assert resolve_headline("???", index) == (None, "index_no_match")
+
+
+def test_r2_key_slugify_family_is_deliberately_different():
+    """Pin the difference so nobody 'helpfully' unifies all seven copies."""
+    from pipeline.article_resolver import slugify
+    from pipeline.script_processor import _slugify as r2_slugify
+
+    assert slugify("Beyoncé Tour") == "beyoncé-tour"
+    assert r2_slugify("Beyoncé Tour") == "beyonc-tour"

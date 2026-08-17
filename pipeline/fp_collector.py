@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import requests
 import trafilatura
 
+from pipeline.article_resolver import slugify as _slugify
 from pipeline.exa_client import search_related
 from pipeline.fp_editor import generate_fp_research_plan
 from pipeline.freshness import (
@@ -16,15 +17,6 @@ from pipeline.freshness import (
     format_coverage_ledger,
 )
 from pipeline.rss_sources import categorize_semafor_article
-
-
-def _slugify(text: str) -> str:
-    """Create a safe filename slug from a headline."""
-    safe = "".join(c if c.isalnum() else "-" for c in text.lower())
-    # condense multiple dashes
-    while "--" in safe:
-        safe = safe.replace("--", "-")
-    return safe.strip("-")[:50]
 
 
 def _extract_article_text(url: str) -> str:

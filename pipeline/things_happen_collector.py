@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from pipeline.article_fetcher import fetch_all_articles
+from pipeline.article_resolver import slugify as _slugify
 from pipeline.exa_client import exa_file_path, search_related_status
 from pipeline.freshness import (
     annotate_headlines,
@@ -52,15 +53,6 @@ def _host_banned(url: str, origin: str) -> bool:
     if origin and (host == origin or host.endswith("." + origin)):
         return True
     return any(host == b or host.endswith("." + b) for b in BYPASS_DOMAINS)
-
-
-def _slugify(text: str) -> str:
-    """Create a safe filename slug from a headline."""
-    safe = "".join(c if c.isalnum() else "-" for c in text.lower())
-    # condense multiple dashes
-    while "--" in safe:
-        safe = safe.replace("--", "-")
-    return safe.strip("-")[:50]
 
 
 def collect_all_artifacts(

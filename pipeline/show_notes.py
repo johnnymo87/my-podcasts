@@ -4,18 +4,11 @@ import json
 import logging
 from pathlib import Path
 
+from pipeline.article_resolver import slugify as _slugify
 from pipeline.exa_client import exa_file_path, exa_text_if_hit
 
 
 logger = logging.getLogger(__name__)
-
-
-def _slugify(text: str) -> str:
-    """Create a safe filename slug from a headline."""
-    safe = "".join(c if c.isalnum() else "-" for c in text.lower())
-    while "--" in safe:
-        safe = safe.replace("--", "-")
-    return safe.strip("-")[:50]
 
 
 def _extract_url_from_article(path: Path) -> str | None:

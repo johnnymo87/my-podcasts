@@ -8,6 +8,7 @@ from pathlib import Path
 
 import trafilatura
 
+from pipeline.article_resolver import slugify as _slugify
 from pipeline.rss_sources import fetch_feed
 
 
@@ -15,13 +16,6 @@ _ZVI_FEED_URL = "https://thezvi.substack.com/feed"
 _ROUNDUP_RE = re.compile(r"AI\s*#\d+", re.IGNORECASE)
 _H4_SPLIT_RE = re.compile(r"<h4[^>]*>(.*?)</h4>", re.DOTALL | re.IGNORECASE)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
-
-
-def _slugify(text: str) -> str:
-    safe = "".join(c if c.isalnum() else "-" for c in text.lower())
-    while "--" in safe:
-        safe = safe.replace("--", "-")
-    return safe.strip("-")[:50]
 
 
 def _strip_html(html: str) -> str:
