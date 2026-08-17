@@ -206,6 +206,17 @@ mypy errors and make the step blocking.
 Details live in `bd remember` (`bd remember --list`); these are the ones whose
 loss would cause an actively wrong decision.
 
+- **A restart can fail for reasons unrelated to your change, and the service's
+  ExecStartPre reaches the network.** On 2026-08-17 a routine deploy restart put
+  the consumer in a 40-minute restart loop: the Nix `ExecStartPre` runs
+  `nltk.download('punkt_tab')` on *every* start, `raw.githubusercontent.com` was
+  unreachable (host IPv6 egress down, plus GitHub rate limiting that the restart
+  loop itself sustained), and start-pre blocked past the 90s timeout — for data
+  already on local disk. Mitigated by a drop-in at
+  `/run/systemd/system/my-podcasts-consumer.service.d/`, **which is cleared on
+  reboot** (`/etc` is read-only on NixOS). See `my-podcasts-2h7`; the permanent
+  fix is in the workstation Nix definition. If a restart hangs, check
+  `journalctl` for start-pre before suspecting your own commit.
 - **Deploy is a restart.** `my-podcasts-consumer` runs `uv run python -m
   pipeline consume` against the **live working tree** as a long-lived loop with
   `Restart=on-failure`. Merging to `main` does **not** deploy. Every
