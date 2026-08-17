@@ -242,8 +242,21 @@ Two rules follow, and both are enforced in code:
 for resolution — into `writer_inputs.json` and the funnel's
 `(N w/ shadow)` count. It exists because the corpus (10 work dirs) proved exact+slug
 *sufficient over 10 days* but cannot bound how often the editor reformulates a
-headline by **word substitution**; all three observed reformulations were
-whitespace-only, which slug matching absorbs.
+headline by **word substitution**.
+
+**Word substitution is confirmed to happen — do not repeat the claim that it doesn't.**
+Within hours of shipping the resolver, an FP Digest dry run produced a directive
+reading `Nearly 4 million Afghan children...` against an article titled
+`Nearly Four Million Afghan Children...`. Slugs `nearly-4-million-...` vs
+`nearly-four-million-...` do not match, so the story resolved to nothing even though
+its file was sitting on disk. Numerals versus spelled-out numbers is a *systematic*
+reformulation, not a fluke, and slug matching cannot absorb it.
+
+That instance was **pre-existing and unrelated to the resolver change** — verified by
+running the identical work dir against the pre-change commit, which missed it too
+(FP has no `headline_index.json`, so no index tier ran in either version). It is
+recorded here as the first concrete evidence for the escalation question, not as a
+regression.
 
 **Read the shadow log carefully — a non-zero score is NOT evidence to restore fuzzy
 matching.** The dominant miss cause is the correct article being absent from the
