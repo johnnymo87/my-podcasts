@@ -4,6 +4,7 @@ import json
 import logging
 from pathlib import Path
 
+from pipeline.article_resolver import load_index, resolve_headline
 from pipeline.article_resolver import slugify as _slugify
 from pipeline.exa_client import exa_file_path, exa_text_if_hit
 
@@ -28,12 +29,35 @@ def _extract_url_from_article(path: Path) -> str | None:
 def _find_article_file(headline: str, source: str, work_dir: Path) -> Path | None:
     """Find the article file matching a directive headline.
 
-    Uses the same search logic as the consumer's _find_article_text and
-    __main__.find_rundown_article_source functions.
+    Resolves through the same shared join __main__.find_rundown_article_source
+    uses (pipeline.article_resolver.resolve_headline against
+    headline_index.json: exact match, then unique slug) before falling back
+    to the filesystem search below. Without this, trigger and delivery could
+    agree while show notes silently disagreed on which file a headline
+    means -- the same bug class bead 3yb fixed one layer up.
+
+    The filesystem search is PERMANENT, not legacy: fp_collector writes no
+    headline_index.json at all, so for every FP Digest work dir this is the
+    ONLY path (see exa_client.py:136 for the sibling comment pinning this
+    same permanence on the Exa reader side). It also covers a Rundown
+    headline the index exists but does not resolve (miss, not just
+    index-absence) and an index entry whose file has since gone missing.
     """
     slug = _slugify(headline)
     if not slug:
         return None
+
+    # --- Index-based lookup (handles editor headline reformulation) ---
+    index = load_index(work_dir)
+    if index is not None:
+        rel_path, _reason = resolve_headline(headline, index)
+        if rel_path is not None:
+            candidate = work_dir / rel_path
+            if candidate.exists():
+                return candidate
+            # Index points at a file that is gone: fall through to the
+            # filesystem search below rather than reporting a hit we cannot
+            # read.
 
     # Flat Levine-style articles (e.g. "00-headline.md")
     articles_dir = work_dir / "articles"
