@@ -50,11 +50,17 @@ Work in a fresh worktree (`.worktrees/<name>`), never in the shared checkout.
 | Piece 4 | `78b` | #10 | Enqueue-only daily CLI — stops the double-publish |
 | Piece 5 | `a3x`, `2sf` | #11 | Writer prompt built from ordered sections |
 
-**Pending verification:** the first production run exercising Pieces 1-4 is the
-next weekday 04:30 ET run. A self-wake is scheduled for 2026-08-17 ~06:00 ET.
-`/persist/my-podcasts/run-stats.jsonl` did not exist as of 2026-08-15. On that
-run expect **exactly one** episodes row per feed, a funnel report in Telegram,
-and the timer units completing in seconds rather than minutes.
+**Verified in production 2026-08-17** (Monday 04:30 ET, the first weekday run on
+all five pieces): exactly **one** episode row per feed, **0** duplicated `r2_key`s
+overall, timer units completing in **3-4 seconds** (enqueue-only holds), funnel
+`0 dropped` with no miss reasons and 0 shadow hits, 6/6 selected stories delivered
+with text, and the first line ever written to `/persist/my-podcasts/run-stats.jsonl`.
+No traceback in the journal. Both feeds serve the new episode (116/117 items,
+matching the DB).
+
+**Open-access substitution (`85c`) remains unmeasured**, correctly: the run had
+**zero** Levine stubs, so `EXA 0 flagged` was arithmetically right and the day
+carries no evidence either way. See the Monday note below.
 
 ---
 
@@ -206,6 +212,19 @@ loss would cause an actively wrong decision.
   intermediate commit must be independently safe; an import error is a
   crash-loop. Check `pending_the_rundown`/`pending_fp_digest` in
   `/persist/my-podcasts/state.sqlite3` before restarting.
+- **Mondays have no Levine content, structurally.** Money Stuff publishes
+  **Mon-Thu only** (verified across three consecutive weeks of cache files). A
+  Monday's adaptive lookback is 4 days — Fri/Sat/Sun/Mon — which contains no
+  edition, and Monday's own arrives after 04:30. Thursday's was consumed by
+  Friday's episode, so nothing is lost, but a Monday funnel legitimately reads
+  `levine 0` / `EXA 0 flagged`. Never diagnose a broken trigger from a Monday.
+  It also means the two weeks of history `3qs` needs is two weeks of **Tue-Fri**.
+- **`episodes.pub_date` is RFC822, not ISO** (`Mon, 17 Aug 2026 08:37:39 +0000`).
+  `WHERE pub_date LIKE '2026-08-17%'` matches nothing and silently reports zero
+  episodes for a day that shipped fine — this exact query, in a wake payload,
+  briefly looked like a total publish failure. Count with
+  `date(created_at)='YYYY-MM-DD'`. A verification query is an instrument; check it
+  returns the right shape on a known-good day before trusting a zero from it.
 - **Scale of the open-access feature.** It upgrades **~1.2 of ~4.75 selected
   stories per episode** (per-run stubs `[0,1,0,3,1,2,1,2]`). The widely-quoted
   "93% stub rate" is per *Levine file*, and most Levine files are never
