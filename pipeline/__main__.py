@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -31,8 +32,8 @@ def find_rundown_article_source(
 
     Searches (in order):
     1. headline_index.json — exact match on original headline
-    2. headline_index.json — best word-overlap match for the directive's source
-    3. Slug-based file matching (legacy fallback)
+    2. headline_index.json — unique slug match (absorbs reformulation)
+    3. Legacy filesystem matching (flat Levine, Semafor, Zvi)
     4. Exa enrichment by slug
 
     Returns (text, source_path, miss_reason). source_path is None on a
@@ -49,11 +50,24 @@ def find_rundown_article_source(
     what miss_reason describes:
     - "no_index": headline_index.json did not exist.
     - "index_unreadable": it existed but failed to parse.
-    - "index_no_overlap": it parsed, but neither the exact-match nor the
-      word-overlap lookup found a hit.
+    - "index_no_match": it parsed, but neither the exact-match nor the
+      unique-slug lookup found a hit.
+    - "slug_ambiguous": more than one indexed headline shares the
+      directive's slug; refusing to guess ends the cascade immediately
+      (see the elif below) rather than letting a filesystem tier pick one.
+
+    There is deliberately no word-overlap tier. Measured against real data,
+    a *wrong* article scored at least one query word in 50 of 54 cases and
+    tied the correct article at a perfect score in one, so no threshold
+    could separate them -- while exact+slug already covered 54/54. Article
+    text is fed verbatim to the writer and published unread, so a miss
+    (observable, degrades the section) is strictly preferable to a wrong
+    match (invisible, fabricates confidently). See
+    pipeline/article_resolver.py:resolve_headline for the shared cascade.
     """
     import json as _json
 
+    from pipeline.article_resolver import resolve_headline
     from pipeline.exa_client import exa_file_path, exa_result_sections
     from pipeline.things_happen_collector import _slugify
 
@@ -68,54 +82,43 @@ def find_rundown_article_source(
         try:
             index = _json.loads(index_path.read_text(encoding="utf-8"))
             # Valid JSON of the wrong shape (e.g. a list) would otherwise reach
-            # index.items() below and raise AttributeError mid-job, wedging the
-            # job into retry backoff rather than degrading to the fallbacks.
+            # resolve_headline's index.items() below and raise AttributeError
+            # mid-job, wedging the job into retry backoff rather than
+            # degrading to the fallbacks.
             if not isinstance(index, dict):
                 raise ValueError("headline_index.json is not an object")
-            miss_reason = "index_no_overlap"
         except Exception:
-            index = {}
-            miss_reason = "index_unreadable"
-
-        # Exact match
-        if headline in index:
-            rel_path = index[headline]
-            fpath = work_dir / rel_path
-            if fpath.exists():
-                return fpath.read_text(encoding="utf-8"), rel_path, None
-
-        # Word-overlap match: pick the file whose content best matches
-        # the directive headline. The editor reformulates headlines, but
-        # the rewritten version always draws words from the source article.
-        if index:
-            query_words = {
-                w.lower()
-                for w in headline.split()
-                if len(w) > 3  # skip short words
-            }
-            if query_words:
-                best_score = 0
-                best_path: str | None = None
-                for _orig_headline, rel_path in index.items():
-                    fpath = work_dir / rel_path
-                    if not fpath.exists():
-                        continue
-                    content = fpath.read_text(encoding="utf-8")
-                    content_lower = content.lower()
-                    score = sum(1 for w in query_words if w in content_lower)
-                    if score > best_score:
-                        best_score = score
-                        best_path = rel_path
-                if best_path and best_score > 0:
-                    fpath = work_dir / best_path
-                    return fpath.read_text(encoding="utf-8"), best_path, None
+            index, miss_reason = {}, "index_unreadable"
+        else:
+            rel_path, miss_reason = resolve_headline(headline, index)
+            if rel_path is not None:
+                fpath = work_dir / rel_path
+                if fpath.exists():
+                    return fpath.read_text(encoding="utf-8"), rel_path, None
+                # Index points at a file that is gone: fall through to the
+                # filesystem tiers rather than reporting a hit we cannot read.
+                miss_reason = "index_no_match"
+            elif miss_reason == "slug_ambiguous":
+                # Refusing to guess is the whole point of the uniqueness
+                # check, and the filesystem tiers below would immediately
+                # undo it: two Levine files whose headlines share a 50-char
+                # slug BOTH match the anchored glob, and it returns the
+                # first. Stop here.
+                return "", None, miss_reason
 
     # --- Legacy slug-based fallback ---
-    # Flat Levine articles (e.g. "00-headline.md")
+    # Flat Levine articles are written as "{NN}-{slug}.md"
+    # (things_happen_collector.py:143). A bare glob(f"*{slug}.md") is a
+    # SUFFIX match -- slug "ai" matches "00-openai.md" -- so match the real
+    # shape. This also fixes an empty-slug catastrophe: a punctuation-only
+    # headline slugifies to "", turning the old pattern into glob("*.md"),
+    # which matched ANY flat article.
     articles_dir = work_dir / "articles"
     if articles_dir.exists():
-        for match in articles_dir.glob(f"*{slug}.md"):
-            if match.parent == articles_dir:  # Only top-level, not subdirs
+        for match in sorted(articles_dir.glob(f"*-{slug}.md")):
+            if match.parent != articles_dir:  # Only top-level, not subdirs
+                continue
+            if re.fullmatch(rf"\d+-{re.escape(slug)}\.md", match.name):
                 return (
                     match.read_text(encoding="utf-8"),
                     str(match.relative_to(work_dir)),
@@ -131,10 +134,15 @@ def find_rundown_article_source(
             None,
         )
 
-    # Zvi articles
+    # Zvi articles. Filenames are "{date}-{post_slug}-{section_slug}.md", so
+    # matching is a substring test on BOTH sides and cannot be anchored to
+    # an exact name. Refuse rather than pick arbitrarily when more than one
+    # file matches -- same principle as the slug tier above.
     zvi_dir = work_dir / "articles" / "zvi"
     if zvi_dir.exists():
-        for match in zvi_dir.glob(f"*{slug}*.md"):
+        zvi_matches = sorted(zvi_dir.glob(f"*{slug}*.md"))
+        if len(zvi_matches) == 1:
+            match = zvi_matches[0]
             return (
                 match.read_text(encoding="utf-8"),
                 str(match.relative_to(work_dir)),

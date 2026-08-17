@@ -343,14 +343,14 @@ def _assemble_writer_inputs(
             continue
         text, src, miss_reason = find_rundown_article_source(directive, work_dir)
 
-        # A stub always wins the word-overlap match ahead of Exa (it IS the
-        # headline text, so it shares words with the directive by
-        # construction), so retrieved open-access text never reaches the
-        # writer on its own. Append it here. Never replace: with a fully
-        # automated writer and no human review, replacing a stub with a
-        # wrong-story article would make the writer confidently narrate a
-        # false story under a true headline -- appending leaves the true
-        # headline anchoring the section, so a mismatch degrades instead.
+        # A stub is resolved by the exact/slug match ahead of the Exa tier
+        # (find_rundown_article_source's cascade below), so retrieved
+        # open-access text never stands alone -- it is appended here.
+        # Never replace: with a fully automated writer and no human review,
+        # replacing a stub with a wrong-story article would make the writer
+        # confidently narrate a false story under a true headline --
+        # appending leaves the true headline anchoring the section, so a
+        # mismatch degrades instead.
         exa_extra = ""
         if src is not None and not src.startswith("enrichment/exa/"):
             exa_extra = exa_result_sections(work_dir, _th_slugify(directive.headline))
@@ -367,8 +367,8 @@ def _assemble_writer_inputs(
         # that has text, this goes False and the funnel says so.
         # miss_reason is None on a hit; see find_rundown_article_source's
         # docstring for the taxonomy (no_index / index_unreadable /
-        # index_no_overlap) and why the cascade only supports one reason
-        # per miss, not a reason per lookup stage.
+        # index_no_match / slug_ambiguous) and why the cascade only
+        # supports one reason per miss, not a reason per lookup stage.
         writer_inputs.append(
             {
                 "headline": directive.headline,

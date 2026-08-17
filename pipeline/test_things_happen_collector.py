@@ -607,7 +607,93 @@ def test_find_rundown_article_source_no_false_match(tmp_path):
     text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
     assert text == ""
     assert path is None
-    assert reason == "index_no_overlap"
+    assert reason == "index_no_match"
+
+
+def test_word_overlap_no_longer_binds_a_partially_matching_article(tmp_path):
+    """A wrong article sharing common words must NOT be returned (bead mr1)."""
+    articles = tmp_path / "articles"
+    articles.mkdir(parents=True)
+    (articles / "00-trade.md").write_text(
+        "# China trade deal talks\n\nURL: https://x.com/a\n\n"
+        "Beijing and Washington discussed tariffs on Tuesday."
+    )
+    index = {"China trade deal talks": "articles/00-trade.md"}
+    (tmp_path / "headline_index.json").write_text(json.dumps(index))
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class D:
+        headline = "China launches lunar probe mission"  # shares only "china"
+        source = "levine"
+
+    text, path, reason = find_rundown_article_source(D(), tmp_path)
+    assert text == ""
+    assert path is None
+    assert reason == "index_no_match"
+
+
+def test_legacy_glob_is_anchored_not_suffix_matched(tmp_path):
+    """Slug 'ai' must not match '00-openai.md' (fnmatch confirms it would)."""
+    articles = tmp_path / "articles"
+    articles.mkdir(parents=True)
+    (articles / "00-openai.md").write_text(
+        "# OpenAI ships a model\n\nURL: https://x.com/o\n\nbody"
+    )
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class D:
+        headline = "AI"
+        source = "levine"
+
+    text, path, reason = find_rundown_article_source(D(), tmp_path)
+    assert path is None
+    assert reason == "no_index"
+
+
+def test_ambiguous_slug_does_not_fall_through_to_the_filesystem(tmp_path):
+    """Refusing to guess must not be undone by the glob tier picking sorted()[0]."""
+    long = "A" * 60
+    articles = tmp_path / "articles"
+    articles.mkdir(parents=True)
+    slug = "a" * 50
+    (articles / f"00-{slug}.md").write_text("# one\n\nURL: https://x/1\n\nbody one")
+    (articles / f"01-{slug}.md").write_text("# two\n\nURL: https://x/2\n\nbody two")
+    index = {
+        long + " one": f"articles/00-{slug}.md",
+        long + " two": f"articles/01-{slug}.md",
+    }
+    (tmp_path / "headline_index.json").write_text(json.dumps(index))
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class D:
+        headline = long + " three"
+        source = "levine"
+
+    assert find_rundown_article_source(D(), tmp_path) == ("", None, "slug_ambiguous")
+
+
+def test_zvi_glob_refuses_ambiguous_substring_matches(tmp_path):
+    """The Zvi tier substring-matches BOTH sides; two hits must be a miss, not sorted()[0]."""
+    zvi = tmp_path / "articles" / "zvi"
+    zvi.mkdir(parents=True)
+    (zvi / "2026-01-01-post-ai-safety.md").write_text(
+        "# a\n\nURL: https://z/1\n\nbody a"
+    )
+    (zvi / "2026-01-02-post-ai-safety-extra.md").write_text(
+        "# b\n\nURL: https://z/2\n\nbody b"
+    )
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class D:
+        headline = "AI Safety"
+        source = "zvi"
+
+    text, path, reason = find_rundown_article_source(D(), tmp_path)
+    assert path is None
 
 
 def test_find_rundown_article_source_exa_headerless_file_no_longer_surfaced(tmp_path):
@@ -672,8 +758,15 @@ def test_find_rundown_article_source_reports_path_on_exact_match(tmp_path):
     assert reason is None
 
 
-def test_find_rundown_article_source_reports_path_on_word_overlap_match(tmp_path):
-    """Word-overlap index match (return site 2) reports the resolved path."""
+def test_find_rundown_article_source_reports_path_on_unique_slug_match(tmp_path):
+    """Unique-slug index match (return site 2) reports the resolved path.
+
+    Was test_find_rundown_article_source_reports_path_on_word_overlap_match,
+    pinning the now-deleted word-overlap tier (bead mr1). Converted to
+    exercise the slug tier instead: a non-exact index hit -- the editor's
+    directive headline is reformulated punctuation, same slug -- must still
+    report its resolved path.
+    """
     articles_dir = tmp_path / "articles" / "zvi"
     articles_dir.mkdir(parents=True)
     zvi_file = articles_dir / "2026-03-19-chip-city.md"
@@ -683,14 +776,15 @@ def test_find_rundown_article_source_reports_path_on_word_overlap_match(tmp_path
         "The company announced plans for inference workloads."
     )
 
-    index = {"Chip City": "articles/zvi/2026-03-19-chip-city.md"}
+    # Index key and directive headline differ only in trailing punctuation,
+    # so they slugify identically without being an exact string match.
+    index = {"Nvidia announces new AI chip!": "articles/zvi/2026-03-19-chip-city.md"}
     (tmp_path / "headline_index.json").write_text(json.dumps(index))
 
     from pipeline.__main__ import find_rundown_article_source
 
     class FakeDirective:
-        # Editor reformulated "Chip City" into a descriptive headline
-        headline = "Nvidia to spend $26 billion to build open weight AI models"
+        headline = "Nvidia announces new AI chip"
         source = "zvi"
 
     text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
@@ -858,7 +952,7 @@ def test_miss_reason_index_unreadable(tmp_path):
 
 
 def test_miss_reason_index_no_overlap(tmp_path):
-    """Index parses fine but no exact/word-overlap hit -> 'index_no_overlap'.
+    """Index parses fine but no exact/slug hit -> 'index_no_match'.
 
     All the legacy slug and Exa fallbacks below the index lookup also miss
     here (no article files, no Exa file exist), because the lookups
@@ -883,7 +977,7 @@ def test_miss_reason_index_no_overlap(tmp_path):
     text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
     assert text == ""
     assert path is None
-    assert reason == "index_no_overlap"
+    assert reason == "index_no_match"
 
 
 def test_hit_records_no_miss_reason(tmp_path):
@@ -1220,8 +1314,8 @@ def test_exa_reader_e2e_fallback_matches_writer(tmp_path, monkeypatch):
     assert text_after_removal == ""
     # The collector wrote a real headline_index.json above (populated by the
     # bakery article), so once the Exa file is gone this directive misses
-    # with the index present but no overlap -- not "no_index".
-    assert reason_after_removal == "index_no_overlap"
+    # with the index present but no exact/slug hit -- not "no_index".
+    assert reason_after_removal == "index_no_match"
 
 
 def test_collector_works_without_levine_links(tmp_path, monkeypatch):
