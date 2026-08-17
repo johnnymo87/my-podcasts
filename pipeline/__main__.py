@@ -67,7 +67,7 @@ def find_rundown_article_source(
     """
     import json as _json
 
-    from pipeline.article_resolver import resolve_headline
+    from pipeline.article_resolver import DIRECT_EXA_HEADING, resolve_headline
     from pipeline.exa_client import exa_file_path, exa_result_sections
     from pipeline.things_happen_collector import _slugify
 
@@ -149,11 +149,17 @@ def find_rundown_article_source(
                 None,
             )
 
-    # Exa enrichment
+    # Exa enrichment. Reached with no stub above it -- neither the index nor
+    # any legacy filesystem tier resolved this directive -- so, unlike the
+    # append-to-stub path in consumer._assemble_writer_inputs, there is no
+    # true headline anchoring the section. Frame it as third-party coverage
+    # rather than handing it to the writer as if it were the primary
+    # article; see article_resolver.DIRECT_EXA_HEADING.
     exa_text = exa_result_sections(work_dir, slug)
     if exa_text:
         exa_path = exa_file_path(work_dir, slug)
-        return exa_text, str(exa_path.relative_to(work_dir)), None
+        framed_text = f"{DIRECT_EXA_HEADING}\n\n{exa_text}"
+        return framed_text, str(exa_path.relative_to(work_dir)), None
 
     return "", None, miss_reason
 

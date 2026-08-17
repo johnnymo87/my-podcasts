@@ -879,6 +879,39 @@ def test_find_rundown_article_source_reports_path_on_exa_hit(tmp_path):
     assert reason is None
 
 
+def test_direct_exa_hit_is_framed_as_third_party_coverage(tmp_path):
+    """A direct-Exa resolution (no stub above it) must be framed, not handed
+    to the writer as if it were the primary article (bead mr1 follow-up).
+
+    Uses the shared framing vocabulary from article_resolver.DIRECT_EXA_HEADING
+    -- the same terms consumer._OPEN_ACCESS_HEADING uses when appending to a
+    stub, adapted for the no-stub case -- so there is exactly one framing
+    vocabulary in the codebase, not two independently-worded ones.
+    """
+    from pipeline.__main__ import find_rundown_article_source
+    from pipeline.article_resolver import DIRECT_EXA_HEADING
+
+    exa_dir = tmp_path / "enrichment" / "exa"
+    exa_dir.mkdir(parents=True)
+    slug = _slugify("Direct Exa Only Story")
+    exa_file = exa_dir / f"{slug}.md"
+    exa_file.write_text(
+        "# Exa Results for: Direct Exa Only Story\nResult: hit\nQuery: q\n\n"
+        "## [Direct Exa Only Story](https://example.com/story)\n"
+        "Third-party text recovered via search.\n\n"
+    )
+
+    class FakeDirective:
+        headline = "Direct Exa Only Story"
+        source = "levine"
+
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert text.startswith(DIRECT_EXA_HEADING)
+    assert "Third-party text recovered via search." in text
+    assert path == f"enrichment/exa/{slug}.md"
+    assert reason is None
+
+
 def test_find_rundown_article_source_exa_gated_miss_returns_none(tmp_path):
     """The Exa gate rejecting a `Result: empty` stub (site 6, miss branch) must
     fall through to the final miss (site 7): no text, no path -- not the path

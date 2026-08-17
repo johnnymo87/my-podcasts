@@ -13,6 +13,36 @@ from __future__ import annotations
 _URL_HEADER_LINES = 8
 
 
+# Framing matters: this text is retrieved by keyword search and is not
+# guaranteed to cover the same story. Telling the writer that is the cheap
+# mitigation for a wrong-story match in a pipeline with no human review.
+#
+# Lives here (a leaf module, imported by both consumer.py and __main__.py)
+# rather than in consumer.py, where it originated: __main__.py's direct-Exa
+# tier needs the same vocabulary and cannot import consumer without a cycle
+# (consumer lazily imports __main__ already). consumer._OPEN_ACCESS_HEADING
+# re-exports this so existing references keep working.
+OPEN_ACCESS_HEADING = (
+    "## Related coverage from other outlets\n"
+    "(Retrieved by search. Use only the parts that clearly describe the "
+    "story in the headline above; ignore anything that does not match.)"
+)
+
+# Used when there is no stub above the retrieved text at all -- the direct-
+# Exa tier in __main__.find_rundown_article_source, reached when neither the
+# index nor any legacy filesystem tier resolved the directive. Same framing
+# vocabulary as OPEN_ACCESS_HEADING (outlets / retrieved by search / match
+# the headline), adapted to say plainly that no original article text was
+# available, since there is no true-headline stub anchoring the section here.
+DIRECT_EXA_HEADING = (
+    "## Third-party coverage retrieved by search\n"
+    "(No original article text was available for this story. The following "
+    "is third-party coverage from other outlets, retrieved by search. Use "
+    "only the parts that clearly describe the story in the headline above; "
+    "ignore anything that does not match.)"
+)
+
+
 def slugify(text: str) -> str:
     """Create a safe filename slug from a headline.
 

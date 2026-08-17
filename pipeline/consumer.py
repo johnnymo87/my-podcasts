@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import requests
 
+from pipeline.article_resolver import OPEN_ACCESS_HEADING as _OPEN_ACCESS_HEADING
 from pipeline.fp_collector import _slugify, collect_fp_artifacts
 from pipeline.fp_editor import FPResearchPlan
 from pipeline.fp_processor import process_fp_digest_job
@@ -23,16 +24,6 @@ if TYPE_CHECKING:
     from pipeline.db import StateStore
     from pipeline.r2 import R2Client
     from pipeline.things_happen_editor import RundownResearchPlan
-
-
-# Framing matters: this text is retrieved by keyword search and is not
-# guaranteed to cover the same story. Telling the writer that is the cheap
-# mitigation for a wrong-story match in a pipeline with no human review.
-_OPEN_ACCESS_HEADING = (
-    "## Related coverage from other outlets\n"
-    "(Retrieved by search. Use only the parts that clearly describe the "
-    "story in the headline above; ignore anything that does not match.)"
-)
 
 _BLOG_POLL_INTERVAL = 6 * 3600  # 6 hours
 _last_blog_poll = 0.0
