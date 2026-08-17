@@ -67,6 +67,7 @@ Quick start and navigation for humans and coding agents.
 - Email ingest worker: `workers/email-ingest/`
 - Podcast serving worker: `workers/podcast-serve/`
 - The Rundown pipeline: `pipeline/rundown_writer.py` (script generator), `pipeline/exa_client.py` (Exa wrapper)
+- Directive→article matching (Rundown): `pipeline/article_resolver.py` (shared cascade + slugify), used by `pipeline/__main__.py:find_rundown_article_source`, `pipeline/things_happen_collector.py` (Exa trigger), and `pipeline/show_notes.py`
 - ChinaTalk transcript report path: `pipeline/transcript_detect.py` (shared detector), `pipeline/chinatalk_writer.py`, `pipeline/chinatalk_report.py` (called from `pipeline/processor.py`)
 - One-off episodes (source adapters): `pipeline/sources.py` (adapter registry + dispatch), `pipeline/document.py` (`Document` model), `pipeline/substack.py` (Substack API ingest + HTML normalization), `pipeline/arxiv.py` (arXiv paper adapter), `pipeline/report_writer.py` (style-keyed report writer)
 
@@ -169,9 +170,9 @@ report cannot confirm or refute whether this feature is working; only a
 week of `run-stats.jsonl` history can.
 
 Each `writer_inputs.json` entry also carries `reached_prompt` (bool) and
-`miss_reason` (`no_index` / `index_unreadable` / `index_no_overlap`, or `None` on a
-hit — see `find_rundown_article_source`'s docstring for why a miss has exactly one
-reason, not one per lookup stage it cascades through). `reached_prompt` is derived
+`miss_reason` (`no_index` / `index_unreadable` / `index_no_match` / `slug_ambiguous`,
+or `None` on a hit — see `find_rundown_article_source`'s docstring for why a miss has
+exactly one reason, not one per lookup stage it cascades through). `reached_prompt` is derived
 from whether the directive's theme survived into the section list that
 `_assemble_writer_inputs` built — deliberately not from `bool(text)`, which would be
 tautological against `chars` and could never catch section assembly dropping a story.
@@ -186,6 +187,78 @@ bracketed `[misses: reason N, ...]` on the same line is the `miss_reason` histog
 shown only when non-empty. Both fields are backward-compatible: historical
 `writer_inputs.json` files predate them, and a missing key is treated as "unknown,"
 never as `False` — so old work dirs never false-alarm on the new canary.
+
+**Trending misses across the rename:** `run-stats.jsonl` lines written before
+2026-08-17 carry the retired reason `index_no_overlap`; later lines carry
+`index_no_match`. Union them when trending, or a chart will show one reason
+vanishing and another appearing on the same day for no real reason.
+
+## Directive→article matching
+
+One resolver decides which article file a directive from the editor's `plan.json`
+refers to: `pipeline/article_resolver.py`. It is a **leaf module** (imports nothing
+from `pipeline`), so the collector, the consumer, `__main__`, and show notes can all
+share it without an import cycle. Its cascade is **exact headline match, then
+*unique* slug match** — and nothing else.
+
+**There is deliberately no fuzzy tier, and restoring one would be a regression.**
+A word-overlap fallback used to sit at the end of the cascade, scoring each indexed
+file by how many of the headline's >3-char words appeared *anywhere in its body* and
+accepting any score above zero. Measured across 54 real directives: a **wrong**
+article scored at least one query word in **50 of 54** cases, reached half the query
+words in 12, and in one case **tied the correct article at a perfect 4/4**, where the
+winner was decided by dict iteration order. No threshold can separate those
+distributions. Meanwhile exact+slug covered **54/54**.
+
+Its worst property was structural: the tier only ran when exact *and* slug both
+missed, and a common cause of that is *the correct article not being in the index at
+all* (FP-routed, deduped, file gone). In that regime `best_score > 0` **guarantees** a
+wrong match. Replaying real work dirs found exactly this — four directives resolving
+to grotesquely unrelated articles, including 17.6 KB of a Mets ETF story under the
+headline "Trade tensions mount ahead of Trump-Xi summit". All four were
+`include_in_episode=False`, so none reached the writer, but the mechanism was live.
+
+Two rules follow, and both are enforced in code:
+
+- **Ambiguity is a miss, not a coin flip.** If two indexed headlines share a
+  directive's slug (they can: slugs truncate at 50 chars), the resolver returns
+  `slug_ambiguous` and the cascade **stops** — it does not fall through to the
+  filesystem tiers, which would happily return `sorted()[0]` and undo the refusal.
+- **Filesystem globs are anchored or unique.** Flat Levine articles match
+  `\d+-{slug}\.md` exactly, because the old `*{slug}.md` was a *suffix* match (slug
+  `ai` matched `00-openai.md`, and an empty slug from a punctuation-only headline
+  turned it into `*.md`, matching anything). The Zvi tier must substring-match by
+  nature, so it returns a file only when exactly one matches.
+
+**The shadow candidate.** On a miss, `shadow_candidate` records what a
+*headline-vs-headline* Jaccard matcher would have chosen — never bodies, never used
+for resolution — into `writer_inputs.json` and the funnel's
+`(N w/ shadow)` count. It exists because the corpus (10 work dirs) proved exact+slug
+*sufficient over 10 days* but cannot bound how often the editor reformulates a
+headline by **word substitution**; all three observed reformulations were
+whitespace-only, which slug matching absorbs.
+
+**Read the shadow log carefully — a non-zero score is NOT evidence to restore fuzzy
+matching.** The dominant miss cause is the correct article being absent from the
+index entirely, and in that regime the shadow will by construction score some
+plausible but *wrong* headline. Escalating requires checking candidates against
+ground truth and separating a reformulation-shaped miss from an absent-article miss.
+Read naively, the log would recreate the original bug with logged ammunition.
+
+**Two slugify families, deliberately not unified.** The article family
+(`article_resolver.slugify`, re-exported as `_slugify` by `things_happen_collector`,
+`fp_collector`, `show_notes`, `zvi_cache`, `source_cache`) keeps non-ASCII
+alphanumerics, because `str.isalnum()` is True for `é`. The R2-key family
+(`script_processor`, `blog_poller`) strips them via regex. They name different things
+— article files versus episode keys — and a test pins the difference.
+
+**`show_notes._find_article_file` resolves through the same cascade**, so delivery,
+the Exa trigger, and show notes agree by construction. Its filesystem fallback is
+**permanent, not legacy**: `show_notes` is shared with FP Digest, and `fp_collector`
+writes no `headline_index.json` at all, so for every FP work dir that path is the
+only one. `show_notes._headlines_match` is a separate, lower-stakes word-overlap join
+(it filters show notes by coverage, never selects prompt text) and is intentionally
+left alone.
 
 Two cautions. It is labeled **script stage** because TTS and publish happen on a
 later consumer loop iteration — the report says nothing about whether an episode

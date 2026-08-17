@@ -230,3 +230,26 @@ See `REFERENCE.md` for:
 - New module reference
 
 For shared FP Digest / Rundown incident handling, also use `.opencode/skills/operating-daily-podcast-jobs/SKILL.md`.
+
+## A story resolved to the wrong article
+
+Since 2026-08-17 this should be impossible by construction, but if you suspect it:
+
+1. Look at `writer_inputs.json` in the work dir. Every entry carries `source_path`
+   and `miss_reason`. A resolved entry names the exact file its text came from —
+   open it and check the headline matches.
+2. The resolver (`pipeline/article_resolver.py`) matches on **exact headline, then
+   unique slug, and nothing else**. There is no fuzzy tier; if you find one, it has
+   been reintroduced and should be removed. See AGENTS.md §"Directive→article
+   matching" for the measurements (a wrong article scored ≥1 query word in 50 of 54
+   real directives, and tied the correct one at a perfect score in one).
+3. `miss_reason: slug_ambiguous` means two indexed headlines shared the directive's
+   slug and the resolver **refused to guess**. That is working as designed — the
+   story is dropped, visibly, rather than narrated from the wrong article. Fix it by
+   looking at why two headlines collided (slugs truncate at 50 chars).
+4. A `(N w/ shadow)` count on the funnel's `WRITE` line means N misses had a
+   headline-similarity candidate. **This is a diagnostic, not a verdict.** The most
+   common miss cause is the article being absent from the index entirely, in which
+   case the shadow is necessarily a wrong headline that merely looks plausible. Do
+   not "restore fuzzy matching" on the strength of it; check candidates against
+   ground truth first.
