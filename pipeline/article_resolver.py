@@ -7,6 +7,7 @@ for the measurements behind the cascade's design.
 
 from __future__ import annotations
 
+
 # Number of leading lines of an article file that may carry the ``URL:`` header.
 # Bounded so a URL appearing in body prose is never mistaken for the source URL.
 _URL_HEADER_LINES = 8
@@ -42,3 +43,37 @@ def extract_url(text: str) -> str | None:
             url = line[5:].strip()
             return url or None
     return None
+
+
+def resolve_headline(
+    headline: str, index: dict[str, str]
+) -> tuple[str | None, str | None]:
+    """Resolve a directive headline to a work-dir-relative article path.
+
+    Cascade, in order:
+      1. Exact match on the headline the collector recorded.
+      2. Unique slug match (absorbs whitespace/punctuation reformulation).
+
+    Returns ``(rel_path, None)`` on a hit and ``(None, reason)`` on a miss.
+
+    There is deliberately **no** fuzzy tier. A word-overlap fallback used to sit
+    here; measured against real data, a *wrong* article scored at least one
+    query word in 50 of 54 cases and tied the correct article at a perfect score
+    in one, so no threshold could separate them -- while exact+slug already
+    covered 54/54. Article text is fed verbatim to the writer and published
+    unread, so a miss (observable, degrades the section) is strictly preferable
+    to a wrong match (invisible, fabricates confidently).
+    """
+    if headline in index:
+        return index[headline], None
+
+    slug = slugify(headline)
+    if not slug:
+        return None, "index_no_match"
+
+    matches = {rel for key, rel in index.items() if slugify(key) == slug}
+    if len(matches) == 1:
+        return matches.pop(), None
+    if len(matches) > 1:
+        return None, "slug_ambiguous"
+    return None, "index_no_match"
