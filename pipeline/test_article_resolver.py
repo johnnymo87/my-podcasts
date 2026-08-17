@@ -1,4 +1,9 @@
-from pipeline.article_resolver import extract_url, resolve_headline, slugify
+from pipeline.article_resolver import (
+    extract_url,
+    resolve_headline,
+    shadow_candidate,
+    slugify,
+)
 
 
 def test_slugify_matches_article_family_behavior():
@@ -87,3 +92,29 @@ def test_r2_key_slugify_family_is_deliberately_different():
 
     assert slugify("Beyoncé Tour") == "beyoncé-tour"
     assert r2_slugify("Beyoncé Tour") == "beyonc-tour"
+
+
+def test_shadow_candidate_scores_headlines_not_bodies():
+    index = {"China trade deal talks": "articles/00-trade.md"}
+    cand = shadow_candidate("China trade talks resume", index)
+    assert cand is not None
+    assert cand["path"] == "articles/00-trade.md"
+    assert cand["score"] > 0.5
+
+
+def test_shadow_candidate_is_none_when_nothing_overlaps():
+    assert (
+        shadow_candidate("Lunar probe launch", {"Bank earnings rise": "a.md"}) is None
+    )
+
+
+def test_shadow_candidate_never_affects_resolution():
+    index = {"China trade deal talks": "articles/00-trade.md"}
+    assert resolve_headline("China trade talks resume", index) == (
+        None,
+        "index_no_match",
+    )
+
+
+def test_shadow_candidate_handles_empty_index():
+    assert shadow_candidate("Anything", {}) is None

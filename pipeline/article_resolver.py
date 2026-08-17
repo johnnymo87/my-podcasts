@@ -7,6 +7,9 @@ for the measurements behind the cascade's design.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 
 # Number of leading lines of an article file that may carry the ``URL:`` header.
 # Bounded so a URL appearing in body prose is never mistaken for the source URL.
@@ -107,3 +110,82 @@ def resolve_headline(
     if len(matches) > 1:
         return None, "slug_ambiguous"
     return None, "index_no_match"
+
+
+def shadow_candidate(
+    headline: str, index: dict[str, str]
+) -> dict[str, str | float] | None:
+    """Diagnostic only: what a headline-vs-headline fuzzy matcher would pick.
+
+    Never used for resolution -- see ``resolve_headline``, which has no fuzzy
+    tier and does not call this function. Scores Jaccard similarity of
+    lowercased token sets against the *index keys* (headlines), never article
+    bodies: body scoring is what made the deleted word-overlap tier length-
+    biased (a longer body accumulates more incidental word overlap with an
+    unrelated query, which is exactly the failure mode that produced a wrong
+    match scoring higher than the correct one on real data).
+
+    This exists to turn an unbounded unknown into forward-growing evidence.
+    The corpus that justified deleting the fuzzy tier (54 directives, 10 work
+    dirs) proved exact+slug sufficient *over that window*, but could not
+    bound how often the editor reformulates a headline by word substitution
+    (all 3 observed reformulations were whitespace-only). Logging the shadow
+    candidate on every miss lets that question be answered with more data
+    over time, without re-introducing the tier that fabricates.
+
+    A non-zero score here is NOT by itself evidence that fuzzy matching
+    should be restored: a plausible-looking shadow candidate is exactly what
+    the deleted tier produced on its 50/54 wrong-but-scoring cases too. What
+    would matter is a sustained pattern of misses whose shadow candidate is
+    manually confirmed correct -- a single score, or even many, proves
+    nothing on its own.
+
+    Returns ``{"path": rel_path, "score": jaccard}`` for the best-scoring
+    index key, or ``None`` if the index is empty or every key scores 0. Ties
+    are broken by score first, then lexicographically smallest path, so the
+    diagnostic is reproducible.
+    """
+    query_tokens = set(headline.lower().split())
+    best: tuple[float, str] | None = None
+    for key, rel in index.items():
+        key_tokens = set(key.lower().split())
+        union = query_tokens | key_tokens
+        if not union:
+            continue
+        score = len(query_tokens & key_tokens) / len(union)
+        if score <= 0:
+            continue
+        candidate = (score, rel)
+        if best is None or candidate[0] > best[0]:
+            best = candidate
+        elif candidate[0] == best[0] and candidate[1] < best[1]:
+            best = candidate
+
+    if best is None:
+        return None
+    score, rel = best
+    return {"path": rel, "score": round(score, 3)}
+
+
+def load_index(work_dir: Path) -> dict[str, str]:
+    """Load headline_index.json, returning {} if absent/unreadable/wrong-shape.
+
+    The single reader of headline_index.json outside ``resolve_headline``'s
+    caller cascade -- a second ad-hoc index read is exactly the "drifted
+    duplicate implementation" bug class this project has already been burned
+    by (my-podcasts-78b). Callers that must distinguish "absent" from
+    "present but unreadable" (as ``find_rundown_article_source`` does, for
+    its ``no_index`` vs ``index_unreadable`` miss reasons) should check
+    ``(work_dir / "headline_index.json").exists()`` themselves before calling
+    this -- a cheap existence check, not a duplicate parse.
+    """
+    index_path = work_dir / "headline_index.json"
+    if not index_path.exists():
+        return {}
+    try:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        if not isinstance(index, dict):
+            raise ValueError("headline_index.json is not an object")
+    except Exception:
+        return {}
+    return index

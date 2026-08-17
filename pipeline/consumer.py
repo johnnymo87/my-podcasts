@@ -322,6 +322,7 @@ def _assemble_writer_inputs(
     plan theme.
     """
     from pipeline.__main__ import find_rundown_article_source
+    from pipeline.article_resolver import load_index, shadow_candidate
     from pipeline.exa_client import exa_result_sections
     from pipeline.things_happen_collector import _slugify as _th_slugify
 
@@ -329,10 +330,24 @@ def _assemble_writer_inputs(
     by_theme: dict[str, list[str]] = {}
     orphan_order: list[str] = []
     writer_inputs: list[dict] = []
+    # Loaded once and reused across directives -- shadow_candidate is a
+    # diagnostic on every miss, not a second index reader; see
+    # article_resolver.load_index for why there is exactly one index reader.
+    shadow_index = load_index(work_dir)
     for directive in plan.directives:
         if not directive.include_in_episode:
             continue
         text, src, miss_reason = find_rundown_article_source(directive, work_dir)
+
+        # Diagnostic only, never used for resolution: what a headline-vs-
+        # headline fuzzy matcher would have picked on this miss. See
+        # article_resolver.shadow_candidate's docstring for why a non-zero
+        # score here is not evidence the deleted fuzzy tier should return.
+        shadow = (
+            shadow_candidate(directive.headline, shadow_index)
+            if miss_reason is not None
+            else None
+        )
 
         # A stub is resolved by the exact/slug match ahead of the Exa tier
         # (find_rundown_article_source's cascade below), so retrieved
@@ -369,6 +384,7 @@ def _assemble_writer_inputs(
                 "exa_appended": bool(exa_extra),
                 "exa_chars": len(exa_extra),
                 "miss_reason": miss_reason,
+                "shadow": shadow,
             }
         )
         if text:

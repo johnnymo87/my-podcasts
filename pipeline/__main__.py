@@ -65,9 +65,11 @@ def find_rundown_article_source(
     match (invisible, fabricates confidently). See
     pipeline/article_resolver.py:resolve_headline for the shared cascade.
     """
-    import json as _json
-
-    from pipeline.article_resolver import DIRECT_EXA_HEADING, resolve_headline
+    from pipeline.article_resolver import (
+        DIRECT_EXA_HEADING,
+        load_index,
+        resolve_headline,
+    )
     from pipeline.exa_client import exa_file_path, exa_result_sections
     from pipeline.things_happen_collector import _slugify
 
@@ -79,16 +81,12 @@ def find_rundown_article_source(
     # --- Index-based lookup (handles editor headline reformulation) ---
     index_path = work_dir / "headline_index.json"
     if index_path.exists():
-        try:
-            index = _json.loads(index_path.read_text(encoding="utf-8"))
-            # Valid JSON of the wrong shape (e.g. a list) would otherwise reach
-            # resolve_headline's index.items() below and raise AttributeError
-            # mid-job, wedging the job into retry backoff rather than
-            # degrading to the fallbacks.
-            if not isinstance(index, dict):
-                raise ValueError("headline_index.json is not an object")
-        except Exception:
-            index, miss_reason = {}, "index_unreadable"
+        index = load_index(work_dir)
+        if not index:
+            # load_index collapses "unreadable" and "wrong-shape" into {};
+            # the exists() check above already ruled out "absent" (that
+            # stays "no_index", the default set before this block).
+            miss_reason = "index_unreadable"
         else:
             rel_path, miss_reason = resolve_headline(headline, index)
             if rel_path is not None:
