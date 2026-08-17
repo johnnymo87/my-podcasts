@@ -651,3 +651,19 @@ def test_generate_refuses_when_sections_exist_but_all_are_empty():
             sections=[("Alpha", []), ("Beta", [])],
             date_str="2026-03-10",
         )
+
+
+def test_prompt_forbids_a_closing_recap():
+    """The writer must not re-narrate the episode at the end.
+
+    Measured on the 2026-08-17 episode: the closing recap ran 182 words of
+    1907 (10% of runtime) and restated all six stories the listener had just
+    heard. The prompt had only asked for "a brief sign-off" -- the recap was
+    the model's own addition, so forbidding it has to be explicit.
+    """
+    from pipeline.rundown_writer import PROMPT_TEMPLATE
+
+    assert "Do NOT end with a recap" in PROMPT_TEMPLATE
+    assert "naming no stories" in PROMPT_TEMPLATE
+    # The old wording invited the behavior; make sure it is gone.
+    assert "a brief sign-off are\nuseful" not in PROMPT_TEMPLATE

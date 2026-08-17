@@ -331,3 +331,16 @@ def test_does_not_persist_fp_when_wait_for_idle_times_out(
 
     assert not (tmp_path / "raw_writer_output.txt").exists()
     assert "ses_timeout" in deleted
+
+
+def test_prompt_forbids_a_closing_recap():
+    """FP had TWO closings: a full recap paragraph and a sign-off.
+
+    Measured on the 2026-08-17 episode: "So here is where things stand this
+    Monday..." restated all five stories, then a separate sign-off followed.
+    """
+    from pipeline.fp_writer import PROMPT_TEMPLATE
+
+    assert "Do NOT end with a recap" in PROMPT_TEMPLATE
+    assert "naming no stories" in PROMPT_TEMPLATE
+    assert "a brief sign-off are\nuseful" not in PROMPT_TEMPLATE
