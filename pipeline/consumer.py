@@ -333,7 +333,9 @@ def _assemble_writer_inputs(
     # Loaded once and reused across directives -- shadow_candidate is a
     # diagnostic on every miss, not a second index reader; see
     # article_resolver.load_index for why there is exactly one index reader.
-    shadow_index = load_index(work_dir)
+    # `or {}`: load_index returns None for an absent/unreadable index, and the
+    # shadow diagnostic simply has nothing to compare against in that case.
+    shadow_index = load_index(work_dir) or {}
     for directive in plan.directives:
         if not directive.include_in_episode:
             continue

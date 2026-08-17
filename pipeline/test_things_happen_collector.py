@@ -1897,3 +1897,18 @@ def test_index_valid_json_but_wrong_shape_does_not_crash(tmp_path):
     assert text == ""
     assert path is None
     assert reason == "index_unreadable"
+
+
+def test_valid_but_empty_index_reports_index_no_match_not_unreadable(tmp_path):
+    """An index that parses to {} is readable; it just has nothing in it."""
+    (tmp_path / "headline_index.json").write_text("{}")
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class D:
+        headline = "Some Headline"
+        source = "levine"
+
+    text, path, reason = find_rundown_article_source(D(), tmp_path)
+    assert (text, path) == ("", None)
+    assert reason == "index_no_match"

@@ -167,25 +167,28 @@ def shadow_candidate(
     return {"path": rel, "score": round(score, 3)}
 
 
-def load_index(work_dir: Path) -> dict[str, str]:
-    """Load headline_index.json, returning {} if absent/unreadable/wrong-shape.
+def load_index(work_dir: Path) -> dict[str, str] | None:
+    """Load headline_index.json, or return None if it cannot be read.
 
-    The single reader of headline_index.json outside ``resolve_headline``'s
-    caller cascade -- a second ad-hoc index read is exactly the "drifted
-    duplicate implementation" bug class this project has already been burned
-    by (my-podcasts-78b). Callers that must distinguish "absent" from
-    "present but unreadable" (as ``find_rundown_article_source`` does, for
-    its ``no_index`` vs ``index_unreadable`` miss reasons) should check
-    ``(work_dir / "headline_index.json").exists()`` themselves before calling
-    this -- a cheap existence check, not a duplicate parse.
+    The single reader of headline_index.json -- a second ad-hoc index read is
+    exactly the "drifted duplicate implementation" bug class this project has
+    already been burned by (my-podcasts-78b).
+
+    Returns ``None`` when the file is absent, unparseable, or valid JSON of
+    the wrong shape; returns the parsed dict otherwise. ``None`` and ``{}``
+    are deliberately distinct: an index that parses to ``{}`` is *readable*
+    and simply has nothing in it, so reporting it as ``index_unreadable``
+    would be a telemetry lie. Callers that must further separate "absent"
+    from "present but unreadable" check ``.exists()`` themselves -- a cheap
+    existence check, not a duplicate parse.
     """
     index_path = work_dir / "headline_index.json"
     if not index_path.exists():
-        return {}
+        return None
     try:
         index = json.loads(index_path.read_text(encoding="utf-8"))
         if not isinstance(index, dict):
             raise ValueError("headline_index.json is not an object")
     except Exception:
-        return {}
+        return None
     return index

@@ -118,3 +118,24 @@ def test_shadow_candidate_never_affects_resolution():
 
 def test_shadow_candidate_handles_empty_index():
     assert shadow_candidate("Anything", {}) is None
+
+
+def test_load_index_distinguishes_unreadable_from_validly_empty(tmp_path):
+    """A valid but empty index is NOT the same as an unreadable one.
+
+    Collapsing them makes the funnel report `index_unreadable` for a work dir
+    whose index parsed perfectly, which is a telemetry lie in exactly the
+    instrumentation this change exists to make honest.
+    """
+    from pipeline.article_resolver import load_index
+
+    assert load_index(tmp_path) is None  # absent
+
+    (tmp_path / "headline_index.json").write_text("{}")
+    assert load_index(tmp_path) == {}  # valid, empty
+
+    (tmp_path / "headline_index.json").write_text("not json")
+    assert load_index(tmp_path) is None  # unreadable
+
+    (tmp_path / "headline_index.json").write_text("[1, 2, 3]")
+    assert load_index(tmp_path) is None  # wrong shape

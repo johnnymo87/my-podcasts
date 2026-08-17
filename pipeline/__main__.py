@@ -82,10 +82,11 @@ def find_rundown_article_source(
     index_path = work_dir / "headline_index.json"
     if index_path.exists():
         index = load_index(work_dir)
-        if not index:
-            # load_index collapses "unreadable" and "wrong-shape" into {};
-            # the exists() check above already ruled out "absent" (that
-            # stays "no_index", the default set before this block).
+        if index is None:
+            # None means unparseable or wrong-shape; the exists() check above
+            # already ruled out "absent" (that keeps the "no_index" default).
+            # A validly-empty {} is NOT this case -- it falls through and
+            # resolves to "index_no_match", because the file read fine.
             miss_reason = "index_unreadable"
         else:
             rel_path, miss_reason = resolve_headline(headline, index)
