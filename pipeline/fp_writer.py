@@ -32,8 +32,15 @@ stories in whatever order best illuminates the day — group related items
 together when the connection is real, and use natural transitions to move
 between them. You don't need to announce each theme as a separate section;
 the theme list is a planning aid for you, not scaffolding the listener has
-to hear. A brief opening to orient the listener and a brief sign-off are
-useful, but skip the "here are today's themes, theme one is..." preamble.
+to hear. A brief opening to orient the listener is useful, but skip the
+"here are today's themes, theme one is..." preamble.
+
+Do NOT end with a recap. No "so here is where things stand this Monday"
+summary, no story-by-story wrap-up of what you just said. The listener heard
+it moments ago, and repeating it costs a tenth of the episode. Close with a
+single short sign-off line and stop -- for example: "That's your briefing for
+Monday, August seventeenth. Talk to you tomorrow." One or two sentences at
+most, naming no stories.
 
 Attribute claims to the people who made them. When a source argued, reported,
 or pushed back on something, say so — name the publication, the analyst, or
