@@ -108,7 +108,7 @@ Three lessons:
   nothing to detect it — the suite passes, the import succeeds, and the mocks
   were not autospec'd.
 
-### 1. Unify directive→article matching — `3yb` + `5m3` + `4pw` + `w6k` (P2/P3)
+### 1. Unify directive→article matching — `3yb` + `5m3` + `4pw` + `mr1` (P2/P3)
 
 **Why grouped:** one root cause, three symptoms. Levine headlines come from
 sentence extraction and can carry a double space that Gemini normalizes when it
@@ -122,7 +122,7 @@ Measured: 3 of 38 selected directives. Piece 3 already fixed the third instance
 - `4pw` — `_slugify` is duplicated byte-identically in two modules; drift would
   silently orphan every enrichment file.
 
-- `w6k` — the word-overlap fallback accepts `best_score > 0`, so a single shared
+- `mr1` — the word-overlap fallback accepts `best_score > 0`, so a single shared
   common word can bind a directive to the wrong article. That text then anchors
   the section as the *primary* source, which the append-don't-replace protection
   does not cover. Measure the score distribution before choosing a threshold.
@@ -136,13 +136,13 @@ share test surface. None is urgent alone; four separate PRs would be waste.
 Origin exclusion by registrable domain; non-daemon timeout thread; unguarded
 `read_text` + empty-slug glob; FP's ungated Exa reader.
 
-### 3. Writer robustness — `ne0` + `qd5` + `tj9` (P2)
+### 3. Writer robustness — `ne0` + `qd5` + `98p` (P2)
 
 Malformed closing tags in `_extract_script`; FP Digest hallucinating a "thin
 news day" briefing from an empty plan. Both are "the LLM did something we didn't
 expect and we published it anyway" — same family, sensible together.
 
-`tj9` (FP Digest has the identical theme-drop bug plus its own hand-rolled
+`98p` (FP Digest has the identical theme-drop bug plus its own hand-rolled
 dry-run assembler) belongs here now: the Rundown fix in PR #11 is the template,
 and `qd5` is the FP twin of the zero-sections guard that PR added — do them in
 one pass over `fp_writer.py` rather than three.
@@ -220,6 +220,11 @@ Kept because each cost real time and each recurred.
   change would have left the documented consumer-down procedure
   (`publish-script`) reintroducing the duplicate, because it never closed the
   job row. A fix is not done until the manual workaround around it is also safe.
+- **Verify a bead ID before writing it into anything durable.** Two IDs in this
+  file (and in a merged PR description) were invented from memory rather than
+  read back from `bd`, and pointed at nothing. `bd create` prints the id —
+  capture it. A confident wrong pointer is worse than no pointer, because it
+  survives compaction looking authoritative.
 - **A check derived from the thing it checks proves nothing.** `reached_prompt`
   as `bool(text)` sat next to `chars = len(text)` and was therefore always
   consistent with it. Instrumentation must be derived from a different structure

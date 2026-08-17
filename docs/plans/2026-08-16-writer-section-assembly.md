@@ -58,9 +58,9 @@ name and become their own trailing section.
 
 ### Explicitly out of scope (beads already filed)
 
-- `my-podcasts-tj9` — FP Digest has the identical bug in `fp_writer.py:107-115` plus its
+- `my-podcasts-98p` — FP Digest has the identical bug in `fp_writer.py:107-115` plus its
   own hand-rolled dry-run assembler. Port this shape there in a later pass.
-- `my-podcasts-w6k` — `find_rundown_article_source` accepts `best_score > 0` in its
+- `my-podcasts-mr1` — `find_rundown_article_source` accepts `best_score > 0` in its
   word-overlap match, so one shared common word can bind a directive to the wrong article.
   Needs measurement first.
 
