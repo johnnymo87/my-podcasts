@@ -155,6 +155,13 @@ Two hazards to handle in that PR: routed links are labelled `levine-routed`
 dedup that empty URLs silently disabled, so a `Routing: both` Semafor article could
 arrive twice in one run.
 
+**Consider bundling `my-podcasts-wfh`** (filed 2026-08-16): FP's own delivery and Exa
+joins disagree with each other, the same disease `3yb` just fixed on the Rundown side.
+FP writes no `headline_index.json`, so it needs either an index at collection time or
+an explicit decision to stay filesystem-only with anchored, uniqueness-checked globs.
+`5m3`, `wfh`, and `98p` all touch `fp_collector.py` — three separate passes over those
+files would be waste.
+
 ### 2. Exa hardening batch — `avf` + `d8w` + `j7f` + `gz4` (P3)
 
 **Why grouped:** all four touch `exa_client.py` or its immediate callers and
