@@ -2042,3 +2042,44 @@ def test_valid_but_empty_index_reports_index_no_match_not_unreadable(tmp_path):
     text, path, reason = find_rundown_article_source(D(), tmp_path)
     assert (text, path) == ("", None)
     assert reason == "index_no_match"
+
+
+def test_empty_slug_headline_does_not_match_a_lone_zvi_file(tmp_path):
+    """A punctuation-only headline slugifies to "", turning the Zvi tier's
+    glob into `*.md`. With one Zvi file present that file would be returned as
+    the directive's PRIMARY text -- a wrong match, not a miss.
+    """
+    zvi = tmp_path / "articles" / "zvi"
+    zvi.mkdir(parents=True)
+    (zvi / "2026-01-01-post-section.md").write_text("# a\n\nURL: https://z/1\n\nbody a")
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class D:
+        headline = "???"
+        source = "zvi"
+
+    text, path, reason = find_rundown_article_source(D(), tmp_path)
+    assert (text, path) == ("", None)
+
+
+def test_flat_tier_requires_the_full_numbered_prefix(tmp_path):
+    """The anchoring regex is load-bearing beyond the glob.
+
+    `*-ai.md` excludes `00-openai.md` on its own, but still matches
+    `00-open-ai.md`; only the `\\d+-{slug}\\.md` fullmatch rejects that.
+    """
+    articles = tmp_path / "articles"
+    articles.mkdir(parents=True)
+    (articles / "00-open-ai.md").write_text(
+        "# Open AI thing\n\nURL: https://x/o\n\nbody"
+    )
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class D:
+        headline = "AI"
+        source = "levine"
+
+    text, path, reason = find_rundown_article_source(D(), tmp_path)
+    assert path is None

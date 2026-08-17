@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 from pipeline.article_resolver import load_index, resolve_headline
@@ -50,7 +51,7 @@ def _find_article_file(headline: str, source: str, work_dir: Path) -> Path | Non
     # --- Index-based lookup (handles editor headline reformulation) ---
     index = load_index(work_dir)
     if index is not None:
-        rel_path, _reason = resolve_headline(headline, index)
+        rel_path, reason = resolve_headline(headline, index)
         if rel_path is not None:
             candidate = work_dir / rel_path
             if candidate.exists():
@@ -58,12 +59,23 @@ def _find_article_file(headline: str, source: str, work_dir: Path) -> Path | Non
             # Index points at a file that is gone: fall through to the
             # filesystem search below rather than reporting a hit we cannot
             # read.
+        elif reason == "slug_ambiguous":
+            # Two indexed headlines share this slug. Delivery refuses to guess
+            # here, and the Levine/Zvi tiers below would guess anyway (both
+            # would match, and they return the first). Linking an arbitrary
+            # one of two colliding stories is the same defect one layer down,
+            # so stop -- an episode with no link beats a wrong link.
+            return None
 
-    # Flat Levine-style articles (e.g. "00-headline.md")
+    # Flat Levine-style articles (e.g. "00-headline.md").
+    # Anchored, not `*{slug}.md`: that is a SUFFIX match, so slug "ai" binds
+    # "00-openai.md". Mirrors __main__.find_rundown_article_source.
     articles_dir = work_dir / "articles"
     if articles_dir.exists():
-        for match in articles_dir.glob(f"*{slug}.md"):
-            if match.parent == articles_dir:
+        for match in sorted(articles_dir.glob(f"*-{slug}.md")):
+            if match.parent != articles_dir:
+                continue
+            if re.fullmatch(rf"\d+-{re.escape(slug)}\.md", match.name):
                 return match
 
     # Semafor articles
@@ -71,11 +83,15 @@ def _find_article_file(headline: str, source: str, work_dir: Path) -> Path | Non
     if semafor_file.exists():
         return semafor_file
 
-    # Zvi articles (date-prefixed)
+    # Zvi articles (date-prefixed). Zvi filenames are
+    # `{date}-{post_slug}-{section_slug}.md`, so this tier must substring
+    # match and cannot be anchored -- require uniqueness instead of taking
+    # the first of several, for the same reason as above.
     zvi_dir = articles_dir / "zvi"
     if zvi_dir.exists():
-        for match in zvi_dir.glob(f"*{slug}*.md"):
-            return match
+        zvi_matches = sorted(zvi_dir.glob(f"*{slug}*.md"))
+        if len(zvi_matches) == 1:
+            return zvi_matches[0]
 
     # FP homepage articles (nested under region)
     homepage_dir = articles_dir / "homepage"

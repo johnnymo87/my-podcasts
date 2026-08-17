@@ -432,3 +432,73 @@ def test_filter_preserves_order() -> None:
     result = filter_show_notes_by_coverage(articles, covered)
     # Original order preserved, not covered order
     assert [r["title"] for r in result] == ["First Story", "Third Story"]
+
+
+def test_find_article_file_flat_glob_is_anchored_not_suffix_matched(tmp_path):
+    """Slug 'ai' must not link to '00-openai.md' in show notes either.
+
+    Delivery anchors this glob; show notes must too, or the episode links a
+    URL for a story the script never discussed.
+    """
+    from pipeline.show_notes import _find_article_file
+
+    articles = tmp_path / "articles"
+    articles.mkdir(parents=True)
+    (articles / "00-openai.md").write_text(
+        "# OpenAI ships a model\n\nURL: https://x/o\n\nbody"
+    )
+
+    assert _find_article_file("AI", "levine", tmp_path) is None
+
+
+def test_find_article_file_zvi_tier_refuses_ambiguous_matches(tmp_path):
+    """Two substring matches must be a miss, not sorted()[0]."""
+    from pipeline.show_notes import _find_article_file
+
+    zvi = tmp_path / "articles" / "zvi"
+    zvi.mkdir(parents=True)
+    (zvi / "2026-01-01-post-ai-safety.md").write_text(
+        "# a\n\nURL: https://z/1\n\nbody a"
+    )
+    (zvi / "2026-01-02-post-ai-safety-extra.md").write_text(
+        "# b\n\nURL: https://z/2\n\nbody b"
+    )
+
+    assert _find_article_file("AI Safety", "zvi", tmp_path) is None
+
+
+def test_find_article_file_stops_on_ambiguous_slug(tmp_path):
+    """slug_ambiguous must not fall through to a filesystem tier that guesses."""
+    from pipeline.show_notes import _find_article_file
+
+    long = "A" * 60
+    slug = "a" * 50
+    articles = tmp_path / "articles"
+    articles.mkdir(parents=True)
+    (articles / f"00-{slug}.md").write_text("# one\n\nURL: https://x/1\n\nbody one")
+    (articles / f"01-{slug}.md").write_text("# two\n\nURL: https://x/2\n\nbody two")
+    index = {
+        long + " one": f"articles/00-{slug}.md",
+        long + " two": f"articles/01-{slug}.md",
+    }
+    (tmp_path / "headline_index.json").write_text(json.dumps(index))
+
+    assert _find_article_file(long + " three", "levine", tmp_path) is None
+
+
+def test_find_article_file_flat_tier_requires_the_full_numbered_prefix(tmp_path):
+    """The anchoring regex, not just the glob, is load-bearing.
+
+    `*-ai.md` already excludes `00-openai.md`, but it still MATCHES
+    `00-open-ai.md` -- a different story whose slug merely ends in the query
+    slug. Only the `\\d+-{slug}\\.md` fullmatch rejects that.
+    """
+    from pipeline.show_notes import _find_article_file
+
+    articles = tmp_path / "articles"
+    articles.mkdir(parents=True)
+    (articles / "00-open-ai.md").write_text(
+        "# Open AI thing\n\nURL: https://x/o\n\nbody"
+    )
+
+    assert _find_article_file("AI", "levine", tmp_path) is None

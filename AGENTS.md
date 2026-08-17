@@ -226,9 +226,16 @@ Two rules follow, and both are enforced in code:
   filesystem tiers, which would happily return `sorted()[0]` and undo the refusal.
 - **Filesystem globs are anchored or unique.** Flat Levine articles match
   `\d+-{slug}\.md` exactly, because the old `*{slug}.md` was a *suffix* match (slug
-  `ai` matched `00-openai.md`, and an empty slug from a punctuation-only headline
-  turned it into `*.md`, matching anything). The Zvi tier must substring-match by
-  nature, so it returns a file only when exactly one matches.
+  `ai` matched `00-openai.md`). Both halves matter: narrowing the glob to `*-{slug}.md`
+  still matches `00-open-ai.md`, and only the fullmatch rejects it. The Zvi tier must
+  substring-match by nature, so it returns a file only when exactly one matches. An
+  empty slug (punctuation-only headline) skips the filesystem tiers entirely, since it
+  would otherwise turn every glob into a wildcard.
+
+  These rules hold in **both** `find_rundown_article_source` and
+  `show_notes._find_article_file`. They were fixed in delivery first and the same
+  defect was left standing in show notes until review caught it — if you change one,
+  change both.
 
 **The shadow candidate.** On a miss, `shadow_candidate` records what a
 *headline-vs-headline* Jaccard matcher would have chosen — never bodies, never used
@@ -253,7 +260,8 @@ alphanumerics, because `str.isalnum()` is True for `é`. The R2-key family
 — article files versus episode keys — and a test pins the difference.
 
 **`show_notes._find_article_file` resolves through the same cascade**, so delivery,
-the Exa trigger, and show notes agree by construction. Its filesystem fallback is
+the Exa trigger, and show notes agree on the index tiers by construction, and their
+filesystem tiers now enforce the same anchoring and uniqueness rules. Its fallback is
 **permanent, not legacy**: `show_notes` is shared with FP Digest, and `fp_collector`
 writes no `headline_index.json` at all, so for every FP work dir that path is the
 only one. `show_notes._headlines_match` is a separate, lower-stakes word-overlap join

@@ -106,6 +106,14 @@ def find_rundown_article_source(
                 return "", None, miss_reason
 
     # --- Legacy slug-based fallback ---
+    # Every tier below keys off the slug, and an empty slug (a headline of
+    # pure punctuation) turns their globs into wildcards -- the Zvi tier's
+    # `*{slug}*.md` becomes `*.md` and would return an arbitrary file as this
+    # directive's PRIMARY text. Refuse instead; show_notes._find_article_file
+    # has had this guard all along.
+    if not slug:
+        return "", None, miss_reason
+
     # Flat Levine articles are written as "{NN}-{slug}.md"
     # (things_happen_collector.py:143). A bare glob(f"*{slug}.md") is a
     # SUFFIX match -- slug "ai" matches "00-openai.md" -- so match the real
