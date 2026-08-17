@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from pipeline.article_fetcher import fetch_all_articles
+from pipeline.article_resolver import resolve_headline
+from pipeline.article_resolver import slugify as _slugify
 from pipeline.exa_client import exa_file_path, search_related_status
 from pipeline.freshness import (
     annotate_headlines,
@@ -52,15 +54,6 @@ def _host_banned(url: str, origin: str) -> bool:
     if origin and (host == origin or host.endswith("." + origin)):
         return True
     return any(host == b or host.endswith("." + b) for b in BYPASS_DOMAINS)
-
-
-def _slugify(text: str) -> str:
-    """Create a safe filename slug from a headline."""
-    safe = "".join(c if c.isalnum() else "-" for c in text.lower())
-    # condense multiple dashes
-    while "--" in safe:
-        safe = safe.replace("--", "-")
-    return safe.strip("-")[:50]
 
 
 def collect_all_artifacts(
@@ -354,36 +347,65 @@ def collect_all_artifacts(
         if not directive.include_in_episode:
             continue
 
-        # Slug, not raw equality: Levine headlines come from sentence
-        # extraction and can carry a double space that Gemini normalizes away
-        # when it echoes the headline. Measured: exact match loses 3 of 38
-        # selected directives, silently, with every unit test still passing.
-        d_slug = _slugify(directive.headline)
-        art = next((a for a in articles if _slugify(a.headline) == d_slug), None)
+        # Same join delivery uses: pipeline.article_resolver.resolve_headline
+        # against the in-memory headline_index (exact match, then unique
+        # slug -- absorbs the double-space reformulation Gemini introduces
+        # when it echoes a headline back). Using a second, different join
+        # here is exactly how the trigger and delivery paths drifted apart
+        # (bead 3yb).
+        rel, _reason = resolve_headline(directive.headline, headline_index)
 
-        # No matching Levine article means a Semafor/Zvi story, read from
-        # cache with real body text. It needs no substitution UNLESS the
-        # editor explicitly asked for one -- dropping that case would silently
-        # regress today's behavior.
-        if art is None and not directive.needs_exa:
+        # A directive that does not resolve at all is an explicit no-fire,
+        # NOT a fall-through into the "cache story" branch below (`None not
+        # in tiers` would otherwise be True by accident). A search query
+        # built from a headline we could not even find the article for is
+        # exactly the wrong-story risk this unification exists to remove.
+        if rel is None:
+            continue
+
+        # `tiers` is populated for Levine articles only (see the fetch loop
+        # above). `rel not in tiers` means the resolved file is a Semafor/Zvi
+        # story, read from cache with real body text already -- it needs no
+        # substitution UNLESS the editor explicitly asked for one. Dropping
+        # that union would silently regress today's behavior.
+        #
+        # Divergence from the old array-scan join: headline_index is
+        # last-write-wins and Semafor/Zvi entries are written after Levine,
+        # so a same-headline collision across sources (rare) now always
+        # resolves to the cache copy and therefore fires only per the
+        # editor's flag, never per the Levine tier the old join would have
+        # matched. Arguably the better outcome (the cache copy has real body
+        # text already) but it is a real behavior change from "the measured
+        # fetch tier drives this" -- written down here rather than left
+        # implicit.
+        tier_info = tiers.get(rel)
+        if tier_info is None and not directive.needs_exa:
             continue
 
         # The editor judges "paywalled" from headlines alone and sets the flag
         # on ~4% of directives while ~93% of articles arrive as stubs. The
         # fetch tier is the measured answer; the flag stays in the union
         # because it is real signal, just badly under-fired.
-        if art is not None and art.source_tier == "live" and not directive.needs_exa:
+        if (
+            tier_info is not None
+            and tier_info["tier"] == "live"
+            and not directive.needs_exa
+        ):
             continue
 
         query = directive.exa_query or directive.headline
+        # Origin must come from tiers[rel]["url"] (recorded from the fetched
+        # Article), NOT from the resolved file's own `URL:` header -- using
+        # the file header would make a Semafor needs_exa search start
+        # excluding semafor.com, a behavior change nobody decided.
         origin = (
-            (urlparse(art.url).hostname or "").removeprefix("www.")
-            if art is not None
+            (urlparse(tier_info["url"]).hostname or "").removeprefix("www.")
+            if tier_info is not None
             else ""
         )
         exclude = [d for d in (origin, *BYPASS_DOMAINS) if d]
 
-        slug = d_slug
+        slug = _slugify(directive.headline)
         exa_results, status = search_related_status(query, exclude_domains=exclude)
         # Defence in depth: exclude_domains is a request parameter honored by a
         # third-party API. Ethics policy must not depend on Exa's compliance,

@@ -224,6 +224,32 @@ def test_writer_inputs_records_no_miss_reason_on_hit(tmp_path):
     _sections, writer_inputs = _assemble_writer_inputs(_plan(headline), work_dir)
 
     assert writer_inputs[0]["miss_reason"] is None
+    assert writer_inputs[0]["shadow"] is None
+
+
+def test_writer_inputs_records_shadow_candidate_on_overlapping_miss(tmp_path):
+    """A miss whose headline overlaps an index key logs a shadow candidate.
+
+    The shadow is diagnostic only -- it must not change source_path or
+    miss_reason, only add the "shadow" key to the writer_inputs entry.
+    """
+    work_dir = tmp_path / "work"
+    indexed_headline = "China trade deal talks resume today"
+    indexed_rel_path = _write_stub(work_dir, indexed_headline, "body text")
+    directive_headline = "China trade talks resume this week"
+
+    _sections, writer_inputs = _assemble_writer_inputs(
+        _plan(directive_headline), work_dir
+    )
+
+    entry = writer_inputs[0]
+    assert entry["source_path"] is None
+    assert entry["miss_reason"] is not None
+    assert entry["shadow"] == {
+        "path": indexed_rel_path,
+        "score": entry["shadow"]["score"],
+    }
+    assert entry["shadow"]["score"] > 0
 
 
 def test_assembly_keeps_plan_theme_order(tmp_path):

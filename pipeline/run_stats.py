@@ -127,6 +127,16 @@ class RunStats(BaseModel):
     # have no evidence to attribute -- it simply does not appear here.
     writer_miss_reasons: dict[str, int] = Field(default_factory=dict)
 
+    # Of the entries counted in `writer_miss_reasons`, how many carried a
+    # non-null `shadow` diagnostic (what a headline-vs-headline fuzzy
+    # matcher would have picked -- see article_resolver.shadow_candidate).
+    # Diagnostic only, mirrors the same is-a-miss gating as the histogram
+    # above: only entries that actually missed are counted, and a missing
+    # `shadow` key (historical writer_inputs.json predating the field, same
+    # as `index_no_overlap` predating `shadow` entirely) reads as "unknown",
+    # never as a hit.
+    writer_miss_shadow_hits: int = 0
+
     # From script.txt / covered.json.
     script_words: int | None = None
     covered_headlines: int | None = None
@@ -330,6 +340,7 @@ def collect_run_stats(
     writer_exa_chars = 0
     dropped_before_prompt = 0
     miss_reasons: dict[str, int] = {}
+    miss_shadow_hits = 0
     for item in writer_inputs:
         if not isinstance(item, dict):
             write_buckets["unknown"] = write_buckets.get("unknown", 0) + 1
@@ -357,6 +368,12 @@ def collect_run_stats(
         miss_reason = item.get("miss_reason")
         if isinstance(miss_reason, str) and miss_reason:
             miss_reasons[miss_reason] = miss_reasons.get(miss_reason, 0) + 1
+            # `.get` returns None for a missing key exactly as it does for
+            # an explicit `null` -- both mean "no shadow candidate", so
+            # historical writer_inputs.json (predating the `shadow` field
+            # entirely) is not miscounted here.
+            if item.get("shadow") is not None:
+                miss_shadow_hits += 1
 
         if source_path is None:
             dropped += 1
@@ -394,6 +411,7 @@ def collect_run_stats(
     stats.writer_exa_chars = writer_exa_chars
     stats.writer_dropped_before_prompt = dropped_before_prompt
     stats.writer_miss_reasons = miss_reasons
+    stats.writer_miss_shadow_hits = miss_shadow_hits
 
     # --- script.txt / covered.json ----------------------------------------
     script_path = work_dir / "script.txt"
@@ -504,7 +522,10 @@ def render_report(stats: RunStats) -> str:
         f"{k} {v}" for k, v in stats.writer_miss_reasons.items() if v
     )
     if miss_breakdown:
-        write_line += f" [misses: {miss_breakdown}]"
+        write_line += f" [misses: {miss_breakdown}"
+        if stats.writer_miss_shadow_hits:
+            write_line += f" ({stats.writer_miss_shadow_hits} w/ shadow)"
+        write_line += "]"
     lines.append(write_line)
 
     out_parts = []

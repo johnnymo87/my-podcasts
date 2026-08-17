@@ -607,7 +607,93 @@ def test_find_rundown_article_source_no_false_match(tmp_path):
     text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
     assert text == ""
     assert path is None
-    assert reason == "index_no_overlap"
+    assert reason == "index_no_match"
+
+
+def test_word_overlap_no_longer_binds_a_partially_matching_article(tmp_path):
+    """A wrong article sharing common words must NOT be returned (bead mr1)."""
+    articles = tmp_path / "articles"
+    articles.mkdir(parents=True)
+    (articles / "00-trade.md").write_text(
+        "# China trade deal talks\n\nURL: https://x.com/a\n\n"
+        "Beijing and Washington discussed tariffs on Tuesday."
+    )
+    index = {"China trade deal talks": "articles/00-trade.md"}
+    (tmp_path / "headline_index.json").write_text(json.dumps(index))
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class D:
+        headline = "China launches lunar probe mission"  # shares only "china"
+        source = "levine"
+
+    text, path, reason = find_rundown_article_source(D(), tmp_path)
+    assert text == ""
+    assert path is None
+    assert reason == "index_no_match"
+
+
+def test_legacy_glob_is_anchored_not_suffix_matched(tmp_path):
+    """Slug 'ai' must not match '00-openai.md' (fnmatch confirms it would)."""
+    articles = tmp_path / "articles"
+    articles.mkdir(parents=True)
+    (articles / "00-openai.md").write_text(
+        "# OpenAI ships a model\n\nURL: https://x.com/o\n\nbody"
+    )
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class D:
+        headline = "AI"
+        source = "levine"
+
+    text, path, reason = find_rundown_article_source(D(), tmp_path)
+    assert path is None
+    assert reason == "no_index"
+
+
+def test_ambiguous_slug_does_not_fall_through_to_the_filesystem(tmp_path):
+    """Refusing to guess must not be undone by the glob tier picking sorted()[0]."""
+    long = "A" * 60
+    articles = tmp_path / "articles"
+    articles.mkdir(parents=True)
+    slug = "a" * 50
+    (articles / f"00-{slug}.md").write_text("# one\n\nURL: https://x/1\n\nbody one")
+    (articles / f"01-{slug}.md").write_text("# two\n\nURL: https://x/2\n\nbody two")
+    index = {
+        long + " one": f"articles/00-{slug}.md",
+        long + " two": f"articles/01-{slug}.md",
+    }
+    (tmp_path / "headline_index.json").write_text(json.dumps(index))
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class D:
+        headline = long + " three"
+        source = "levine"
+
+    assert find_rundown_article_source(D(), tmp_path) == ("", None, "slug_ambiguous")
+
+
+def test_zvi_glob_refuses_ambiguous_substring_matches(tmp_path):
+    """The Zvi tier substring-matches BOTH sides; two hits must be a miss, not sorted()[0]."""
+    zvi = tmp_path / "articles" / "zvi"
+    zvi.mkdir(parents=True)
+    (zvi / "2026-01-01-post-ai-safety.md").write_text(
+        "# a\n\nURL: https://z/1\n\nbody a"
+    )
+    (zvi / "2026-01-02-post-ai-safety-extra.md").write_text(
+        "# b\n\nURL: https://z/2\n\nbody b"
+    )
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class D:
+        headline = "AI Safety"
+        source = "zvi"
+
+    text, path, reason = find_rundown_article_source(D(), tmp_path)
+    assert path is None
 
 
 def test_find_rundown_article_source_exa_headerless_file_no_longer_surfaced(tmp_path):
@@ -672,8 +758,15 @@ def test_find_rundown_article_source_reports_path_on_exact_match(tmp_path):
     assert reason is None
 
 
-def test_find_rundown_article_source_reports_path_on_word_overlap_match(tmp_path):
-    """Word-overlap index match (return site 2) reports the resolved path."""
+def test_find_rundown_article_source_reports_path_on_unique_slug_match(tmp_path):
+    """Unique-slug index match (return site 2) reports the resolved path.
+
+    Was test_find_rundown_article_source_reports_path_on_word_overlap_match,
+    pinning the now-deleted word-overlap tier (bead mr1). Converted to
+    exercise the slug tier instead: a non-exact index hit -- the editor's
+    directive headline is reformulated punctuation, same slug -- must still
+    report its resolved path.
+    """
     articles_dir = tmp_path / "articles" / "zvi"
     articles_dir.mkdir(parents=True)
     zvi_file = articles_dir / "2026-03-19-chip-city.md"
@@ -683,14 +776,15 @@ def test_find_rundown_article_source_reports_path_on_word_overlap_match(tmp_path
         "The company announced plans for inference workloads."
     )
 
-    index = {"Chip City": "articles/zvi/2026-03-19-chip-city.md"}
+    # Index key and directive headline differ only in trailing punctuation,
+    # so they slugify identically without being an exact string match.
+    index = {"Nvidia announces new AI chip!": "articles/zvi/2026-03-19-chip-city.md"}
     (tmp_path / "headline_index.json").write_text(json.dumps(index))
 
     from pipeline.__main__ import find_rundown_article_source
 
     class FakeDirective:
-        # Editor reformulated "Chip City" into a descriptive headline
-        headline = "Nvidia to spend $26 billion to build open weight AI models"
+        headline = "Nvidia announces new AI chip"
         source = "zvi"
 
     text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
@@ -785,6 +879,39 @@ def test_find_rundown_article_source_reports_path_on_exa_hit(tmp_path):
     assert reason is None
 
 
+def test_direct_exa_hit_is_framed_as_third_party_coverage(tmp_path):
+    """A direct-Exa resolution (no stub above it) must be framed, not handed
+    to the writer as if it were the primary article (bead mr1 follow-up).
+
+    Uses the shared framing vocabulary from article_resolver.DIRECT_EXA_HEADING
+    -- the same terms consumer._OPEN_ACCESS_HEADING uses when appending to a
+    stub, adapted for the no-stub case -- so there is exactly one framing
+    vocabulary in the codebase, not two independently-worded ones.
+    """
+    from pipeline.__main__ import find_rundown_article_source
+    from pipeline.article_resolver import DIRECT_EXA_HEADING
+
+    exa_dir = tmp_path / "enrichment" / "exa"
+    exa_dir.mkdir(parents=True)
+    slug = _slugify("Direct Exa Only Story")
+    exa_file = exa_dir / f"{slug}.md"
+    exa_file.write_text(
+        "# Exa Results for: Direct Exa Only Story\nResult: hit\nQuery: q\n\n"
+        "## [Direct Exa Only Story](https://example.com/story)\n"
+        "Third-party text recovered via search.\n\n"
+    )
+
+    class FakeDirective:
+        headline = "Direct Exa Only Story"
+        source = "levine"
+
+    text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert text.startswith(DIRECT_EXA_HEADING)
+    assert "Third-party text recovered via search." in text
+    assert path == f"enrichment/exa/{slug}.md"
+    assert reason is None
+
+
 def test_find_rundown_article_source_exa_gated_miss_returns_none(tmp_path):
     """The Exa gate rejecting a `Result: empty` stub (site 6, miss branch) must
     fall through to the final miss (site 7): no text, no path -- not the path
@@ -858,7 +985,7 @@ def test_miss_reason_index_unreadable(tmp_path):
 
 
 def test_miss_reason_index_no_overlap(tmp_path):
-    """Index parses fine but no exact/word-overlap hit -> 'index_no_overlap'.
+    """Index parses fine but no exact/slug hit -> 'index_no_match'.
 
     All the legacy slug and Exa fallbacks below the index lookup also miss
     here (no article files, no Exa file exist), because the lookups
@@ -883,7 +1010,7 @@ def test_miss_reason_index_no_overlap(tmp_path):
     text, path, reason = find_rundown_article_source(FakeDirective(), tmp_path)
     assert text == ""
     assert path is None
-    assert reason == "index_no_overlap"
+    assert reason == "index_no_match"
 
 
 def test_hit_records_no_miss_reason(tmp_path):
@@ -1011,10 +1138,20 @@ def _run_collector_with_exa(
     Mirrors the monkeypatch style already used in this file for
     fetch_all_articles / resolve_redirect_url / generate_rundown_research_plan
     / sync_zvi_cache. Produces a plan with exactly one non-FP directive that
-    needs Exa. Returns work_dir.
+    needs Exa. The fetched article's headline matches the directive exactly,
+    so it resolves through headline_index -- the Exa trigger is gated on
+    that resolution post-3yb. Returns work_dir.
     """
     monkeypatch.setattr(
-        "pipeline.things_happen_collector.fetch_all_articles", lambda *a, **kw: []
+        "pipeline.things_happen_collector.fetch_all_articles",
+        lambda *a, **kw: [
+            Article(
+                headline=headline,
+                url="http://resolved.example/article",
+                content="stub",
+                source_tier="paywalled",
+            )
+        ],
     )
     monkeypatch.setattr(
         "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
@@ -1052,8 +1189,15 @@ def _run_collector_with_exa(
         lambda *a, **kw: (exa_results, exa_status),
     )
 
+    # links_raw must be non-empty or the collector short-circuits to
+    # articles = [] without ever calling the mocked fetch_all_articles.
+    _et = ZoneInfo("America/New_York")
+    today = datetime.now(tz=_et).strftime("%Y-%m-%d")
     levine_cache = tmp_path / "levine-cache"
     levine_cache.mkdir()
+    (levine_cache / f"{today}.json").write_text(
+        json.dumps([{"raw_url": "http://raw.example/article", "headline": headline}])
+    )
     semafor_cache = tmp_path / "semafor-cache"
     semafor_cache.mkdir()
     zvi_cache = tmp_path / "zvi-cache"
@@ -1111,24 +1255,25 @@ def test_exa_error_writes_file_with_status(tmp_path, monkeypatch):
 def test_exa_reader_e2e_fallback_matches_writer(tmp_path, monkeypatch):
     """Collector's write path and __main__ reader's lookup path agree.
 
-    Runs the real collector with an Exa hit, then calls the real reader with a
-    directive whose headline is absent from headline_index.json and has no
-    matching article file -- forcing control through the index exact match,
-    the fuzzy word-overlap match, and the legacy slug fallback before it can
-    reach the Exa fallback. This is the test that would have caught the
+    Runs the real collector against a paywalled Levine article (so the
+    resolver-gated trigger actually fires, per 3yb -- a headline resolving
+    to nothing can no longer reach the collector's Exa write path at all,
+    unlike before this change), then removes the stub article file the
+    index points at and calls the real reader. That forces control through
+    the (now-dangling) index entry and the legacy filesystem tiers before it
+    can reach the Exa fallback. This is the test that would have caught the
     original bug: each half wrote/read `{slug}.md` independently and the two
     conventions had silently drifted apart.
     """
-    # A real Levine article populates headline_index.json with genuine
-    # content, so the fuzzy-match loop actually runs (not vacuously, over an
-    # empty index) and must correctly find no overlap with our Exa headline.
+    headline = "Quantum Sensor Startup Raises Funding Round"
     monkeypatch.setattr(
         "pipeline.things_happen_collector.fetch_all_articles",
         lambda *a, **kw: [
             Article(
-                headline="Local Bakery Wins Award",
-                url="http://resolved.example/bakery",
-                content="A neighborhood bakery took home a regional pastry prize.",
+                headline=headline,
+                url="http://resolved.example/quantum",
+                content="stub",
+                source_tier="paywalled",
             )
         ],
     )
@@ -1138,19 +1283,17 @@ def test_exa_reader_e2e_fallback_matches_writer(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
     )
-
-    exa_headline = "Quantum Sensor Startup Raises Funding Round"
     monkeypatch.setattr(
         "pipeline.things_happen_collector.generate_rundown_research_plan",
         lambda *a, **kw: RundownResearchPlan(
             themes=["Tech"],
             directives=[
                 RundownStoryDirective(
-                    headline=exa_headline,
+                    headline=headline,
                     source="levine",
                     priority=1,
                     theme="Tech",
-                    needs_exa=True,
+                    needs_exa=False,
                     exa_query="quantum sensor startup funding",
                     is_foreign_policy=False,
                     fp_query="",
@@ -1178,7 +1321,7 @@ def test_exa_reader_e2e_fallback_matches_writer(tmp_path, monkeypatch):
     levine_cache = tmp_path / "levine-cache"
     levine_cache.mkdir()
     (levine_cache / f"{today}.json").write_text(
-        json.dumps([{"raw_url": "http://raw.example/bakery", "headline": "bakery"}])
+        json.dumps([{"raw_url": "http://raw.example/quantum", "headline": "quantum"}])
     )
     semafor_cache = tmp_path / "semafor-cache"
     semafor_cache.mkdir()
@@ -1194,34 +1337,44 @@ def test_exa_reader_e2e_fallback_matches_writer(tmp_path, monkeypatch):
         zvi_cache_dir=zvi_cache,
     )
 
-    # Sanity: the bakery article populated the index; our Exa headline did not.
+    # Sanity: the paywalled stub populated the index and fired Exa.
     index = json.loads((work_dir / "headline_index.json").read_text())
-    assert exa_headline not in index
-    assert "Local Bakery Wins Award" in index
+    assert headline in index
+    exa_file = work_dir / "enrichment" / "exa" / f"{_slugify(headline)}.md"
+    assert exa_file.exists()
+
+    # Remove the stub the index points at: the reader must fall through the
+    # dangling index entry and the (also-empty) legacy filesystem tiers, and
+    # land on the same Exa file the collector wrote -- proving both halves
+    # agree on `{slug}.md`.
+    (work_dir / index[headline]).unlink()
 
     from pipeline.__main__ import find_rundown_article_source
 
+    _headline = headline
+
     class FakeDirective:
-        headline = exa_headline
+        headline = _headline
         source = "levine"
 
-    text, _path, _reason = find_rundown_article_source(FakeDirective(), work_dir)
+    text, path, _reason = find_rundown_article_source(FakeDirective(), work_dir)
     assert "Exa recovered body text." in text
+    assert path == f"enrichment/exa/{_slugify(headline)}.md"
 
-    # Prove this isn't a tautology: remove the Exa file the collector wrote
-    # and confirm the reader now finds nothing -- i.e. the fallback really was
-    # reached rather than short-circuiting on an earlier lookup.
-    exa_file = work_dir / "enrichment" / "exa" / f"{_slugify(exa_headline)}.md"
-    assert exa_file.exists()
+    # Prove this isn't a tautology: remove the Exa file too and confirm the
+    # reader now finds nothing -- i.e. the fallback really was reached rather
+    # than short-circuiting on an earlier lookup.
     exa_file.unlink()
-    text_after_removal, _path_after_removal, reason_after_removal = (
+    text_after_removal, path_after_removal, reason_after_removal = (
         find_rundown_article_source(FakeDirective(), work_dir)
     )
     assert text_after_removal == ""
-    # The collector wrote a real headline_index.json above (populated by the
-    # bakery article), so once the Exa file is gone this directive misses
-    # with the index present but no overlap -- not "no_index".
-    assert reason_after_removal == "index_no_overlap"
+    assert path_after_removal is None
+    # The collector wrote a real headline_index.json above (the stub is
+    # gone but the entry remains), so with both the stub and the Exa file
+    # gone this directive misses with the index present but unreadable at
+    # the pointed-to path -- "index_no_match", not "no_index".
+    assert reason_after_removal == "index_no_match"
 
 
 def test_collector_works_without_levine_links(tmp_path, monkeypatch):
@@ -1366,13 +1519,18 @@ def _run_collector_for_exa_gate(
     directive,
     exa_results=None,
     exa_status="hit",
+    semafor_article: str | None = None,
 ):
     """Run the collector with one directive against a controlled article set.
 
     Captures every search_related_status call (args, kwargs) for inspection.
     Mirrors the monkeypatch style already used in this file for
     fetch_all_articles / resolve_redirect_url / generate_rundown_research_plan
-    / sync_zvi_cache. Returns (work_dir, calls).
+    / sync_zvi_cache. `semafor_article`, if given, is the full markdown text
+    of a single Semafor cache file (headline + headers + body) seeded into
+    the cache dir under today's lookback window -- used to give a directive a
+    real cache-story resolution (`rel not in tiers`) instead of a Levine
+    article match. Returns (work_dir, calls).
     """
     calls: list[tuple[tuple, dict]] = []
 
@@ -1407,6 +1565,8 @@ def _run_collector_for_exa_gate(
     )
     semafor_cache = tmp_path / "semafor-cache"
     semafor_cache.mkdir()
+    if semafor_article is not None:
+        (semafor_cache / f"{today}-gate-story.md").write_text(semafor_article)
     zvi_cache = tmp_path / "zvi-cache"
     zvi_cache.mkdir()
     work_dir = tmp_path / "work"
@@ -1478,10 +1638,22 @@ def test_exa_skips_live_article(tmp_path, monkeypatch):
     assert calls == []
 
 
+_SEMAFOR_GATE_ARTICLE = (
+    "# Semafor Story\n\n"
+    "URL: https://semafor.com/markets/story\n"
+    "Published: 2026-01-01\n"
+    "Source: semafor\n"
+    "Category: Markets\n"
+    "Routing: th\n\n"
+    "Body text."
+)
+
+
 def test_exa_fires_for_unmatched_directive_with_needs_exa(tmp_path, monkeypatch):
-    """Semafor/Zvi directives have no matching Levine article; the editor
-    flag must still be honored, or this silently regresses today's
-    behavior."""
+    """A Semafor/Zvi directive has no matching Levine article; it resolves
+    via the headline index to a cache file with real body text already
+    (`rel not in tiers`). The editor's needs_exa flag must still be honored,
+    or this silently regresses today's behavior."""
     directive = RundownStoryDirective(
         headline="Semafor Story",
         source="semafor",
@@ -1499,14 +1671,99 @@ def test_exa_fires_for_unmatched_directive_with_needs_exa(tmp_path, monkeypatch)
         articles=[],
         directive=directive,
         exa_status="empty",
+        semafor_article=_SEMAFOR_GATE_ARTICLE,
     )
     assert len(calls) == 1
     from pipeline.things_happen_collector import BYPASS_DOMAINS
 
     args, kwargs = calls[0]
     assert args[0] == "Semafor Story"
-    # No matched article means no origin domain to exclude.
+    # Resolved via the cache (rel not in tiers -- tiers is Levine-only), so
+    # there is no origin domain to exclude, even though the cache file's own
+    # URL header names semafor.com. See
+    # test_exa_excludes_origin_uses_tiers_not_resolved_file_url_header.
     assert kwargs["exclude_domains"] == list(BYPASS_DOMAINS)
+
+
+def test_exa_does_not_fire_for_semafor_story_without_needs_exa(tmp_path, monkeypatch):
+    """A Semafor/Zvi story resolves to a cache file with real body text
+    already (`rel not in tiers`); it needs no substitution unless the editor
+    explicitly asks for one."""
+    directive = RundownStoryDirective(
+        headline="Semafor Story",
+        source="semafor",
+        priority=1,
+        theme="Markets",
+        needs_exa=False,
+        exa_query="",
+        is_foreign_policy=False,
+        fp_query="",
+        include_in_episode=True,
+    )
+    _work_dir, calls = _run_collector_for_exa_gate(
+        tmp_path,
+        monkeypatch,
+        articles=[],
+        directive=directive,
+        semafor_article=_SEMAFOR_GATE_ARTICLE,
+    )
+    assert calls == []
+
+
+def test_exa_excludes_origin_uses_tiers_not_resolved_file_url_header(
+    tmp_path, monkeypatch
+):
+    """The excluded origin must come from tiers[rel]['url'] (recorded from
+    the fetched Article), never from the resolved file's own `URL:` header.
+    Using the file header would make a Semafor needs_exa search start
+    excluding semafor.com -- a behavior change nobody decided."""
+    directive = RundownStoryDirective(
+        headline="Semafor Story",
+        source="semafor",
+        priority=1,
+        theme="Markets",
+        needs_exa=True,
+        exa_query="",
+        is_foreign_policy=False,
+        fp_query="",
+        include_in_episode=True,
+    )
+    _work_dir, calls = _run_collector_for_exa_gate(
+        tmp_path,
+        monkeypatch,
+        articles=[],
+        directive=directive,
+        semafor_article=_SEMAFOR_GATE_ARTICLE,
+    )
+    assert len(calls) == 1
+    from pipeline.things_happen_collector import BYPASS_DOMAINS
+
+    _args, kwargs = calls[0]
+    assert kwargs["exclude_domains"] == list(BYPASS_DOMAINS)
+    assert "semafor.com" not in kwargs["exclude_domains"]
+
+
+def test_exa_does_not_fire_for_unresolved_directive(tmp_path, monkeypatch):
+    """A directive whose headline resolves to nothing must not fire Exa: a
+    search query built from a headline we could not even find the article
+    for is exactly the wrong-story risk this unification exists to remove.
+    `needs_exa=True` must not override this -- the miss branch is explicit
+    and comes before the needs_exa union."""
+    directive = RundownStoryDirective(
+        headline="Headline With No Matching Article Anywhere",
+        source="levine",
+        priority=1,
+        theme="Tech",
+        needs_exa=True,
+        exa_query="",
+        is_foreign_policy=False,
+        fp_query="",
+        include_in_episode=True,
+    )
+    _work_dir, calls = _run_collector_for_exa_gate(
+        tmp_path, monkeypatch, articles=[], directive=directive
+    )
+    assert calls == []
 
 
 def test_exa_excludes_origin_domain_and_bypass_mirrors(tmp_path, monkeypatch):
@@ -1770,3 +2027,59 @@ def test_index_valid_json_but_wrong_shape_does_not_crash(tmp_path):
     assert text == ""
     assert path is None
     assert reason == "index_unreadable"
+
+
+def test_valid_but_empty_index_reports_index_no_match_not_unreadable(tmp_path):
+    """An index that parses to {} is readable; it just has nothing in it."""
+    (tmp_path / "headline_index.json").write_text("{}")
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class D:
+        headline = "Some Headline"
+        source = "levine"
+
+    text, path, reason = find_rundown_article_source(D(), tmp_path)
+    assert (text, path) == ("", None)
+    assert reason == "index_no_match"
+
+
+def test_empty_slug_headline_does_not_match_a_lone_zvi_file(tmp_path):
+    """A punctuation-only headline slugifies to "", turning the Zvi tier's
+    glob into `*.md`. With one Zvi file present that file would be returned as
+    the directive's PRIMARY text -- a wrong match, not a miss.
+    """
+    zvi = tmp_path / "articles" / "zvi"
+    zvi.mkdir(parents=True)
+    (zvi / "2026-01-01-post-section.md").write_text("# a\n\nURL: https://z/1\n\nbody a")
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class D:
+        headline = "???"
+        source = "zvi"
+
+    text, path, reason = find_rundown_article_source(D(), tmp_path)
+    assert (text, path) == ("", None)
+
+
+def test_flat_tier_requires_the_full_numbered_prefix(tmp_path):
+    """The anchoring regex is load-bearing beyond the glob.
+
+    `*-ai.md` excludes `00-openai.md` on its own, but still matches
+    `00-open-ai.md`; only the `\\d+-{slug}\\.md` fullmatch rejects that.
+    """
+    articles = tmp_path / "articles"
+    articles.mkdir(parents=True)
+    (articles / "00-open-ai.md").write_text(
+        "# Open AI thing\n\nURL: https://x/o\n\nbody"
+    )
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class D:
+        headline = "AI"
+        source = "levine"
+
+    text, path, reason = find_rundown_article_source(D(), tmp_path)
+    assert path is None

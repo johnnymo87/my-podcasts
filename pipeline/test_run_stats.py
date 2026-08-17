@@ -743,3 +743,197 @@ def test_missing_miss_reason_key_produces_no_histogram_entry(tmp_path):
 
     report = render_report(stats)
     assert "misses" not in report
+
+
+def test_legacy_index_no_overlap_reason_renders_without_shadow(tmp_path):
+    """Retired fuzzy-tier value + no `shadow` key at all (pre-shadow data).
+
+    Both `/persist/my-podcasts/run-stats.jsonl` history and old
+    `writer_inputs.json` files on disk carry `index_no_overlap`, and predate
+    the `shadow` field entirely. Neither should crash or be miscounted.
+    """
+    work_dir = tmp_path / "the-rundown-legacy-overlap"
+    work_dir.mkdir()
+    _write_json(
+        work_dir / "writer_inputs.json",
+        [
+            {
+                "headline": "Old miss",
+                "theme": "Theme A",
+                "source_path": None,
+                "chars": 0,
+                "reached_prompt": False,
+                "miss_reason": "index_no_overlap",
+                # no "shadow" key at all
+            }
+        ],
+    )
+
+    stats = collect_run_stats(work_dir, job_id="j", date_str="2026-08-15")
+
+    assert stats.writer_miss_reasons == {"index_no_overlap": 1}
+    assert stats.writer_miss_shadow_hits == 0
+
+    report = render_report(stats)
+    assert "index_no_overlap 1" in report
+    assert "w/ shadow" not in report
+
+
+def test_slug_ambiguous_renders_in_miss_histogram(tmp_path):
+    """New miss reason: two indexed headlines share the directive's slug."""
+    work_dir = tmp_path / "the-rundown-ambiguous"
+    work_dir.mkdir()
+    _write_json(
+        work_dir / "writer_inputs.json",
+        [
+            {
+                "headline": "Ambiguous story",
+                "theme": "Theme A",
+                "source_path": None,
+                "chars": 0,
+                "reached_prompt": False,
+                "miss_reason": "slug_ambiguous",
+                "shadow": None,
+            }
+        ],
+    )
+
+    stats = collect_run_stats(work_dir, job_id="j", date_str="2026-08-15")
+
+    assert stats.writer_miss_reasons == {"slug_ambiguous": 1}
+
+    report = render_report(stats)
+    assert "slug_ambiguous 1" in report
+
+
+def test_shadow_hit_count_rendered_alongside_miss_histogram(tmp_path):
+    """Misses that had a shadow candidate are surfaced as a count."""
+    work_dir = tmp_path / "the-rundown-shadow-hits"
+    work_dir.mkdir()
+    _write_json(
+        work_dir / "writer_inputs.json",
+        [
+            {
+                "headline": "Miss with shadow",
+                "theme": "Theme A",
+                "source_path": None,
+                "chars": 0,
+                "reached_prompt": False,
+                "miss_reason": "index_no_match",
+                "shadow": {"path": "articles/00-live0.md", "score": 0.5},
+            },
+            {
+                "headline": "Miss without shadow",
+                "theme": "Theme A",
+                "source_path": None,
+                "chars": 0,
+                "reached_prompt": False,
+                "miss_reason": "index_no_match",
+                "shadow": None,
+            },
+            {
+                "headline": "Another miss reason",
+                "theme": "Theme A",
+                "source_path": None,
+                "chars": 0,
+                "reached_prompt": False,
+                "miss_reason": "no_index",
+                "shadow": None,
+            },
+        ],
+    )
+
+    stats = collect_run_stats(work_dir, job_id="j", date_str="2026-08-15")
+
+    assert stats.writer_miss_reasons == {"index_no_match": 2, "no_index": 1}
+    assert stats.writer_miss_shadow_hits == 1
+
+    report = render_report(stats)
+    assert "1 w/ shadow" in report
+
+
+def test_zero_shadow_hits_renders_no_shadow_fragment(tmp_path):
+    """No noise when nothing had a shadow candidate -- matches today's format."""
+    work_dir = tmp_path / "the-rundown-no-shadow-hits"
+    work_dir.mkdir()
+    _write_json(
+        work_dir / "writer_inputs.json",
+        [
+            {
+                "headline": "Plain miss",
+                "theme": "Theme A",
+                "source_path": None,
+                "chars": 0,
+                "reached_prompt": False,
+                "miss_reason": "no_index",
+                "shadow": None,
+            }
+        ],
+    )
+
+    stats = collect_run_stats(work_dir, job_id="j", date_str="2026-08-15")
+
+    assert stats.writer_miss_shadow_hits == 0
+
+    report = render_report(stats)
+    assert "[misses: no_index 1]" in report
+    assert "w/ shadow" not in report
+
+
+def test_shadow_counter_only_counts_missed_entries(tmp_path):
+    """A `shadow` value on a *hit* entry (miss_reason None) must not count.
+
+    consumer.py never actually produces this shape (shadow is only computed
+    when miss_reason is not None), but the counter must not trust the
+    presence of `shadow` alone -- it has to gate on an actual miss.
+    """
+    work_dir = tmp_path / "the-rundown-shadow-on-hit"
+    work_dir.mkdir()
+    _write_json(
+        work_dir / "writer_inputs.json",
+        [
+            {
+                "headline": "Resolved story",
+                "theme": "Theme A",
+                "source_path": "articles/00-live0.md",
+                "chars": 500,
+                "reached_prompt": True,
+                "miss_reason": None,
+                "shadow": {"path": "articles/00-live0.md", "score": 0.9},
+            }
+        ],
+    )
+
+    stats = collect_run_stats(work_dir, job_id="j", date_str="2026-08-15")
+
+    assert stats.writer_miss_reasons == {}
+    assert stats.writer_miss_shadow_hits == 0
+
+    report = render_report(stats)
+    assert "w/ shadow" not in report
+
+
+def test_missing_shadow_key_on_a_miss_is_not_counted_as_a_hit(tmp_path):
+    """A missing `shadow` key on a miss entry must read as 'no candidate',
+    never as a shadow hit -- same discipline as the missing-miss_reason and
+    missing-reached_prompt precedents in this file."""
+    work_dir = tmp_path / "the-rundown-shadow-key-missing"
+    work_dir.mkdir()
+    _write_json(
+        work_dir / "writer_inputs.json",
+        [
+            {
+                "headline": "Miss no shadow key",
+                "theme": "Theme A",
+                "source_path": None,
+                "chars": 0,
+                "reached_prompt": False,
+                "miss_reason": "no_index",
+                # no "shadow" key at all
+            }
+        ],
+    )
+
+    stats = collect_run_stats(work_dir, job_id="j", date_str="2026-08-15")
+
+    assert stats.writer_miss_shadow_hits == 0

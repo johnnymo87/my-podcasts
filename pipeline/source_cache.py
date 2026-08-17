@@ -13,6 +13,7 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel
 
+from pipeline.article_resolver import slugify as _slugify
 from pipeline.fp_homepage_scraper import scrape_homepage
 from pipeline.rss_sources import FP_DIGEST_RSS_SOURCES, SEMAFOR, fetch_feed
 
@@ -20,13 +21,6 @@ from pipeline.rss_sources import FP_DIGEST_RSS_SOURCES, SEMAFOR, fetch_feed
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 logger = logging.getLogger(__name__)
-
-
-def _slugify(text: str) -> str:
-    safe = "".join(c if c.isalnum() else "-" for c in text.lower())
-    while "--" in safe:
-        safe = safe.replace("--", "-")
-    return safe.strip("-")[:50]
 
 
 def _strip_html(html: str) -> str:

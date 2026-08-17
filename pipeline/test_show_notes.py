@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from pipeline.show_notes import (
+    _find_article_file,
     extract_show_notes_articles,
     filter_show_notes_by_coverage,
 )
@@ -262,6 +263,103 @@ def test_extract_articles_exa_headerless_still_used_as_source(tmp_path) -> None:
     assert result[0]["url"] == "https://example.com/legacy"
 
 
+# --- _find_article_file: resolver-backed lookup (bead 3yb follow-up) ---
+
+
+def test_find_article_file_resolves_via_index_exact_match(tmp_path) -> None:
+    """An exact headline_index.json hit is used directly, without touching
+    the filesystem search below it."""
+    articles_dir = tmp_path / "articles"
+    articles_dir.mkdir()
+    article = articles_dir / "00-widget-story.md"
+    article.write_text("# Widget Story\n\nURL: https://example.com/widget\n\nText.")
+    (tmp_path / "headline_index.json").write_text(
+        json.dumps({"Widget Story": "articles/00-widget-story.md"})
+    )
+
+    result = _find_article_file("Widget Story", "levine", tmp_path)
+    assert result == article
+
+
+def test_find_article_file_agrees_with_writer_resolver_on_whitespace_reformulation(
+    tmp_path,
+) -> None:
+    """A directive headline differing from the index key only by whitespace
+    must resolve to the SAME file via both the writer's article resolver
+    (__main__.find_rundown_article_source) and show notes' _find_article_file
+    -- otherwise trigger/delivery agree while show notes silently disagree,
+    the same bug class as bead 3yb, one layer down.
+
+    The article lives one level deeper than any of _find_article_file's
+    filesystem tiers checks (not flat-top-level, not semafor/zvi/homepage/
+    rss/routed). `_slugify` already collapses whitespace on its own, so a
+    same-directory placement would let the filesystem fallback rescue this
+    case too, and the "break the index path" mutation check would not bite.
+    This placement means the index is the ONLY route to the file, proving
+    the resolver path is actually exercised rather than incidentally
+    redundant with the filesystem search underneath it.
+    """
+    nested_dir = tmp_path / "articles" / "custom-source"
+    nested_dir.mkdir(parents=True)
+    article = nested_dir / "00-widget-maker-struggles.md"
+    article.write_text(
+        "# Widget  Maker Struggles\n\nURL: https://example.com/widget\n\nText."
+    )
+    rel_path = "articles/custom-source/00-widget-maker-struggles.md"
+    (tmp_path / "headline_index.json").write_text(
+        json.dumps({"Widget  Maker Struggles": rel_path})
+    )
+    directive_headline = "Widget Maker Struggles"  # single space, Gemini-normalized
+
+    from pipeline.__main__ import find_rundown_article_source
+
+    class FakeDirective:
+        headline = directive_headline
+        source = "levine"
+
+    _text, path, _reason = find_rundown_article_source(FakeDirective(), tmp_path)
+    assert path == rel_path
+
+    show_notes_result = _find_article_file(directive_headline, "levine", tmp_path)
+    assert show_notes_result == article
+
+
+def test_find_article_file_falls_back_to_filesystem_on_index_miss(tmp_path) -> None:
+    """The index existing is not enough to stop the cascade -- a headline the
+    index does not cover must still fall through to the filesystem search,
+    matching find_rundown_article_source. Falling back only on index-
+    *absence* would disagree with delivery on exactly the reformulated-
+    headline cases this unification exists to reconcile."""
+    articles_dir = tmp_path / "articles"
+    articles_dir.mkdir()
+    article = articles_dir / "00-unindexed-story.md"
+    article.write_text("# Unindexed Story\n\nURL: https://example.com/u\n\nText.")
+    # Index exists but knows nothing about this headline.
+    (tmp_path / "headline_index.json").write_text(
+        json.dumps({"Some Other Story": "articles/01-other.md"})
+    )
+
+    result = _find_article_file("Unindexed Story", "levine", tmp_path)
+    assert result == article
+
+
+def test_find_article_file_no_index_resolves_via_filesystem(tmp_path) -> None:
+    """fp_collector writes no headline_index.json at all, so the filesystem
+    search is the ONLY path for FP Digest show notes -- this is the FP
+    shape, not a legacy fallback. See exa_client.py:136 for the sibling
+    comment pinning this same permanence for the Exa reader."""
+    homepage_dir = tmp_path / "articles" / "homepage" / "iran"
+    homepage_dir.mkdir(parents=True)
+    article = homepage_dir / "us-strikes-iran-base.md"
+    article.write_text(
+        "# US Strikes Iran Base\n\nURL: https://antiwar.com/iran\n\nText."
+    )
+    assert not (tmp_path / "headline_index.json").exists()
+
+    result = _find_article_file("US Strikes Iran Base", "homepage/iran", tmp_path)
+    assert result == article
+
+
 # --- filter_show_notes_by_coverage tests ---
 
 
@@ -334,3 +432,73 @@ def test_filter_preserves_order() -> None:
     result = filter_show_notes_by_coverage(articles, covered)
     # Original order preserved, not covered order
     assert [r["title"] for r in result] == ["First Story", "Third Story"]
+
+
+def test_find_article_file_flat_glob_is_anchored_not_suffix_matched(tmp_path):
+    """Slug 'ai' must not link to '00-openai.md' in show notes either.
+
+    Delivery anchors this glob; show notes must too, or the episode links a
+    URL for a story the script never discussed.
+    """
+    from pipeline.show_notes import _find_article_file
+
+    articles = tmp_path / "articles"
+    articles.mkdir(parents=True)
+    (articles / "00-openai.md").write_text(
+        "# OpenAI ships a model\n\nURL: https://x/o\n\nbody"
+    )
+
+    assert _find_article_file("AI", "levine", tmp_path) is None
+
+
+def test_find_article_file_zvi_tier_refuses_ambiguous_matches(tmp_path):
+    """Two substring matches must be a miss, not sorted()[0]."""
+    from pipeline.show_notes import _find_article_file
+
+    zvi = tmp_path / "articles" / "zvi"
+    zvi.mkdir(parents=True)
+    (zvi / "2026-01-01-post-ai-safety.md").write_text(
+        "# a\n\nURL: https://z/1\n\nbody a"
+    )
+    (zvi / "2026-01-02-post-ai-safety-extra.md").write_text(
+        "# b\n\nURL: https://z/2\n\nbody b"
+    )
+
+    assert _find_article_file("AI Safety", "zvi", tmp_path) is None
+
+
+def test_find_article_file_stops_on_ambiguous_slug(tmp_path):
+    """slug_ambiguous must not fall through to a filesystem tier that guesses."""
+    from pipeline.show_notes import _find_article_file
+
+    long = "A" * 60
+    slug = "a" * 50
+    articles = tmp_path / "articles"
+    articles.mkdir(parents=True)
+    (articles / f"00-{slug}.md").write_text("# one\n\nURL: https://x/1\n\nbody one")
+    (articles / f"01-{slug}.md").write_text("# two\n\nURL: https://x/2\n\nbody two")
+    index = {
+        long + " one": f"articles/00-{slug}.md",
+        long + " two": f"articles/01-{slug}.md",
+    }
+    (tmp_path / "headline_index.json").write_text(json.dumps(index))
+
+    assert _find_article_file(long + " three", "levine", tmp_path) is None
+
+
+def test_find_article_file_flat_tier_requires_the_full_numbered_prefix(tmp_path):
+    """The anchoring regex, not just the glob, is load-bearing.
+
+    `*-ai.md` already excludes `00-openai.md`, but it still MATCHES
+    `00-open-ai.md` -- a different story whose slug merely ends in the query
+    slug. Only the `\\d+-{slug}\\.md` fullmatch rejects that.
+    """
+    from pipeline.show_notes import _find_article_file
+
+    articles = tmp_path / "articles"
+    articles.mkdir(parents=True)
+    (articles / "00-open-ai.md").write_text(
+        "# Open AI thing\n\nURL: https://x/o\n\nbody"
+    )
+
+    assert _find_article_file("AI", "levine", tmp_path) is None
