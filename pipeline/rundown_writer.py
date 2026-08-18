@@ -139,27 +139,6 @@ class WriterOutput:
     covered_headlines: list[str] = field(default_factory=list)
 
 
-def parse_summary(text: str) -> WriterOutput:
-    """Extract <summary>...</summary> block from writer output.
-
-    Returns WriterOutput with summary and the remaining script text.
-    If no summary tags found, summary is empty string.
-
-    Dead in this module as of the report_engine migration (``generate_rundown_script``
-    now uses ``report_engine.parse_report``, which extracts from the full raw
-    text rather than a summary-stripped remainder) -- retained only because
-    ``pipeline.fp_writer`` still imports it. Deleted in the same commit that
-    migrates ``fp_writer`` off it (my-podcasts-xlf, task 3).
-    """
-    match = re.search(r"<summary>\s*(.*?)\s*</summary>", text, re.DOTALL)
-    if match:
-        summary = match.group(1).strip()
-        script = text[: match.start()] + text[match.end() :]
-        script = script.strip()
-        return WriterOutput(script=script, summary=summary)
-    return WriterOutput(script=text, summary="")
-
-
 def parse_covered(text: str) -> list[str]:
     """Extract covered headlines from ``<covered>...</covered>`` tags.
 
@@ -181,28 +160,6 @@ def parse_covered(text: str) -> list[str]:
 # is a parsing artifact, not a briefing. Deliberately far below the smallest
 # plausible episode (~5000 chars) so it only ever catches garbage.
 _MIN_SCRIPT_CHARS = 500
-
-
-def _extract_script(text: str) -> str:
-    """Extract the podcast script from ``<script>...</script>`` tags.
-
-    Picks the **longest** block, not the first. The model sometimes emits a
-    placeholder ``<script>...</script>`` while planning, before writing the
-    real one -- on 2026-08-18 an FP Digest episode shipped as a 2636-byte mp3
-    because the old non-greedy ``re.search`` matched a 3-character placeholder
-    at offset 647 instead of the 11814-character script at offset 2523.
-
-    Dead in this module as of the report_engine migration (``generate_rundown_script``
-    now uses ``report_engine.parse_report``) -- retained only because
-    ``pipeline.fp_writer`` still imports it. Deleted in the same commit that
-    migrates ``fp_writer`` off it (my-podcasts-xlf, task 3).
-    """
-    import re
-
-    blocks = re.findall(r"<script>\s*(.*?)\s*</script>", text, re.DOTALL)
-    if blocks:
-        return max(blocks, key=len).strip()
-    return text
 
 
 def _validate_script_length(script: str, label: str) -> None:

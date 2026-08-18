@@ -6,11 +6,9 @@ import pytest
 
 from pipeline.rundown_writer import (
     WriterOutput,
-    _extract_script,
     build_rundown_prompt,
     generate_rundown_script,
     parse_covered,
-    parse_summary,
 )
 
 
@@ -244,56 +242,6 @@ def test_generate_rundown_script_rejects_empty_output(
         assert "empty script" in str(e)
 
     assert not (tmp_path / "raw_writer_output.txt").exists()
-
-
-def test_extract_script_with_tags():
-    """<script> tags extract the spoken script."""
-    raw = (
-        "Let me analyze what's new.\n\n"
-        "<summary>Today covers markets and AI.</summary>\n\n"
-        "<script>Hey, welcome to The Rundown for Thursday.</script>"
-    )
-    assert _extract_script(raw) == "Hey, welcome to The Rundown for Thursday."
-
-
-def test_extract_script_tags_with_reasoning():
-    """Reasoning before <script> tags is stripped."""
-    raw = (
-        "I see 8 stories. Let me figure out what's new vs repeated.\n"
-        "Stories 1-3 are new, 4-8 were covered yesterday.\n\n"
-        "<script>\nHey, welcome. Three stories today.\n\n"
-        "First up, markets moved.\n</script>"
-    )
-    assert _extract_script(raw) == (
-        "Hey, welcome. Three stories today.\n\nFirst up, markets moved."
-    )
-
-
-def test_extract_script_no_tags_returns_raw():
-    """Without <script> tags, the full text is returned as-is."""
-    raw = "Hey, welcome to The Rundown for Monday."
-    assert _extract_script(raw) == raw
-
-
-def test_parse_summary_extracts_tags():
-    text = "<summary>A brief summary.</summary>\n\nHey, welcome to The Rundown."
-    result = parse_summary(text)
-    assert result.summary == "A brief summary."
-    assert result.script == "Hey, welcome to The Rundown."
-
-
-def test_parse_summary_no_tags():
-    text = "Hey, welcome to The Rundown."
-    result = parse_summary(text)
-    assert result.summary == ""
-    assert result.script == "Hey, welcome to The Rundown."
-
-
-def test_parse_summary_multiline():
-    text = "<summary>\nLine one.\nLine two.\n</summary>\n\nThe script."
-    result = parse_summary(text)
-    assert result.summary == "Line one.\nLine two."
-    assert result.script == "The script."
 
 
 @patch("pipeline.report_engine.delete_session")
@@ -815,30 +763,6 @@ def test_prompt_forbids_a_closing_recap():
     assert "naming no stories" in PROMPT_TEMPLATE
     # The old wording invited the behavior; make sure it is gone.
     assert "a brief sign-off are\nuseful" not in PROMPT_TEMPLATE
-
-
-def test_extract_script_picks_the_longest_block_not_the_first():
-    """A placeholder <script>...</script> before the real one must not win.
-
-    Real incident, 2026-08-18 FP Digest: the model emitted a literal
-    `<script>...</script>` sketch at offset 647 before writing the real script
-    at 2523. The non-greedy regex matched the placeholder, so a 3-byte script
-    was TTS'd and a 2636-byte mp3 shipped to subscribers (a normal episode is
-    ~3 MB). The full correct script was sitting in raw_writer_output.txt.
-    """
-    from pipeline.rundown_writer import _extract_script
-
-    raw = (
-        "planning notes\n<script>...</script>\nmore notes\n"
-        "<script>\nThe real briefing text, which is much longer.\n</script>\n"
-    )
-    assert _extract_script(raw) == "The real briefing text, which is much longer."
-
-
-def test_extract_script_returns_text_when_no_tags():
-    from pipeline.rundown_writer import _extract_script
-
-    assert _extract_script("no tags here") == "no tags here"
 
 
 def test_writer_rejects_an_implausibly_short_script():

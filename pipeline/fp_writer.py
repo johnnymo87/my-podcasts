@@ -2,20 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pipeline.opencode_client import (
-    create_session,
-    delete_session,
-    get_last_assistant_text,
-    get_messages,
-    send_prompt_async,
-    wait_for_idle,
-)
-from pipeline.rundown_writer import (
-    WriterOutput,
-    _extract_script,
-    parse_covered,
-    parse_summary,
-)
+from pipeline.report_engine import fetch_report_text, parse_report
+from pipeline.rundown_writer import WriterOutput, parse_covered
 
 
 PROMPT_TEMPLATE = """\
@@ -138,8 +126,12 @@ def generate_fp_script(
 ) -> WriterOutput:
     """Generate a FP podcast script via the shared opencode server.
 
-    See ``pipeline.rundown_writer.generate_rundown_script`` for the persistence
-    contract — this writer follows the same pattern.
+    If ``work_dir`` is provided, the model's raw output is persisted to
+    ``work_dir/raw_writer_output.txt`` the moment it's available. Subsequent
+    calls with the same ``work_dir`` skip the model call entirely and reuse
+    the persisted text. If parsing the persisted text fails, the file is
+    deleted so the next retry regenerates instead of looping on the same
+    broken content.
     """
     raw_path = work_dir / "raw_writer_output.txt" if work_dir else None
 
@@ -161,27 +153,22 @@ def generate_fp_script(
             "and the script that will be read aloud.\n\n" + prompt
         )
 
-        session_id = create_session()
-        try:
-            send_prompt_async(session_id, instruction)
-            if not wait_for_idle(session_id, timeout=900):
-                raise RuntimeError(
-                    "opencode session did not complete within 900 seconds"
-                )
-            messages = get_messages(session_id)
-            full_text = get_last_assistant_text(messages).strip()
-            if raw_path is not None:
-                raw_path.parent.mkdir(parents=True, exist_ok=True)
-                raw_path.write_text(full_text, encoding="utf-8")
-        finally:
-            delete_session(session_id)
+        full_text = fetch_report_text(instruction, label="FP digest")
+        if raw_path is not None:
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_path.write_text(full_text, encoding="utf-8")
 
     try:
         covered = parse_covered(full_text)
-        summary_result = parse_summary(full_text)
-        script = _extract_script(summary_result.script)
-        if not script.strip():
-            raise RuntimeError("FP writer returned empty script")
+        # min_chars=500 is re-derived here, not copied from the transcript
+        # path's 2000 -- see generate_rundown_script's comment for why the
+        # daily writers' bounded-retry regime justifies the lower floor.
+        # require_tags=True because this is an automated, no-human-in-the-loop
+        # publish path -- a missing <script> tag must be a loud refusal, not
+        # a narration of the model's raw reasoning.
+        report = parse_report(
+            full_text, label="FP digest", min_chars=500, require_tags=True
+        )
     except RuntimeError:
         if raw_path is not None:
             try:
@@ -191,7 +178,7 @@ def generate_fp_script(
         raise
 
     return WriterOutput(
-        script=script,
-        summary=summary_result.summary,
+        script=report.script,
+        summary=report.summary,
         covered_headlines=covered,
     )
