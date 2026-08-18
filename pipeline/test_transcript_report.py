@@ -155,7 +155,7 @@ def test_generate_report_refuses_output_with_no_script_tag(
     # Long enough to clear _MIN_SCRIPT_CHARS, so only require_tags can catch it.
     mock_text.return_value = "Here is my reasoning about the transcript. " * 200
 
-    with pytest.raises(RuntimeError, match="no <script> tag"):
+    with pytest.raises(RuntimeError, match="no trustworthy <script> markup"):
         generate_report(body="b", subject="s", feed_slug="chinatalk")
 
     mock_delete.assert_called_once_with("ses_x")

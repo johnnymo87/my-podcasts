@@ -392,7 +392,7 @@ def test_generate_fp_script_requires_a_script_tag(monkeypatch, tmp_path) -> None
     )
     monkeypatch.setattr("pipeline.report_engine.delete_session", lambda sid: None)
 
-    with pytest.raises(RuntimeError, match="no <script> tag"):
+    with pytest.raises(RuntimeError, match="no trustworthy <script> markup"):
         generate_fp_script(
             themes=["Iran"],
             articles_by_theme={"Iran": ["Article"]},

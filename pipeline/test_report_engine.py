@@ -10,6 +10,7 @@ from pipeline.report_engine import (
     extract_summary,
     fetch_report_text,
     parse_report,
+    persist_raw_output,
     run_report_prompt,
 )
 
@@ -426,7 +427,7 @@ def test_parse_report_shape_c_no_tags_raises_when_require_tags():
     """
     long = "Just raw model prose with no tags at all. " * 40
 
-    with pytest.raises(RuntimeError, match="rundown.*no <script> tag"):
+    with pytest.raises(RuntimeError, match="rundown.*no trustworthy <script> markup"):
         parse_report(long, label="rundown", require_tags=True)
 
 
@@ -493,3 +494,75 @@ def test_parse_report_require_tags_still_accepts_well_formed_input():
 
     assert result.script == "Spoken words here."
     assert result.summary == "Brief."
+
+
+def test_require_tags_refuses_a_bare_script_mention_in_reasoning():
+    """A mention of the tag is not evidence a script was delimited.
+
+    Adversarial review broke the first version of require_tags, which only
+    asked whether the substring "<script>" appeared anywhere. This shape
+    satisfied that check, then fell into extract_script's unclosed-tail
+    branch via its `not candidates` arm and returned the model's raw
+    reasoning: 3382 characters, no markup for the leak guard to catch, far
+    above any min_chars floor. It published as an episode.
+    """
+    raw = (
+        "<summary>sum</summary><covered>- h</covered>\n"
+        "Okay, I need to produce a <script> tag now. Let me think. "
+        + "The Fed did a thing. "
+        * 160
+    )
+
+    with pytest.raises(RuntimeError, match="no trustworthy <script> markup"):
+        parse_report(raw, label="rundown", min_chars=500, require_tags=True)
+
+
+def test_require_tags_still_accepts_the_ne0_mangled_close_shape():
+    """The mangled-close recovery must survive the require_tags tightening.
+
+    This is the my-podcasts-ne0 production shape: the model genuinely wrote a
+    script and fumbled only the closing tag. Demanding a well-formed
+    "</script>" would re-break it, which is why trustworthiness is a
+    disjunction (well-formed pair OR mangled-tag evidence) rather than a
+    close-tag check.
+    """
+    long = "The Fed did a thing. " * 400
+    result = parse_report(
+        f"<script>{long}</scrip>", label="rundown", min_chars=500, require_tags=True
+    )
+
+    assert result.script.startswith("The Fed did a thing.")
+    assert "<script" not in result.script.lower()
+
+
+def test_persist_raw_output_is_atomic(tmp_path):
+    """A reader must never observe a partially-written raw file.
+
+    The file is an input to a later retry, and a truncated one is the
+    dangerous case: cut mid-<script>, unclosed-tail recovery returns a
+    clean-looking HALF script that passes every refusal and ships as a real
+    episode. Deploying this pipeline restarts the very process doing the
+    write, so the trigger is routine.
+    """
+    target = tmp_path / "nested" / "raw_writer_output.txt"
+
+    persist_raw_output(target, "first")
+    assert target.read_text(encoding="utf-8") == "first"
+
+    persist_raw_output(target, "second")
+    assert target.read_text(encoding="utf-8") == "second"
+
+    # No temp file is left behind to be mistaken for real output later.
+    assert list(target.parent.iterdir()) == [target]
+
+
+def test_persist_raw_output_leaves_old_content_when_the_write_fails(tmp_path):
+    """A failed write must not destroy the previous good file."""
+    target = tmp_path / "raw_writer_output.txt"
+    persist_raw_output(target, "good content")
+
+    with patch("pipeline.report_engine.os.replace", side_effect=OSError("disk full")):
+        with pytest.raises(OSError):
+            persist_raw_output(target, "new content")
+
+    assert target.read_text(encoding="utf-8") == "good content"

@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pipeline.report_engine import fetch_report_text, parse_report
+from pipeline.report_engine import fetch_report_text, parse_report, persist_raw_output
 
 
 PROMPT_TEMPLATE = """\
@@ -225,8 +225,7 @@ def generate_rundown_script(
 
         full_text = fetch_report_text(instruction, label="Rundown")
         if raw_path is not None:
-            raw_path.parent.mkdir(parents=True, exist_ok=True)
-            raw_path.write_text(full_text, encoding="utf-8")
+            persist_raw_output(raw_path, full_text)
 
     try:
         covered = parse_covered(full_text)

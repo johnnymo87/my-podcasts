@@ -14,8 +14,10 @@ writer can depend on this module without an import cycle.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from pipeline.opencode_client import (
     create_session,
@@ -139,6 +141,92 @@ def extract_script(text: str) -> str:
     )
     fallback = re.sub(r"</?script>", "", fallback, flags=re.IGNORECASE)
     return fallback.strip()
+
+
+def persist_raw_output(path: Path, text: str) -> None:
+    """Write raw model output to ``path`` atomically.
+
+    The daily writers persist the model's reply before parsing it, so a retry
+    can re-parse instead of paying for another 900-second generation. That
+    makes the file an *input* to a later run, which is why the write must be
+    all-or-nothing.
+
+    A plain ``write_text`` is not. Adversarial review demonstrated the
+    failure: truncate the file mid-``<script>`` and the next retry's
+    unclosed-tail recovery returns a clean-looking **half script** that passes
+    every publish-boundary refusal -- 3072 characters of real episode text
+    ending mid-sentence, shipped silently. Truncation lands mid-script in
+    practice because the script dominates the file's length.
+
+    The trigger is not exotic: deploying this pipeline is a
+    ``systemctl restart`` of the very process doing the write. An empty file
+    from a killed write self-heals loudly (no trustworthy markup -> refuse ->
+    unlink -> regenerate); a half-written one does not, which is exactly
+    backwards.
+
+    ``os.replace`` is atomic on POSIX, so a reader sees either the previous
+    file or the complete new one, never a partial.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _has_trustworthy_script_markup(text: str) -> bool:
+    """Did the model actually delimit a script, or merely mention the tag?
+
+    This is the test behind ``require_tags``, and the naive version of it --
+    "does the string ``<script>`` appear anywhere" -- is not good enough. It
+    was the first thing tried, and adversarial review broke it immediately
+    with this shape::
+
+        <summary>...</summary><covered>...</covered>
+        Okay, I need to produce a <script> tag now. Let me think. <3300 chars
+        of the model reasoning to itself, no further tags>
+
+    The bare mention satisfies a substring check. ``extract_script`` then
+    finds no well-formed pair, falls into its unclosed-tail branch via the
+    ``not candidates`` arm, and returns everything after the mention -- which
+    is the model's raw reasoning, contains no markup for the leak guard to
+    catch, and is far longer than any ``min_chars`` floor. Measured: 3382
+    characters of reasoning published as an episode, passing every other
+    refusal.
+
+    So trustworthiness requires **positive evidence that a script was
+    delimited**, which is either:
+
+    1. a well-formed ``<script>...</script>`` pair somewhere in the text, or
+    2. a trailing unclosed ``<script>`` whose tail ends in a *mangled* closing
+       tag (``</scrip>``, ``</script``, ...) -- the ``my-podcasts-ne0``
+       production shape, where the model genuinely wrote a script and only
+       fumbled the closing tag.
+
+    Case 2 cannot be dropped in favor of "must contain ``</script>``": that
+    would re-break ne0 recovery, which is the whole reason the unclosed-tail
+    branch exists. The disjunction keeps that recovery while refusing the
+    bare-mention shape.
+
+    Callers without ``require_tags`` are unaffected -- this only decides
+    whether to refuse, never what to extract.
+    """
+    if re.search(r"<script>\s*.*?\s*</script>", text, re.DOTALL | re.IGNORECASE):
+        return True
+    open_tags = list(re.finditer(r"<script>", text, re.IGNORECASE))
+    close_tags = list(re.finditer(r"</script>", text, re.IGNORECASE))
+    if not open_tags:
+        return False
+    last_open_start = open_tags[-1].start()
+    last_close_start = close_tags[-1].start() if close_tags else -1
+    if last_open_start <= last_close_start:
+        return False
+    # Mirror extract_script's tail cleanup exactly: a mangled closing tag is
+    # the positive evidence that distinguishes ne0 from a bare mention.
+    tail_before = text[open_tags[-1].end() :].strip()
+    tail_after = re.sub(
+        r"</?scr[a-z]*[^>]*>?\s*$", "", tail_before, flags=re.IGNORECASE
+    ).strip()
+    return tail_after != tail_before
 
 
 def extract_summary(text: str) -> str:
@@ -279,9 +367,9 @@ def parse_report(
     report path) should pass ``require_tags=True`` to convert that fallback
     into a loud refusal instead.
     """
-    if require_tags and not re.search(r"<script>", text, re.IGNORECASE):
+    if require_tags and not _has_trustworthy_script_markup(text):
         raise RuntimeError(
-            f"{label} report writer returned no <script> tag at all; "
+            f"{label} report writer returned no trustworthy <script> markup; "
             "refusing rather than falling back to narrating raw model "
             "output (require_tags=True for this caller)"
         )

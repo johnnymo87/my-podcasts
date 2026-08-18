@@ -586,7 +586,7 @@ def test_generate_script_requires_a_script_tag(
         "listener before I write anything down. Still thinking it over."
     )
 
-    with pytest.raises(RuntimeError, match="no <script> tag"):
+    with pytest.raises(RuntimeError, match="no trustworthy <script> markup"):
         generate_rundown_script(
             sections=[("Tech", ["Article"])],
             date_str="2026-03-10",

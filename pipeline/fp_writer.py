@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pipeline.report_engine import fetch_report_text, parse_report
+from pipeline.report_engine import fetch_report_text, parse_report, persist_raw_output
 from pipeline.rundown_writer import WriterOutput, parse_covered
 
 
@@ -155,8 +155,7 @@ def generate_fp_script(
 
         full_text = fetch_report_text(instruction, label="FP digest")
         if raw_path is not None:
-            raw_path.parent.mkdir(parents=True, exist_ok=True)
-            raw_path.write_text(full_text, encoding="utf-8")
+            persist_raw_output(raw_path, full_text)
 
     try:
         covered = parse_covered(full_text)
