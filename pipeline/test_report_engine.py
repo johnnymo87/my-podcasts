@@ -8,6 +8,8 @@ from pipeline.report_engine import (
     ReportOutput,
     extract_script,
     extract_summary,
+    fetch_report_text,
+    parse_report,
     run_report_prompt,
 )
 
@@ -317,3 +319,177 @@ def test_run_report_prompt_cleans_up_when_get_messages_raises(
         run_report_prompt("INSTRUCTION", label="silver")
 
     mock_delete.assert_called_once_with("ses_messages_fail")
+
+
+# --- fetch_report_text: session lifecycle in isolation ---
+
+
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.get_last_assistant_text")
+@patch("pipeline.report_engine.get_messages")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
+def test_fetch_report_text_returns_stripped_text_and_deletes_session(
+    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete
+):
+    mock_create.return_value = "ses_fetch"
+    mock_wait.return_value = True
+    mock_messages.return_value = [{"role": "assistant", "parts": []}]
+    mock_text.return_value = "  raw model output  "
+
+    result = fetch_report_text("INSTRUCTION", label="chinatalk")
+
+    assert result == "raw model output"
+    mock_send.assert_called_once_with("ses_fetch", "INSTRUCTION")
+    mock_wait.assert_called_once_with("ses_fetch", timeout=900)
+    mock_delete.assert_called_once_with("ses_fetch")
+
+
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
+def test_fetch_report_text_deletes_session_on_timeout(
+    mock_create, mock_send, mock_wait, mock_delete
+):
+    mock_create.return_value = "ses_fetch_timeout"
+    mock_wait.return_value = False
+
+    with pytest.raises(RuntimeError, match="silver .*900 seconds"):
+        fetch_report_text("INSTRUCTION", label="silver")
+
+    mock_delete.assert_called_once_with("ses_fetch_timeout")
+
+
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.get_messages")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
+def test_fetch_report_text_deletes_session_when_get_messages_raises(
+    mock_create, mock_send, mock_wait, mock_messages, mock_delete
+):
+    mock_create.return_value = "ses_fetch_boom"
+    mock_wait.return_value = True
+    mock_messages.side_effect = RuntimeError("api boom")
+
+    with pytest.raises(RuntimeError, match="api boom"):
+        fetch_report_text("INSTRUCTION", label="silver")
+
+    mock_delete.assert_called_once_with("ses_fetch_boom")
+
+
+# --- parse_report: evidence-table shapes (plan's measured A-E) ---
+
+
+def test_parse_report_shape_a_mangled_close_recovers_clean_script():
+    """Shape A: '<script>' + long + '</scrip>' -> clean recovery, no literal
+    tag in the result. This was 6516 chars WITH a literal tag under the old
+    rundown-local extractor; the engine's recovery fixes it.
+    """
+    long = "The real script. " * 60
+    raw = f"<script>{long}</scrip>"
+
+    result = parse_report(raw, label="rundown")
+
+    assert result.script.strip() == long.strip()
+    assert "<script>" not in result.script
+    assert "</scrip>" not in result.script
+
+
+def test_parse_report_shape_b_uppercase_tags_recover_clean_script():
+    """Shape B: '<SCRIPT>' + long + '</SCRIPT>' -> clean recovery."""
+    long = "The real script. " * 60
+    raw = f"<SCRIPT>{long}</SCRIPT>"
+
+    result = parse_report(raw, label="rundown")
+
+    assert result.script.strip() == long.strip()
+
+
+def test_parse_report_shape_c_no_tags_returns_text_by_default():
+    """Shape C: no tags at all -> with require_tags=False, falls through to
+    the (cosmetic) no-tag fallback and returns text, matching today's
+    already-migrated behavior.
+    """
+    long = "Just raw model prose with no tags at all. " * 40
+
+    result = parse_report(long, label="rundown")
+
+    assert result.script.strip() == long.strip()
+
+
+def test_parse_report_shape_c_no_tags_raises_when_require_tags():
+    """Shape C, with require_tags=True: refuse instead of narrating raw
+    model reasoning (the new guard this task adds).
+    """
+    long = "Just raw model prose with no tags at all. " * 40
+
+    with pytest.raises(RuntimeError, match="rundown.*no <script> tag"):
+        parse_report(long, label="rundown", require_tags=True)
+
+
+def test_parse_report_shape_d_placeholder_then_mangled_real_script():
+    """Shape D: a placeholder '<script>...</script>' followed by the real
+    '<script>' + long + '</scrip>' -> returns the long script, not the
+    3-char placeholder (the 2026-08-18 incident shape).
+    """
+    long = "The real script. " * 60
+    raw = f"<script>...</script> planning <script>{long}</scrip>"
+
+    result = parse_report(raw, label="fp-digest")
+
+    assert result.script.strip() == long.strip()
+    assert result.script.strip() != "..."
+
+
+def test_parse_report_shape_e_covered_leak_now_raises():
+    """Shape E: '<summary>s</summary><covered>- h1</covered>' + long, no
+    '<script>' tags at all -> now raises on the leaked <covered> block.
+    Before this task's guard addition, this returned 6523 chars including
+    the literal <covered> block, narrated aloud (Finding 2 in the plan).
+    """
+    long = "Real briefing prose with no script tags. " * 40
+    raw = "<summary>s</summary><covered>- h1</covered> " + long
+
+    with pytest.raises(RuntimeError, match="leaked markup"):
+        parse_report(raw, label="rundown")
+
+
+def test_parse_report_stray_script_mention_in_summary_is_a_deliberate_refusal():
+    """Pinned as a DELIBERATE refusal, not a bug to fix.
+
+    Per the plan's "Summary-remainder vs full-text" tradeoff: the engine
+    extracts from the FULL text (not the post-<summary>-strip remainder), so
+    a real, well-formed <script> block that happens to be preceded by
+    summary prose which itself *mentions* "<script>" produces a candidate
+    that spans from that stray mention through the real closing </script>,
+    swallowing "</summary><covered>" along the way -- which then trips the
+    leaked-markup guard. The plan measured the alternative (remainder-first)
+    and found it fails a DIFFERENT shape instead (a real <script> nested
+    inside <summary> extracts to 0 chars -> empty -> refusal). Neither
+    ordering is strictly better, so full-text was adopted because it keeps
+    the blast radius off already-migrated callers and the cost here is one
+    retry with a fresh model call, not a wrong episode. Do not "fix" this by
+    switching to remainder-first without re-reading that tradeoff.
+    """
+    long = "The real script text. " * 60
+    raw = (
+        "<summary>I wrapped it in <script> tags.</summary>"
+        "<covered>- h</covered>"
+        f"<script>{long}</script>"
+    )
+
+    with pytest.raises(RuntimeError, match="leaked markup"):
+        parse_report(raw, label="rundown")
+
+
+def test_parse_report_require_tags_still_accepts_well_formed_input():
+    """require_tags=True must not reject normal, well-formed output."""
+    raw = "<summary>Brief.</summary>\n<script>Spoken words here.</script>"
+
+    result = parse_report(raw, label="silver", require_tags=True)
+
+    assert result.script == "Spoken words here."
+    assert result.summary == "Brief."
