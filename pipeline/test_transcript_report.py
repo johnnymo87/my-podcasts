@@ -4,7 +4,6 @@ from unittest.mock import patch
 
 import pytest
 
-from pipeline import chinatalk_writer, yglesias_writer
 from pipeline.report_engine import ReportOutput
 from pipeline.transcript_report import (
     TRANSCRIPT_FEEDS,
@@ -18,16 +17,12 @@ _BODY = "Alice: hello\nBob: hi\n"
 _SUBJECT = "Some Subject"
 
 
-def test_chinatalk_prompt_is_byte_identical_to_the_retired_module():
-    assert build_report_prompt(
-        body=_BODY, subject=_SUBJECT, feed_slug="chinatalk"
-    ) == chinatalk_writer.build_report_prompt(body=_BODY, subject=_SUBJECT)
-
-
-def test_yglesias_prompt_is_byte_identical_to_the_retired_module():
-    assert build_report_prompt(
-        body=_BODY, subject=_SUBJECT, feed_slug="yglesias"
-    ) == yglesias_writer.build_report_prompt(body=_BODY, subject=_SUBJECT)
+# The chinatalk and yglesias prompt templates in this module were checked
+# byte-identical to the retired pipeline/chinatalk_writer.py and
+# pipeline/yglesias_writer.py at migration time via a golden test comparing
+# build_report_prompt output directly against each retired module's own
+# build_report_prompt. Both modules (and that test) are now deleted -- the
+# equivalence proof is recorded in the commit history, not re-checked here.
 
 
 # --- gate + writer, parametrized over the registered feeds ---

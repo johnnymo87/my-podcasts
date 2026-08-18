@@ -85,6 +85,54 @@ def test_real_silver_essay_is_not_detected():
     assert looks_like_transcript((_FIX / "silver_essay.txt").read_text()) is False
 
 
+def test_timestamp_and_label_lines_do_not_trigger():
+    """Digit-led timestamps and one-off labels never reach the threshold.
+
+    Rescued from the retired test_yglesias_filter.py: pins that a digit-led
+    line start (e.g. "0:00-intro") never matches the speaker-label regex at
+    all (see transcript_detect._SPEAKER_TURN_RE's docstring), distinct from
+    the word-label cases below which do match but stay under the turn floor.
+    """
+    body = (
+        "Time stamps:\n0:00-intro\n7:07-the point\n"
+        "Show Notes:\nCoverage of the topic: an article\n"
+    )
+    assert looks_like_transcript(body) is False
+
+
+def test_repeated_structural_labels_still_below_threshold():
+    """Rescued from the retired test_yglesias_filter.py.
+
+    'Note:' matches the speaker-label regex (the regex deliberately accepts
+    single-word labels like 'Announcer:' / 'Q:'), so the per-speaker turn
+    threshold -- not the regex -- is the primary line of defense. Four
+    'Note:' lines stay under the >=5 floor.
+    """
+    body = "\n".join(f"Note: aside number {i}." for i in range(4))
+    assert looks_like_transcript(body) is False
+
+
+def test_two_single_word_labels_each_below_threshold_are_not_a_transcript():
+    """Rescued from the retired test_yglesias_filter.py.
+
+    The threshold needs >=2 distinct labels EACH at >=5 turns. Four 'Note:'
+    and four 'Update:' lines are two distinct labels but both under the
+    floor, so this essay-shaped body is not treated as a transcript.
+
+    Known benign limitation: if a single post somehow had >=5 'Note:' AND
+    >=5 'Update:' line-starts, the detector would fire. That is extremely
+    unlikely in a real essay, and the consequence under the report path is a
+    spoken briefing instead of a long reading -- never a dropped episode --
+    so we accept it rather than tighten the regex and risk missing real
+    single-word speaker labels.
+    """
+    body = "\n".join(
+        [f"Note: aside {i}." for i in range(4)]
+        + [f"Update: item {i}." for i in range(4)]
+    )
+    assert looks_like_transcript(body) is False
+
+
 def test_real_silver_mailbag_is_not_detected():
     """Real email-cleaned body from the 2026-04-21 SBSQ #31 mailbag post.
 
