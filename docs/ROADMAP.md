@@ -50,6 +50,16 @@ Work in a fresh worktree (`.worktrees/<name>`), never in the shared checkout.
 | Piece 4 | `78b` | #10 | Enqueue-only daily CLI — stops the double-publish |
 | Piece 5 | `a3x`, `2sf` | #11 | Writer prompt built from ordered sections |
 
+**Done (2026-08-18), off-spine but adjacent:**
+
+| Bead | PR | What it bought |
+|---|---|---|
+| `ne0` | #15 | One `report_engine.py`; silver joins the transcript path |
+
+PR #15 also backfilled the four historical Silver Bulletin transcripts as
+reports (30-75 min literal reads → 10-15 min briefings) and deleted the
+literal-read rows. It opened `xlf` (spine piece 1), `9r5`, and `52k`.
+
 **Verified in production 2026-08-17** (Monday 04:30 ET, the first weekday run on
 all five pieces): exactly **one** episode row per feed, **0** duplicated `r2_key`s
 overall, timer units completing in **3-4 seconds** (enqueue-only holds), funnel
@@ -145,7 +155,7 @@ Four lessons:
   test, because the narrowed glob already covered the tested case. The regex was still
   load-bearing for a different filename shape, which now has its own test.
 
-### 1. Writer robustness — `ne0` (partly done) + `qd5` + `98p` (P2) — **promoted**
+### 1. Writer robustness — `xlf` + `qd5` + `98p` (P2) — **promoted**
 
 **Promoted to the top after `ne0` fired in production on 2026-08-18**, shipping a
 2636-byte FP Digest episode (a normal one is ~3 MB). The model emitted a
@@ -153,14 +163,34 @@ placeholder `<script>...</script>` before the real script; the non-greedy regex
 matched it, and the empty-check passed `...` through to TTS. Fixed in PR #14 for
 the two daily writers, plus a plausibility floor at the TTS boundary.
 
-**Still open in `ne0`:** `report_writer`, `chinatalk_writer`, and
-`yglesias_writer` each keep their own copy of `_extract_script` with the old
-non-greedy `re.search`. Same defect, lower stakes (one-off and email-driven
-episodes), untouched by PR #14.
+**PR #15 then built the real fix in one place.** `pipeline/report_engine.py` now
+owns the extraction and the publish-boundary refusals: longest `<script>` block,
+unclosed-final-block recovery, case-insensitive tags, and a leaked-markup guard.
+`transcript_report.py` (chinatalk, yglesias, silver) and `report_writer.py`
+delegate to it. `ne0` is closed.
 
-Malformed closing tags in `_extract_script`; FP Digest hallucinating a "thin
-news day" briefing from an empty plan. Both are "the LLM did something we didn't
-expect and we published it anyway" — same family, sensible together.
+**`xlf` is what remains, and it is the interesting half.** `rundown_writer.py`
+and `fp_writer.py` — the two *daily* writers, the highest-stakes ones — still
+carry their own `_extract_script`. PR #14 gave them the longest-block fix only;
+they still have no unclosed-tail recovery, case-sensitive tag matching, no leak
+guard, and a no-match fallback of `return text` that sends raw model output to
+TTS. That fallback output is long, so the 500-char floor does not catch it.
+
+Note `ne0` was closed with the claim "there is now exactly one implementation
+instead of four." **That was false** — adversarial review caught it, `ne0`
+carries a correction note, and `xlf` exists because of it. Do not treat the
+consolidation as finished until `xlf` lands.
+
+The migration is **not** a straight swap. `rundown`/`fp` additionally need
+raw-output persistence to `work_dir/raw_writer_output.txt` (retries reuse the
+file and skip the model call), the `<covered>` block, and summary-remainder
+semantics. `report_engine.run_report_prompt` has none of those, so either it
+grows an extension point or the daily writers keep a thin wrapper around it.
+Decide that deliberately rather than by whichever is easier to type.
+
+`qd5` is FP Digest hallucinating a "thin news day" briefing from an empty plan —
+same family ("the LLM did something we didn't expect and we published it
+anyway"), sensible in the same pass.
 
 `98p` (FP Digest has the identical theme-drop bug plus its own hand-rolled
 dry-run assembler) belongs here now: the Rundown fix in PR #11 is the template,
@@ -275,6 +305,21 @@ loss would cause an actively wrong decision.
   `MY_PODCASTS_WORK_DIR_BASE` keeps the test suite out of the host's `/tmp`.
 - **Telegram** is only `POST http://127.0.0.1:4731/alert`, plain text, no
   `parse_mode`. Severity stays `info` until `3qs`.
+- **Publish-boundary refusals are deliberate; do not add a fallback.** When
+  `report_engine.run_report_prompt` rejects a script (empty, below `min_chars`,
+  or carrying leaked `<script>`/`<summary>` markup), the correct outcome is **no
+  episode**, not a degraded one. The transcript path re-raises so the email is
+  redelivered; the daily path fails the job so backoff and the retry-exhaustion
+  alert fire. AGENTS.md previously claimed the yglesias path "fails safe: any
+  exception falls back to the standard reading" — that was never true of the
+  code and must not be restored. The honest cost is `9r5`: the email path has no
+  failure counter, so a deterministically-failing body redelivers forever.
+- **`min_chars` is per-caller and was mis-inherited once already.** 500 came
+  from `rundown_writer`, whose failure path is *bounded* (backoff → errored →
+  alert). The transcript path's is *unbounded* redelivery, and its prompts ask
+  for 800-1500 words (~4,400-9,000 chars), so 500 was 11% of the prompt's own
+  floor — raised to 2000. Re-derive the number from the caller's prompt and
+  failure mode; never copy it across.
 - **Never** run `git stash`/`reset`/`checkout --`/`restore`/`clean` in the shared
   checkout, and say so explicitly to every subagent — one violated it anyway.
 
