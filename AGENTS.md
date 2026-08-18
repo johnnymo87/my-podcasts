@@ -302,6 +302,39 @@ Daily foreign policy podcast. Fully automated, no human-in-the-loop.
 - Semafor RSS — articles with `Routing: fp` or `Routing: both` (classified by Gemini at cache sync time)
 - Routed FP links from The Rundown (via `/persist/my-podcasts/fp-routed-links/`)
 
+**RSS full text (`my-podcasts-tgb`, implemented on the `fp-rss-fulltext` worktree; not
+yet merged or deployed).** antiwar.com's three RSS feeds ship teasers, not articles:
+across the 11 RSS-sourced directives selected in real work dirs the body is 331-382
+chars (median 361), and across the full 1633-file antiwar cache no body reaches 1000
+chars (max 454). The full-text `caitlinjohnstone` feed bottoms out at 767 chars — a gap
+with no overlap. `fp_collector.collect_fp_artifacts` (Phase 2) exploits that gap:
+`_should_fetch_full_text` re-fetches, via `trafilatura` (`favor_precision=True`), any
+in-window RSS body under 600 chars, newest-first, capped at 40 fetches per run with a
+1.0s delay between requests. This runs at **collection** time, before the editor call,
+so no directive→article join is involved (`my-podcasts-wfh` is untouched by it) and
+nothing lands in the 180-day persistent cache.
+
+**The excerpt is the floor, not a default.** Fetched text replaces the excerpt only
+when `len(fetched) > len(excerpt)`, so an empty extraction, an HTTP error, or a paywall
+stub degrades to exactly what shipped before and never drops a story.
+`work_dir/rss_fetch.json` records per-article `excerpt_chars`/`fetched_chars`/
+`upgraded`/`reused` unconditionally — the only visibility this feature has, since FP
+has no funnel report the way The Rundown does.
+
+**Retries reuse a prior fetch instead of re-requesting.** Collection re-runs from the
+top on every retry (`collection_done.json` is written last), and `MAX_RETRY_FAILURES`
+is 51 (`pipeline/db.py:43`) — so without reuse, a persistently-failing editor could turn
+~17 real fetches/day into ~850 against a small nonprofit's site. `_prior_fetched_body`
+reuses a work-dir article body already longer than the cache excerpt; a body still at
+excerpt length means the prior attempt's fetch failed and gets retried.
+
+**Measured against the real production cache on 2026-08-18** (temp work dir, real
+network fetches — not a deployed run): 11/11 candidate articles upgraded, excerpt
+median 365 chars -> fetched median 1801 chars (5.4x median gain), and a retry replay
+against the same work dir with the network severed made 0 fetches and reused all 11
+bodies byte-identical. This is evidence from production *data*, not a production *run*
+— the consumer has not been restarted and this code has not been deployed.
+
 **Flow:**
 1. Systemd timer triggers daily at 4:30 AM ET (08:30 UTC)
 2. `fp_collector.py` reads homepage articles, RSS articles, Semafor FP articles from persistent caches (with adaptive lookback window) + routed Levine FP links
