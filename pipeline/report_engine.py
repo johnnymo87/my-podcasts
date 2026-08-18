@@ -39,8 +39,11 @@ class ReportOutput:
 def extract_script(text: str) -> str:
     """Extract the spoken script from ``<script>...</script>`` tags.
 
-    Three real production defects converge here, which is why this lives in
-    exactly one place instead of being copy-pasted per writer.
+    This function is total and never raises: any input produces some string.
+    Whether that string is safe to publish is a separate question, answered
+    by the leaked-markup guard in ``run_report_prompt`` -- not here. Three
+    real production defects converge in this function, which is why it lives
+    in exactly one place instead of being copy-pasted per writer.
 
     1. **Placeholder selection.** The model sometimes emits a placeholder
        ``<script>...</script>`` while planning, before writing the real one.
@@ -67,29 +70,71 @@ def extract_script(text: str) -> str:
        literal tags aloud. The fallback here strips the ``<summary>`` block
        and any leftover ``<script>``/``</script>`` tags before returning.
 
-    Residual known ambiguity, left alone rather than engineered around: an
-    unclosed ``<summary>`` block with no ``<script>`` tags at all is
-    ambiguous input from the model. It is not specially detected here --
-    instead it is caught loudly downstream by the emptiness and ``min_chars``
-    guards in ``run_report_prompt``, which is the right place to fail a
-    malformed generation rather than silently guessing at intent.
+    Tag matching is case-insensitive throughout (``<SCRIPT>`` is as valid as
+    ``<script>``), including the mangled-tail cleanup regex and the no-tag
+    fallback's tag stripping.
+
+    Known limitation, deliberately not engineered around: a ``<script>``
+    nested inside another ``<script>`` (e.g.
+    ``<script>outer <script>inner</script> tail</script>``) is not parsed as
+    real HTML/XML would be -- the outer tag's content is truncated at the
+    *first* closing tag seen, silently dropping the text after it. This is
+    now caught loudly rather than silently: the truncated result still
+    contains a literal ``<script>`` substring, which trips the leaked-markup
+    guard in ``run_report_prompt``.
+
+    What no longer needs a guard here: a malformed result that still
+    contains a literal ``<script>``/``<summary>`` tag (an unclosed
+    ``<summary>`` with no ``<script>`` tags at all, or the nested-tag case
+    above) is caught by ``run_report_prompt``'s leaked-markup check, which
+    runs after this function returns. This function does not special-case
+    that input -- it would only duplicate a check that already exists at the
+    boundary that owns ``label`` and the other publish-path refusals.
     """
-    candidates = re.findall(r"<script>\s*(.*?)\s*</script>", text, re.DOTALL)
-    last_open = text.rfind("<script>")
-    if last_open != -1 and last_open > text.rfind("</script>"):
-        tail = text[last_open + len("<script>") :].strip()
-        tail = re.sub(r"</?scr[a-z]*[^>]*>?\s*$", "", tail).strip()
+    candidates = re.findall(
+        r"<script>\s*(.*?)\s*</script>", text, re.DOTALL | re.IGNORECASE
+    )
+    open_tags = list(re.finditer(r"<script>", text, re.IGNORECASE))
+    close_tags = list(re.finditer(r"</script>", text, re.IGNORECASE))
+    last_open_end = open_tags[-1].end() if open_tags else -1
+    last_open_start = open_tags[-1].start() if open_tags else -1
+    last_close_start = close_tags[-1].start() if close_tags else -1
+    if open_tags and last_open_start > last_close_start:
+        tail = text[last_open_end:].strip()
+        tail = re.sub(r"</?scr[a-z]*[^>]*>?\s*$", "", tail, flags=re.IGNORECASE).strip()
         candidates.append(tail)
     if candidates:
         return max(candidates, key=len).strip()
-    fallback = re.sub(r"<summary>.*?</summary>", "", text, flags=re.DOTALL)
-    return fallback.replace("<script>", "").replace("</script>", "").strip()
+    fallback = re.sub(
+        r"<summary>.*?</summary>", "", text, flags=re.DOTALL | re.IGNORECASE
+    )
+    fallback = re.sub(r"</?script>", "", fallback, flags=re.IGNORECASE)
+    return fallback.strip()
 
 
 def extract_summary(text: str) -> str:
-    """Extract the ``<summary>`` block, returning an empty string if absent."""
-    m = re.search(r"<summary>\s*(.*?)\s*</summary>", text, re.DOTALL)
-    return m.group(1).strip() if m else ""
+    """Extract the ``<summary>`` block, returning an empty string if absent.
+
+    Picks the **longest** matched block, mirroring ``extract_script``'s
+    defense: the same "placeholder while planning" model behavior that
+    motivated that fix for ``<script>`` is not specific to the script tag,
+    so this applies the identical defense for symmetry rather than leaving
+    the asymmetry (and the risk) undocumented.
+
+    Unlike ``extract_script``, this does not attempt unclosed-tail recovery.
+    A lost or truncated summary degrades the episode's feed ``<description>``
+    text, not the audio itself, and an unclosed ``<summary>`` with no
+    ``<script>`` tags is caught by ``run_report_prompt``'s leaked-markup
+    guard regardless of what this function returns.
+
+    Tag matching is case-insensitive, matching ``extract_script``.
+    """
+    candidates = re.findall(
+        r"<summary>\s*(.*?)\s*</summary>", text, re.DOTALL | re.IGNORECASE
+    )
+    if not candidates:
+        return ""
+    return max(candidates, key=len).strip()
 
 
 def run_report_prompt(
@@ -113,6 +158,19 @@ def run_report_prompt(
     review output before publishing (like the one-off ``report_writer`` path)
     are unaffected. Emptiness alone is the wrong test on a publish path: the
     2026-08-18 incident's placeholder was a 3-character string, not empty.
+
+    A leaked-markup guard runs after the emptiness check and before
+    ``min_chars``: ``extract_script`` is a total function (see its
+    docstring) that can return text still containing a literal
+    ``<script>``/``<summary>`` tag when the model's tag structure was
+    malformed (an unclosed ``<summary>`` with no ``<script>`` tags at all, or
+    a nested ``<script>``). That text is not empty and can be arbitrarily
+    long, so it would otherwise clear both the emptiness check and any
+    ``min_chars`` floor and reach TTS with raw markup narrated aloud. It runs
+    before ``min_chars`` deliberately: a leaked-markup script is disqualified
+    on its own terms regardless of length, so a caller should never see a
+    "too short" message for a script that was actually rejected for
+    malformed tags.
     """
     session_id = create_session()
     try:
@@ -128,6 +186,11 @@ def run_report_prompt(
         summary = extract_summary(full_text)
         if not script.strip():
             raise RuntimeError(f"{label} report writer returned empty script")
+        if re.search(r"</?(?:script|summary)\b", script, re.IGNORECASE):
+            raise RuntimeError(
+                f"{label} report writer returned a script with leaked "
+                "markup; the model's tag structure was malformed"
+            )
         if min_chars and len(script.strip()) < min_chars:
             raise RuntimeError(
                 f"{label} report writer returned a script too short to be "
