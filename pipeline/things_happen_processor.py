@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from pipeline.article_fetcher import fetch_all_articles
 from pipeline.db import Episode
 from pipeline.feed import regenerate_and_upload_feed
+from pipeline.rundown_writer import _validate_script_length
 from pipeline.show_notes import (
     extract_show_notes_articles,
     filter_show_notes_by_coverage,
@@ -78,6 +79,8 @@ def process_things_happen_job(
 
         # Step 3: Generate briefing script via LLM.
         script = generate_briefing_script(articles, date_str=date_str)
+
+    _validate_script_length(script, f"The Rundown job {job_id}")
 
     # Step 4: TTS.
     episode_slug = f"{date_str}-the-rundown"

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from pipeline.db import Episode
 from pipeline.feed import regenerate_and_upload_feed
+from pipeline.rundown_writer import _validate_script_length
 from pipeline.show_notes import (
     extract_show_notes_articles,
     filter_show_notes_by_coverage,
@@ -64,6 +65,7 @@ def process_fp_digest_job(
     script = script_path.read_text(encoding="utf-8").strip()
     if not script:
         raise RuntimeError(f"FP digest job {job_id} has empty script")
+    _validate_script_length(script, f"FP digest job {job_id}")
 
     # Step 2: TTS via ttsjoin.
     episode_slug = f"{date_str}-fp-digest"

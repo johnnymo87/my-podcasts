@@ -178,14 +178,43 @@ def parse_covered(text: str) -> list[str]:
     return headlines
 
 
+# A real episode script is thousands of characters. Anything shorter than this
+# is a parsing artifact, not a briefing. Deliberately far below the smallest
+# plausible episode (~5000 chars) so it only ever catches garbage.
+_MIN_SCRIPT_CHARS = 500
+
+
 def _extract_script(text: str) -> str:
-    """Extract the podcast script from ``<script>...</script>`` tags."""
+    """Extract the podcast script from ``<script>...</script>`` tags.
+
+    Picks the **longest** block, not the first. The model sometimes emits a
+    placeholder ``<script>...</script>`` while planning, before writing the
+    real one -- on 2026-08-18 an FP Digest episode shipped as a 2636-byte mp3
+    because the old non-greedy ``re.search`` matched a 3-character placeholder
+    at offset 647 instead of the 11814-character script at offset 2523.
+    """
     import re
 
-    m = re.search(r"<script>\s*(.*?)\s*</script>", text, re.DOTALL)
-    if m:
-        return m.group(1).strip()
+    blocks = re.findall(r"<script>\s*(.*?)\s*</script>", text, re.DOTALL)
+    if blocks:
+        return max(blocks, key=len).strip()
     return text
+
+
+def _validate_script_length(script: str, label: str) -> None:
+    """Reject a script too short to be a real episode.
+
+    The pre-existing guard only rejected an *empty* script, so the 3-character
+    string ``...`` passed it and was published. Emptiness is the wrong test;
+    plausibility is the right one. Raising here fails the job, so the consumer
+    backs off and the retry-exhaustion alert fires, rather than TTS-ing
+    garbage to subscribers.
+    """
+    if len(script.strip()) < _MIN_SCRIPT_CHARS:
+        raise RuntimeError(
+            f"{label} writer returned a script too short to be real: "
+            f"{len(script.strip())} chars (minimum {_MIN_SCRIPT_CHARS})"
+        )
 
 
 def generate_rundown_script(

@@ -6,7 +6,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from pipeline.things_happen_processor import process_things_happen_job
+
+
+# Processors reject scripts too short to be a real episode
+# (rundown_writer._MIN_SCRIPT_CHARS). A 20-char 'episode' is not a
+# realistic fixture -- the 2026-08-18 incident shipped a 3-char script
+# precisely because nothing downstream checked plausibility.
+_FILLER = " The briefing continues with further detail." * 15
 
 
 def test_process_things_happen_job_end_to_end(tmp_path, monkeypatch) -> None:
@@ -65,7 +74,7 @@ def test_process_things_happen_job_end_to_end(tmp_path, monkeypatch) -> None:
     # Mock opencode run (LLM)
     monkeypatch.setattr(
         "pipeline.things_happen_processor.generate_briefing_script",
-        lambda articles, date_str: "Here is the briefing script for today.",
+        lambda articles, date_str: "Here is the briefing script for today." + _FILLER,
     )
 
     # Mock ttsjoin and ffprobe subprocess
@@ -160,7 +169,9 @@ def test_process_things_happen_job_with_script_file(tmp_path, monkeypatch) -> No
 
     # Write a pre-made script to a temp file.
     script_file = tmp_path / "my_script.txt"
-    script_file.write_text("This is a pre-written briefing script.", encoding="utf-8")
+    script_file.write_text(
+        "This is a pre-written briefing script." + _FILLER, encoding="utf-8"
+    )
 
     # Ensure steps 1-3 are NOT called by making them raise if invoked.
     monkeypatch.setattr(
@@ -266,7 +277,7 @@ def test_process_things_happen_with_show_notes(tmp_path, monkeypatch) -> None:
     )
 
     script_file = work_dir / "script.txt"
-    script_file.write_text("The briefing script.", encoding="utf-8")
+    script_file.write_text("The briefing script." + _FILLER, encoding="utf-8")
 
     # Mock subprocess and feed regen
     def fake_subprocess_run(cmd, **kwargs):
@@ -368,7 +379,7 @@ def test_process_things_happen_filters_by_covered_headlines(
     (work_dir / "covered.json").write_text(json.dumps(["Oil Prices Spike"]))
 
     script_file = work_dir / "script.txt"
-    script_file.write_text("The briefing script.", encoding="utf-8")
+    script_file.write_text("The briefing script." + _FILLER, encoding="utf-8")
 
     # Mock subprocess and feed regen
     def fake_subprocess_run(cmd, **kwargs):
@@ -404,4 +415,39 @@ def test_process_things_happen_filters_by_covered_headlines(
     assert articles[0]["title"] == "Oil Prices Spike"
     assert articles[0]["url"] == "https://example.com/oil"
 
+    store.close()
+
+
+def test_process_the_rundown_rejects_implausibly_short_script(tmp_path, monkeypatch):
+    """Mirror of the FP guard: `...` is not empty, but it is not an episode.
+
+    The 2026-08-18 incident hit FP, but both feeds share the writer whose
+    placeholder-tag bug produced the 3-char script, so both need the floor.
+    """
+    from pipeline.db import StateStore
+
+    store = StateStore(tmp_path / "tr.sqlite3")
+    r2_client = MagicMock()
+    past = (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()
+    store._conn.execute(
+        """INSERT INTO pending_the_rundown
+           (id, date_str, status, process_after)
+           VALUES (?, ?, ?, ?)""",
+        ("tr-short", "2026-03-18", "pending", past),
+    )
+    store._conn.commit()
+
+    script_file = tmp_path / "short.txt"
+    script_file.write_text("...", encoding="utf-8")
+
+    def fail_if_called(cmd, **kwargs):
+        raise AssertionError(f"subprocess.run should not be called: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fail_if_called)
+
+    job = [j for j in store.list_due_the_rundown() if j["id"] == "tr-short"][0]
+    with pytest.raises(RuntimeError, match="too short"):
+        process_things_happen_job(job, store, r2_client, script_path=script_file)
+
+    r2_client.upload_file.assert_not_called()
     store.close()
