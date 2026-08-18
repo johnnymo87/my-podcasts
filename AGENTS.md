@@ -68,7 +68,8 @@ Quick start and navigation for humans and coding agents.
 - Podcast serving worker: `workers/podcast-serve/`
 - The Rundown pipeline: `pipeline/rundown_writer.py` (script generator), `pipeline/exa_client.py` (Exa wrapper)
 - Directive→article matching (Rundown): `pipeline/article_resolver.py` (shared cascade + slugify), used by `pipeline/__main__.py:find_rundown_article_source`, `pipeline/things_happen_collector.py` (Exa trigger), and `pipeline/show_notes.py`
-- ChinaTalk transcript report path: `pipeline/transcript_detect.py` (shared detector), `pipeline/chinatalk_writer.py`, `pipeline/chinatalk_report.py` (called from `pipeline/processor.py`)
+- Transcript report path (chinatalk, yglesias, silver): `pipeline/transcript_detect.py` (shared detector), `pipeline/transcript_report.py` (prompt registry + gate, called from `pipeline/processor.py`)
+- Shared opencode-serve report mechanics: `pipeline/report_engine.py` (session lifecycle, `<script>`/`<summary>` extraction, publish-boundary refusals) — used by `transcript_report.py` and `report_writer.py`
 - One-off episodes (source adapters): `pipeline/sources.py` (adapter registry + dispatch), `pipeline/document.py` (`Document` model), `pipeline/substack.py` (Substack API ingest + HTML normalization), `pipeline/arxiv.py` (arXiv paper adapter), `pipeline/report_writer.py` (style-keyed report writer)
 
 ## Where To Start
@@ -421,7 +422,7 @@ Turn any supported source URL (Substack post, arXiv paper, ...) into a one-off e
 - **substack adapter** (`pipeline/substack.py`): style `interview`, **read supported**, default category `Technology`. Ingests via the Substack JSON API (numeric id, short link `.../p-<id>`, or canonical slug URL `.../p/<slug>`); paywalled/empty posts rejected. Auto-matches `substack.com`, `/p/`, `/p-`, `.dwarkesh.com`, and bare numeric ids.
 - **arXiv adapter** (`pipeline/arxiv.py`): style `paper`, **report-only** (`read_html=None`; `--mode read` errors), default category `Science`. Metadata via the arXiv Atom API using the **versioned** id derived from the Atom entry; body via the `/html` LaTeXML rendering (drops references/math/image bodies and footnotes, collapses figures/tables to their captions). Auto-matches `arxiv.org` hosts and bare/`arXiv:`-prefixed modern ids.
 
-**Report writer:** `pipeline/report_writer.py:generate_report(body, subject, style, byline)` selects a prompt by `style` (`interview` vs `paper`); `--style` overrides the source default. opencode-serve, 900s timeout, rejects empty output; mirrors `chinatalk_writer.py` / `yglesias_writer.py`.
+**Report writer:** `pipeline/report_writer.py:generate_report(body, subject, style, byline)` selects a prompt by `style` (`interview` vs `paper`); `--style` overrides the source default. Delegates its opencode-serve mechanics to `pipeline/report_engine.py` (900s timeout, rejects empty output). Note it passes no `min_chars`, so unlike the transcript path it has no script-length floor — one-off episodes are operator-reviewed.
 
 **Publishing a reviewed script:** `--script-file PATH` publishes a pre-written script verbatim, skipping generation. Metadata (title prefix, source `<link>`, show notes) still comes from the resolved `Document`. This is the first-class version of the dry-run-then-publish workflow: review the `--dry-run` artifact, then publish that exact text with `--script-file`.
 
@@ -433,25 +434,25 @@ Turn any supported source URL (Substack post, arXiv paper, ...) into a one-off e
 - `pipeline/report_writer.py` — style-keyed report writer (interview + paper, with byline)
 - Read mode reuses `pipeline/blog_poller.py:adapt_for_audio` (Gemini); publishes via `pipeline/script_processor.py:publish_script` (extended with `source_url`)
 
-## ChinaTalk Transcript Report Path
+## Transcript Report Path
 
-ChinaTalk newsletters are sometimes podcast transcripts rather than essays. For transcripts, the pipeline replaces the TTS body with an AI-written spoken briefing about the conversation, and prefixes the episode title with "Report: ". Essays and articles are read normally.
+Several newsletters occasionally ship the verbatim transcript of a podcast conversation as the email body — 60-80 minutes of narration nobody asked for. For a *confirmed* transcript, the pipeline replaces the TTS body with an AI-written spoken briefing about the conversation and prefixes the episode title with "Report: ". Essays are read normally.
 
-**Detection:** `pipeline/transcript_detect.looks_like_transcript` — a deterministic, content-only transcript-shape detector (shared with the Yglesias path). It counts line-start speaker labels and fires only when at least two distinct speakers each take five or more turns. No LLM call, so detection never depends on a remote API (the previous Gemini classifier silently returned NO during a 2026-05-26 endpoint outage, shipping an 80-minute transcript as a literal read).
+**Registered feeds:** `chinatalk`, `yglesias` (Matt Yglesias's *The Argument* with Jerusalem Demsas, including one-off live events with guests), and `silver` (Silver Bulletin conversations between Nate Silver's team and a guest). Registering a feed is a one-line addition to `TRANSCRIPT_FEEDS` in `pipeline/transcript_report.py` plus a prompt constant — there is no per-feed module.
 
-**Generation:** `pipeline/chinatalk_writer.py` (opencode-serve, mirrors `rundown_writer.py`, 900-second timeout, rejects empty output).
+**Detection:** `pipeline/transcript_detect.looks_like_transcript` — deterministic and content-only. It counts line-start speaker labels and fires only when at least two distinct speakers each take five or more turns. No LLM call, so detection never depends on a remote API: the previous Gemini classifier silently returned NO during a 2026-05-26 endpoint outage and shipped an 80-minute transcript as a literal read. It also survives Substack footer/boilerplate changes, which a marker-based detector did not (it missed yglesias live-event posts entirely).
 
-**Wiring:** `pipeline/chinatalk_report.maybe_rewrite_chinatalk` is called from `pipeline/processor.process_email_bytes` between body cleaning and TTS. Essays (detection returns False) are read normally. For a *confirmed* transcript, a report-generation failure is logged and re-raised rather than silently degrading to a literal read — it propagates out of `process_email_bytes`, the consumer leaves the queue message unacked, and the email is reprocessed on redelivery.
+**Generation:** `pipeline/transcript_report.generate_report` selects the prompt by feed slug and delegates the opencode-serve mechanics to `pipeline/report_engine.py` (900-second timeout). Prompts are **separate string constants** specifically so an edit aimed at one feed cannot reach another — that is the only shared-blast-radius risk the single-module design creates, and constants contain it.
 
-## Yglesias Argument Transcript Reports
+**Wiring:** `pipeline/transcript_report.maybe_rewrite_transcript` is called once from `pipeline/processor.process_email_bytes`, after body cleaning and before TTS.
 
-Slow Boring publishes the newsletter form of Matt Yglesias's *The Argument* podcast with Jerusalem Demsas (regular weekly episodes, plus one-off live events with guests). For paying subscribers the email body carries the full verbatim transcript (~80 minutes of TTS). Rather than read that aloud — or drop it, as the pipeline used to — these posts are rewritten into a spoken briefing, mirroring the ChinaTalk transcript report path, and published to the `yglesias` feed with a `Report: ` title prefix.
+**Failure mode: re-raise, not fall back.** For a confirmed transcript, a generation failure is logged and re-raised. It propagates out of `process_email_bytes`, the consumer leaves the queue message unacked, and the email is reprocessed on redelivery. A listener gets no episode rather than a 75-minute literal read. (This file previously claimed the yglesias path "fails safe: any exception falls back to the standard reading." That was never true of the code — do not restore it.) The honest gap: the email path has no failure counter or backoff, so a deterministically-failing body redelivers indefinitely. Tracked as a bead.
 
-**Detection:** `pipeline/yglesias_filter.is_argument_transcript` is a deterministic, content-only transcript-shape detector. It counts line-start speaker labels and fires only when at least two distinct speakers each take five or more turns. No LLM call. This survives Substack footer/boilerplate changes (the old marker-based detector missed live-event posts entirely) and is near-impossible to trigger on a normal essay.
+**Refusals at the publish boundary.** `report_engine.run_report_prompt` rejects an empty script, a script below `min_chars` (500 for transcript reports), and any script with leaked `<script>`/`<summary>` markup. Emptiness alone is the wrong test: on 2026-08-18 an FP Digest episode shipped as a 2636-byte mp3 because a 3-character `...` placeholder is not empty. `report_engine.extract_script` also picks the **longest** `<script>` block and recovers an unclosed final one, so a planning placeholder or a mangled closing tag cannot become the episode.
 
-**Generation:** `pipeline/yglesias_writer.generate_report` (opencode-serve, mirrors `chinatalk_writer.py`, 900-second timeout, rejects empty output) with a prompt tuned for *The Argument*.
+**Silver detector evidence.** The false-positive cost here is silent and severe — a real essay replaced by an AI summary and shipped with no alarm — so detector safety on `silver` was measured rather than assumed. All 57 archived Silver Bulletin emails were replayed from R2 through the real email path (`EmailProcessor` → `SubstackAdapter.clean_body` → the detector): **4 transcripts, 53 essays, zero false positives.** The archive includes the shapes most likely to misfire — the SBSQ subscriber-questions mailbag (the speaker-turn regex does match a bare `Q:`), poll and ranking tables (`Texas:`, `Ohio:`), and multi-part posts (`Part II:`) — and none fired. Three of those real bodies are pinned as fixtures in `pipeline/fixtures/silver_*.txt`. Note that a Silver transcript post opens with the author's own essay at 4-11% of the body, so one report covers the whole post; and that the 2026-04-29 transcript has no Nate Silver in it, which is why the prompt takes participants from the transcript.
 
-**Wiring:** `pipeline/yglesias_report.maybe_rewrite_yglesias` is called from `pipeline/processor.process_email_bytes` after body cleaning, before TTS (alongside the ChinaTalk hook; the two are mutually exclusive by `feed_slug`). It is yglesias-only and fails safe: any exception in detection or generation falls back to the standard reading, so the listener always gets an episode (a long reading rather than a silently dropped essay).
+**Design doc:** `docs/plans/2026-08-18-silver-transcript-report-design.md`.
 
 ## Landing the Plane (Session Completion)
 
