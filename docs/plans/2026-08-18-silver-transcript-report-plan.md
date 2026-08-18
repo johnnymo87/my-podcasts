@@ -1030,7 +1030,16 @@ covering all three feeds. It must state:
 Also add `pipeline/report_engine.py` to the "Core Paths" list as the single
 home of the opencode-serve report mechanics.
 
-**Step 2: Close and file beads**
+**Step 2: Close and file beads** — DONE, recorded here for the record:
+
+| bead | state | what |
+| --- | --- | --- |
+| `my-podcasts-ne0` | closed (with correction note) | malformed-tag hardening, fixed in `report_engine` |
+| `my-podcasts-xlf` | open, P2 | **migrate `rundown_writer` + `fp_writer` to the engine** — ne0's defect is still live there, so ne0's "exactly one implementation" close reason was false. Adversarial review caught it. |
+| `my-podcasts-9r5` | open, P2 | email path has no failure counter; a deterministic failure redelivers forever |
+| `my-podcasts-52k` | open, P3 | `report_writer` one-off path has no script-length floor |
+
+The original instructions follow.
 
 ```bash
 bd close my-podcasts-ne0 --reason "Fixed in report_engine.extract_script: unclosed final block now competes on length, and the no-tag fallback strips <summary> and stray literal tags. The sibling writers the bead named (chinatalk_writer, yglesias_writer) were deleted in the same change, so there is now exactly one implementation."
