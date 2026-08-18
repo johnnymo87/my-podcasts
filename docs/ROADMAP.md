@@ -145,7 +145,7 @@ Four lessons:
   test, because the narrowed glob already covered the tested case. The regex was still
   load-bearing for a different filename shape, which now has its own test.
 
-### 1. FP routing gets empty URLs — `5m3` (P3) — **premise corrected**
+### 2. FP routing gets empty URLs — `5m3` (P3) — **premise corrected**
 
 PR2 of the join work, deliberately split out: it changes **another podcast's input**.
 
@@ -168,14 +168,25 @@ an explicit decision to stay filesystem-only with anchored, uniqueness-checked g
 `5m3`, `wfh`, and `98p` all touch `fp_collector.py` — three separate passes over those
 files would be waste.
 
-### 2. Exa hardening batch — `avf` + `d8w` + `j7f` + `gz4` (P3)
+### 3. Exa hardening batch — `avf` + `d8w` + `j7f` + `gz4` (P3)
 
 **Why grouped:** all four touch `exa_client.py` or its immediate callers and
 share test surface. None is urgent alone; four separate PRs would be waste.
 Origin exclusion by registrable domain; non-daemon timeout thread; unguarded
 `read_text` + empty-slug glob; FP's ungated Exa reader.
 
-### 3. Writer robustness — `ne0` + `qd5` + `98p` (P2)
+### 1. Writer robustness — `ne0` (partly done) + `qd5` + `98p` (P2) — **promoted**
+
+**Promoted to the top after `ne0` fired in production on 2026-08-18**, shipping a
+2636-byte FP Digest episode (a normal one is ~3 MB). The model emitted a
+placeholder `<script>...</script>` before the real script; the non-greedy regex
+matched it, and the empty-check passed `...` through to TTS. Fixed in PR #14 for
+the two daily writers, plus a plausibility floor at the TTS boundary.
+
+**Still open in `ne0`:** `report_writer`, `chinatalk_writer`, and
+`yglesias_writer` each keep their own copy of `_extract_script` with the old
+non-greedy `re.search`. Same defect, lower stakes (one-off and email-driven
+episodes), untouched by PR #14.
 
 Malformed closing tags in `_extract_script`; FP Digest hallucinating a "thin
 news day" briefing from an empty plan. Both are "the LLM did something we didn't
@@ -290,6 +301,14 @@ Kept because each cost real time and each recurred.
 - **A mutation that fails to bite is a finding, not a formality.** Twice now the
   honest report of "I broke it and no test failed" located a real gap: once a
   missing test, once a fact about the code nobody knew.
+- **An "empty" check is not a "valid" check.** The writer guard rejected an
+  empty script, so a 3-character `...` sailed through it, got TTS'd, and
+  shipped. Guards on generated content need a plausibility floor, not a
+  null test — and the floor belongs on the publish path, not in the generator.
+- **Unrealistic test fixtures hide the bug they should catch.** Three processor
+  tests published 16-38 character "episodes". Padding them to realistic lengths
+  was the fix, not a concession: the old fixtures asserted that a 16-char script
+  was publishable, which is exactly the belief that let this ship.
 - **Verify a bead ID before writing it into anything durable.** Two IDs in this
   file (and in a merged PR description) were invented from memory rather than
   read back from `bd`, and pointed at nothing. `bd create` prints the id —
