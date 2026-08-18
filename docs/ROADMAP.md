@@ -145,6 +145,28 @@ Four lessons:
   test, because the narrowed glob already covered the tested case. The regex was still
   load-bearing for a different filename shape, which now has its own test.
 
+### 1. Writer robustness — `ne0` (partly done) + `qd5` + `98p` (P2) — **promoted**
+
+**Promoted to the top after `ne0` fired in production on 2026-08-18**, shipping a
+2636-byte FP Digest episode (a normal one is ~3 MB). The model emitted a
+placeholder `<script>...</script>` before the real script; the non-greedy regex
+matched it, and the empty-check passed `...` through to TTS. Fixed in PR #14 for
+the two daily writers, plus a plausibility floor at the TTS boundary.
+
+**Still open in `ne0`:** `report_writer`, `chinatalk_writer`, and
+`yglesias_writer` each keep their own copy of `_extract_script` with the old
+non-greedy `re.search`. Same defect, lower stakes (one-off and email-driven
+episodes), untouched by PR #14.
+
+Malformed closing tags in `_extract_script`; FP Digest hallucinating a "thin
+news day" briefing from an empty plan. Both are "the LLM did something we didn't
+expect and we published it anyway" — same family, sensible together.
+
+`98p` (FP Digest has the identical theme-drop bug plus its own hand-rolled
+dry-run assembler) belongs here now: the Rundown fix in PR #11 is the template,
+and `qd5` is the FP twin of the zero-sections guard that PR added — do them in
+one pass over `fp_writer.py` rather than three.
+
 ### 2. FP routing gets empty URLs — `5m3` (P3) — **premise corrected**
 
 PR2 of the join work, deliberately split out: it changes **another podcast's input**.
@@ -174,28 +196,6 @@ files would be waste.
 share test surface. None is urgent alone; four separate PRs would be waste.
 Origin exclusion by registrable domain; non-daemon timeout thread; unguarded
 `read_text` + empty-slug glob; FP's ungated Exa reader.
-
-### 1. Writer robustness — `ne0` (partly done) + `qd5` + `98p` (P2) — **promoted**
-
-**Promoted to the top after `ne0` fired in production on 2026-08-18**, shipping a
-2636-byte FP Digest episode (a normal one is ~3 MB). The model emitted a
-placeholder `<script>...</script>` before the real script; the non-greedy regex
-matched it, and the empty-check passed `...` through to TTS. Fixed in PR #14 for
-the two daily writers, plus a plausibility floor at the TTS boundary.
-
-**Still open in `ne0`:** `report_writer`, `chinatalk_writer`, and
-`yglesias_writer` each keep their own copy of `_extract_script` with the old
-non-greedy `re.search`. Same defect, lower stakes (one-off and email-driven
-episodes), untouched by PR #14.
-
-Malformed closing tags in `_extract_script`; FP Digest hallucinating a "thin
-news day" briefing from an empty plan. Both are "the LLM did something we didn't
-expect and we published it anyway" — same family, sensible together.
-
-`98p` (FP Digest has the identical theme-drop bug plus its own hand-rolled
-dry-run assembler) belongs here now: the Rundown fix in PR #11 is the template,
-and `qd5` is the FP twin of the zero-sections guard that PR added — do them in
-one pass over `fp_writer.py` rather than three.
 
 ### 4. Set funnel thresholds — `my-podcasts-3qs` (P3) — **calendar-gated**
 
