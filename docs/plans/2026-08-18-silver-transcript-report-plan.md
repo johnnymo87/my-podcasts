@@ -52,13 +52,30 @@ def test_extract_script_with_tags():
     assert extract_script(raw) == "The briefing text."
 
 
-def test_extract_script_no_tags_returns_full_text():
-    """Without <script> tags the full response passes through.
+def test_extract_script_no_tags_falls_back_without_summary_prose():
+    """Without <script> tags the response passes through, minus the summary.
 
-    The empty-script guard in run_report_prompt handles real emptiness.
+    This closes my-podcasts-ne0. The old fallback returned the FULL model
+    output, which includes the <summary> block and any literal tags --
+    strip_markdown_for_tts does not strip HTML, so those were narrated aloud.
     """
-    raw = "The briefing without any tags."
-    assert extract_script(raw) == raw
+    raw = "<summary>Brief.</summary>\n\nThe briefing without script tags."
+    assert extract_script(raw) == "The briefing without script tags."
+
+
+def test_extract_script_unclosed_final_block_is_recovered():
+    """my-podcasts-ne0: a mis-closed </script> must not fall back to raw output.
+
+    Observed 2026-06-16 on an arXiv dry run. This case also COMPOSES with the
+    longest-block fix: a well-formed placeholder pair followed by the real
+    script with a broken closing tag leaves findall seeing only the
+    placeholder, so the longest block would be the placeholder. The unclosed
+    tail must compete on length.
+    """
+    real = "The real script. " * 50
+    raw = f"<script>...</script>\n\n<script>{real}</scrip>"
+    assert extract_script(raw).startswith("The real script.")
+    assert "scrip" not in extract_script(raw)
 
 
 def test_extract_script_picks_longest_block():
@@ -234,21 +251,41 @@ class ReportOutput:
 def extract_script(text: str) -> str:
     """Extract the spoken script from ``<script>...</script>`` tags.
 
+    Three defects converge here, which is why this lives in one place.
+
     Picks the **longest** block, not the first. The model sometimes emits a
     placeholder ``<script>...</script>`` while planning, before writing the
     real one -- on 2026-08-18 an FP Digest episode shipped as a 2636-byte mp3
     because a non-greedy ``re.search`` matched a 3-character placeholder at
     offset 647 instead of the 11814-character script at offset 2523. That fix
-    (commit 39589e3) landed only in ``rundown_writer``; consolidating here
-    extends it to every writer.
+    (commit 39589e3) landed only in ``rundown_writer``.
 
-    If no tag is present the full response is returned; the emptiness guard in
-    ``run_report_prompt`` rejects a whitespace-only result.
+    Recovers an **unclosed final block** (my-podcasts-ne0): on 2026-06-16 the
+    model closed the script with a mangled tag, ``findall`` matched nothing,
+    and the old fallback returned the entire model output for narration. Note
+    this composes with the case above -- a well-formed placeholder followed by
+    a mis-closed real script leaves ``findall`` seeing only the placeholder --
+    so the tail must compete on length rather than being a last resort.
+
+    When there is no script tag at all, the fallback strips the ``<summary>``
+    block and any stray literal tags. ``strip_markdown_for_tts`` does not
+    strip HTML, so without this the summary prose and the tags themselves are
+    read aloud.
+
+    Residual known ambiguity: an unclosed ``<summary>`` with no script tags.
+    The emptiness and ``min_chars`` guards in ``run_report_prompt`` catch it
+    loudly rather than shipping it.
     """
-    blocks = re.findall(r"<script>\s*(.*?)\s*</script>", text, re.DOTALL)
-    if blocks:
-        return max(blocks, key=len).strip()
-    return text
+    candidates = re.findall(r"<script>\s*(.*?)\s*</script>", text, re.DOTALL)
+    last_open = text.rfind("<script>")
+    if last_open != -1 and last_open > text.rfind("</script>"):
+        tail = text[last_open + len("<script>") :].strip()
+        tail = re.sub(r"</?scr[a-z]*[^>]*>?\s*$", "", tail).strip()
+        candidates.append(tail)
+    if candidates:
+        return max(candidates, key=len).strip()
+    fallback = re.sub(r"<summary>.*?</summary>", "", text, flags=re.DOTALL)
+    return fallback.replace("<script>", "").replace("</script>", "").strip()
 
 
 def extract_summary(text: str) -> str:
@@ -304,7 +341,13 @@ Expected: all pass.
 
 ```bash
 git add pipeline/report_engine.py pipeline/test_report_engine.py
-git commit -m "feat(writers): add a shared report engine with the longest-script fix"
+git commit -m "feat(writers): add a shared report engine, closing my-podcasts-ne0
+
+Four copies of the opencode-serve report mechanics get one home, and the
+three defects that had been fixed unevenly across them get fixed once:
+longest-block selection (39589e3, previously rundown-only), unclosed
+final-block recovery (ne0, never fixed), and a no-tag fallback that no
+longer narrates the summary prose and the literal tags."
 ```
 
 ---
@@ -358,10 +401,19 @@ and friends. Those names now live in the engine. Update every such decorator to
 `pipeline.report_engine.<name>`. Do **not** change any assertion — the point of
 this task is that behavior is unchanged.
 
-The one assertion that may legitimately change is any that pins the exact
-timeout or empty-script error string, which now carries the `report` label.
-If a message assertion fails, update the expected string and note it in the
-commit message; if a *behavioral* assertion fails, stop and investigate.
+Two classes of assertion legitimately change; everything else must stay:
+
+1. Any assertion pinning the timeout or empty-script error string, which now
+   carries the `report` label.
+2. **The no-tags fallback assertion.** `test_report_writer.py` (and the
+   chinatalk/yglesias equivalents retired in Task 6) asserts the full model
+   output passes through when `<script>` tags are absent. That behavior is
+   `my-podcasts-ne0` and Task 1 deliberately changed it: the fallback now
+   strips the `<summary>` block and stray literal tags. Update the expectation
+   and say so in the commit message.
+
+If a *behavioral* assertion outside those two classes fails, stop and
+investigate — that means the refactor was not behavior-preserving.
 
 **Step 4: Run the tests**
 
@@ -978,7 +1030,13 @@ covering all three feeds. It must state:
 Also add `pipeline/report_engine.py` to the "Core Paths" list as the single
 home of the opencode-serve report mechanics.
 
-**Step 2: File the known gaps as beads**
+**Step 2: Close and file beads**
+
+```bash
+bd close my-podcasts-ne0 --reason "Fixed in report_engine.extract_script: unclosed final block now competes on length, and the no-tag fallback strips <summary> and stray literal tags. The sibling writers the bead named (chinatalk_writer, yglesias_writer) were deleted in the same change, so there is now exactly one implementation."
+```
+
+Then file the known gaps:
 
 ```bash
 bd create "Email path has no failure counter: a deterministic transcript-report failure redelivers forever" \
@@ -998,6 +1056,146 @@ bd dolt push
 git push
 git status   # MUST show up to date with origin
 ```
+
+---
+
+## Task 8: Backfill the four historical Silver transcripts
+
+The four transcripts already shipped as literal reads (75, 60, 50, and ~40
+minutes). The user wants reports for them in the feed. Do this **only after
+Tasks 1–7 are merged and deployed**, so the backfill uses the same prompt the
+automated path will use — it doubles as real-corpus QA of the Silver prompt.
+
+Two facts corrected an earlier draft of this task; do not re-derive them wrong:
+
+- **`publish_script` sets `pub_date` to *now*, unconditionally**
+  (`pipeline/script_processor.py:216`). `date_str` shapes only the slug and
+  r2_key (`:184-186`), and the feed orders by `created_at DESC`
+  (`pipeline/db.py:311`). So the four reports land at the top of the feed as
+  fresh unplayed items. Do **not** hand-UPDATE `pub_date` to the original
+  dates — clients would bury them.
+- **`python -m pipeline episode --script-file` will not work here.**
+  `pipeline/__main__.py:977` resolves the source document *before* the
+  `--script-file` branch at `:988`, and `substack.resolve_post` raises on
+  paywalled posts (`pipeline/substack.py:76-82`). All four posts are
+  paid-subscriber-only. Use the bare `publish-script` command
+  (`pipeline/__main__.py:796`) instead. Cost: no `source_url` and no
+  auto-generated show notes.
+
+**Step 1: Generate the four scripts offline, writing nothing to the DB**
+
+Pull the four raw emails from R2, run them through the real cleaning path, and
+generate with the shipped code. Adapt the Appendix replay script; keep it
+read-only against R2 and the state DB.
+
+```python
+# for each of the four dates, having found its key in processed_emails:
+raw = r2.get_object_bytes(key)
+parsed = EmailProcessor(raw).parse()
+body = get_source_adapter("silver").clean_body(raw_email=raw, body=parsed["body"])
+report = generate_report(
+    body=body, subject=parsed.get("subject_raw", ""), feed_slug="silver"
+)
+Path(f"/tmp/opencode/silver-backfill/{parsed['date']}.txt").write_text(report.script)
+```
+
+Each generation takes minutes and costs money. Do them one at a time and stop
+on the first failure rather than burning four runs on a broken prompt.
+
+**Step 2: Review all four scripts before publishing anything**
+
+Read them. This is the first real output of the Silver prompt. Check
+specifically: does it cover the opening essay proportionately (4–11% of the
+body), does it attribute claims to the right speaker, and — for the 2026-04-29
+post — does it correctly report Eli McKown-Dawson and Nathaniel Rakich rather
+than assuming Nate Silver is present? A bad script here means fixing the
+prompt in `transcript_report.py` and regenerating, not publishing anyway.
+
+**Step 3: Back up the state DB with the online backup API**
+
+The consumer is a live writer; `cp` can copy a torn page.
+
+```bash
+sqlite3 /persist/my-podcasts/state.sqlite3 \
+  ".backup '/persist/my-podcasts/state.sqlite3.bak-$(date +%Y%m%d-%H%M%S)'"
+```
+
+Do the whole task outside 04:00–05:30 ET (the daily timers) and not while a
+Silver email is landing.
+
+**Step 4: Publish the first one and verify before doing the rest**
+
+```bash
+uv run python -m pipeline publish-script \
+  --script-file /tmp/opencode/silver-backfill/2026-08-17.txt \
+  --title "Report: 2026-08-17 - Silver Bulletin - Why does everyone hate data centers?" \
+  --feed-slug silver \
+  --category News \
+  --date 2026-08-17
+```
+
+**`--category News` is mandatory.** The channel-level `<itunes:category>` is
+taken from the newest episode's category (`pipeline/feed.py:99`) and
+`publish-script` defaults to `Technology`. Omitting it flips the whole Silver
+Bulletin channel category.
+
+Then verify before continuing:
+
+```bash
+curl -s https://podcast.mohrbacher.dev/feeds/silver.xml | head -40
+curl -sI "$(curl -s https://podcast.mohrbacher.dev/feeds/silver.xml \
+  | grep -o 'https://[^"]*\.mp3' | head -1)" | head -3
+```
+
+Check the enclosure length is a plausible episode (megabytes, not kilobytes —
+see the 2636-byte incident), the channel category still reads News, and the
+item appears in a podcast client. Only then publish the remaining three.
+
+**Step 5: Delete the four literal-read episodes**
+
+Do this only after all four reports are verified. There is no
+`delete_episode` helper, so it is manual SQL — this is the same shape as the
+`my-podcasts-78b` cleanup.
+
+```bash
+uv run python -c "
+import sqlite3
+c = sqlite3.connect('/persist/my-podcasts/state.sqlite3')
+c.row_factory = sqlite3.Row
+rows = list(c.execute(
+    \"SELECT id, title, r2_key, duration_seconds FROM episodes \"
+    \"WHERE feed_slug='silver' AND title NOT LIKE 'Report:%' \"
+    \"AND slug LIKE '2026-04-29%' OR ...\"))
+for r in rows: print(dict(r))
+"
+```
+
+Select the exact four by `id` after printing and eyeballing them — do not
+delete by a `LIKE` pattern you have not first run as a `SELECT`. Then delete
+those four ids, and run the authoritative regeneration last:
+
+```bash
+uv run python -m pipeline feed
+```
+
+That full rebuild from the DB also closes the only residual race here: the
+consumer may regenerate feeds concurrently, and last-write-wins is
+self-healing because every regeneration is a complete rebuild.
+
+Deleting the four old mp3s from R2 is optional hygiene; orphaned objects are
+harmless once the feed no longer references them.
+
+**Step 6: Record what happened**
+
+```bash
+bd create "Backfilled four historical Silver Bulletin transcripts as reports" \
+  --status closed \
+  -d "2026-04-29, 2026-07-25, 2026-08-03, 2026-08-17 shipped as literal reads (up to 75 min) before the silver transcript path existed. Regenerated as reports with the shipped prompt, published via publish-script --category News, and the four literal-read rows deleted. First real-corpus output of the silver prompt; note any prompt weaknesses observed during review."
+```
+
+Note in that bead anything the review in Step 2 revealed about the prompt —
+that is the only feedback signal this feature gets until the next Silver
+transcript lands, roughly a month out.
 
 ---
 
