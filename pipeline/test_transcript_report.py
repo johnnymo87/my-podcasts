@@ -129,3 +129,33 @@ def test_generate_report_enforces_the_length_floor(
         generate_report(body="b", subject="s", feed_slug="chinatalk")
 
     mock_delete.assert_called_once_with("ses_x")
+
+
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.get_last_assistant_text")
+@patch("pipeline.report_engine.get_messages")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
+def test_generate_report_refuses_output_with_no_script_tag(
+    mock_create, mock_send, mock_wait, mock_messages, mock_text, mock_delete
+):
+    """A reply with no <script> tag must refuse, not narrate raw reasoning.
+
+    Without ``require_tags=True`` the engine's no-tag fallback returns
+    essentially the whole reply with the <summary> block stripped -- measured
+    at 6522 chars in, 6521 out. That is long, so ``_MIN_SCRIPT_CHARS`` cannot
+    catch it, and the model's own reasoning would be published as the episode
+    in place of the post. This module's contract is re-raise-over-degrade, so
+    the correct outcome is no episode and a redelivery.
+    """
+    mock_create.return_value = "ses_x"
+    mock_wait.return_value = True
+    mock_messages.return_value = [{"role": "assistant", "parts": []}]
+    # Long enough to clear _MIN_SCRIPT_CHARS, so only require_tags can catch it.
+    mock_text.return_value = "Here is my reasoning about the transcript. " * 200
+
+    with pytest.raises(RuntimeError, match="no <script> tag"):
+        generate_report(body="b", subject="s", feed_slug="chinatalk")
+
+    mock_delete.assert_called_once_with("ses_x")
