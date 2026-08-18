@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from pipeline.transcript_detect import looks_like_transcript
+
+
+_FIX = Path(__file__).parent / "fixtures"
 
 
 def test_two_speakers_five_turns_each_is_transcript():
@@ -53,3 +58,40 @@ def test_prose_essay_with_incidental_colons_is_not_transcript():
         "again with no speaker turns whatsoever.\n"
     )
     assert looks_like_transcript(body) is False
+
+
+def test_real_silver_transcript_is_detected():
+    """Real email-cleaned body (16000-char prefix) from the 2026-08-17 Silver
+    Bulletin post "Why does everyone hate data centers?".
+
+    Not a synthetic case: this is externally-validated safety data, not a
+    test driving new code. All 57 archived Silver Bulletin emails were
+    replayed through the real production email path (EmailProcessor ->
+    SubstackAdapter.clean_body -> this detector), giving 4 transcripts, 53
+    essays, and zero false positives. See
+    docs/plans/2026-08-18-silver-transcript-report-design.md.
+    """
+    assert looks_like_transcript((_FIX / "silver_transcript.txt").read_text()) is True
+
+
+def test_real_silver_essay_is_not_detected():
+    """Real email-cleaned body from the 2026-08-15 Senate-races roundup.
+
+    Poll and ranking tables produce name-shaped line-start labels (e.g.
+    "Texas:", "Ohio:", "Maine:") but each occurs only once, far below the
+    five-turn-per-speaker floor. Pins externally-validated safety data (see
+    the 57-email replay cited above), not new detector behavior.
+    """
+    assert looks_like_transcript((_FIX / "silver_essay.txt").read_text()) is False
+
+
+def test_real_silver_mailbag_is_not_detected():
+    """Real email-cleaned body from the 2026-04-21 SBSQ #31 mailbag post.
+
+    "Silver Bulletin Subscriber Questions" was the leading false-positive
+    suspect for this feed: the speaker-turn regex does match a bare "Q:".
+    But this series does not label its answers, so only one label can recur
+    and the two-speaker floor holds. Pins externally-validated safety data
+    (see the 57-email replay cited above), not new detector behavior.
+    """
+    assert looks_like_transcript((_FIX / "silver_mailbag.txt").read_text()) is False

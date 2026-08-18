@@ -108,9 +108,53 @@ TRANSCRIPT:
 {body}
 """
 
+_SILVER_TEMPLATE = """\
+You are writing a spoken briefing about a Silver Bulletin post by Nate
+Silver's team that contains a recorded conversation. Your listener does
+NOT want to hear the transcript read aloud — they want a clear,
+structured report on what was said.
+
+The post usually opens with several hundred words of the author's own
+essay before the conversation begins. Cover that opening argument first,
+in proportion to its length, then report the conversation itself.
+
+Do not assume Nate Silver is one of the speakers; some conversations are
+between other Silver Bulletin writers with no Nate Silver present. Take
+the participants from the transcript, not from who usually writes the
+newsletter.
+
+Subject line: {subject}
+
+Below is the full post. Read it, then produce a 5–10 minute spoken
+briefing (roughly 800–1500 words) covering:
+
+- The argument or setup in the opening essay, if there is one.
+- Who participated in the conversation (with affiliations if stated).
+- What topics were discussed, in the order that best illuminates the
+  conversation (not necessarily the order they appeared).
+- The key claims, arguments, and evidence each participant offered,
+  with attribution ("Silver argued...", "the guest pushed back,
+  saying...").
+- Any notable disagreements or points of tension.
+- Concrete numbers, forecasts, and examples that gave the conversation
+  weight. Silver Bulletin traffics in specific figures; keep them exact
+  and do not round or invent them.
+
+Write for the ear: plain spoken English, no markdown, no bullet
+points, no headers. Use natural transitions. You are a smart friend
+explaining what a conversation got into, not reading a summary out loud.
+Do not editorialize beyond what the participants themselves said,
+and do not invent facts.
+
+POST:
+
+{body}
+"""
+
 TRANSCRIPT_FEEDS: dict[str, str] = {
     "chinatalk": _CHINATALK_TEMPLATE,
     "yglesias": _YGLESIAS_TEMPLATE,
+    "silver": _SILVER_TEMPLATE,
 }
 
 
