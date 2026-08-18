@@ -1149,6 +1149,129 @@ def test_retry_reuses_the_prior_attempt_and_makes_no_request(tmp_path, monkeypat
     assert "SHOULD NOT BE USED" not in art_path.read_text()
 
 
+def test_semafor_cached_entities_are_decoded_on_read(tmp_path, monkeypatch):
+    """Semafor cache bodies already on disk may carry undecoded HTML entities.
+
+    Mirrors the antiwar RSS on-read decode (test_cached_entities_are_decoded_on_read):
+    Task 4 fixes source_cache's write side, but files already cached during the
+    180-day retention window keep the old encoding for as long as they remain
+    in a lookback window.
+    """
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+    monkeypatch.setattr("pipeline.fp_collector.search_related", lambda *a, **kw: [])
+
+    homepage_cache = tmp_path / "homepage-cache"
+    homepage_cache.mkdir()
+    rss_cache = tmp_path / "rss-cache"
+    rss_cache.mkdir()
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    today = _today_et()
+
+    _write_semafor_cache_file(
+        semafor_cache,
+        today,
+        "Ansar Allah Announces Attacks",
+        "https://semafor.com/a",
+        "Gulf",
+        text="he called it a &#8220;landing ship&#8221; [&#8230;]",
+    )
+
+    work_dir = tmp_path / "work"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+
+    collect_fp_artifacts(
+        "test-semafor-entities",
+        work_dir,
+        scripts_source_dir=scripts_dir,
+        homepage_cache_dir=homepage_cache,
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=semafor_cache,
+    )
+
+    semafor_dir = work_dir / "articles" / "semafor"
+    semafor_files = list(semafor_dir.glob("*.md"))
+    assert len(semafor_files) == 1
+    art = semafor_files[0].read_text(encoding="utf-8")
+    assert "&#8220;" not in art
+    assert "&#8230;" not in art
+    assert "\u201clanding ship\u201d" in art
+    assert "\u2026" in art
+
+
+def test_rss_entry_deduped_against_homepage_by_url(tmp_path, monkeypatch):
+    """An RSS cache entry whose URL already arrived via homepage is dropped.
+
+    Guards the `if url in homepage_urls: continue` guard in fp_collector.py
+    Phase 2 — previously asserted only by code inspection, not by a test.
+    """
+    captured = {}
+
+    def _fake_plan(headlines, **kwargs):
+        captured["headlines"] = headlines
+        return _make_empty_plan()
+
+    monkeypatch.setattr("pipeline.fp_collector.generate_fp_research_plan", _fake_plan)
+    monkeypatch.setattr("pipeline.fp_collector.search_related", lambda *a, **kw: [])
+    monkeypatch.setattr(
+        "pipeline.fp_collector._extract_article_text",
+        lambda url: "SHOULD NOT BE USED",
+    )
+    monkeypatch.setattr("pipeline.fp_collector.time.sleep", lambda s: None)
+
+    homepage_cache = tmp_path / "homepage-cache"
+    homepage_cache.mkdir()
+    rss_cache = tmp_path / "rss-cache"
+    rss_cache.mkdir()
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    today = _today_et()
+
+    shared_url = "https://news.antiwar.com/shared-story/"
+    _write_homepage_cache_file(
+        homepage_cache,
+        today,
+        "Homepage Headline For Shared Story",
+        shared_url,
+        "middle-east",
+    )
+    _write_rss_cache_file(
+        rss_cache,
+        today,
+        "antiwar_news",
+        "RSS Headline For Shared Story",
+        shared_url,
+        text="RSS teaser body.",
+    )
+
+    work_dir = tmp_path / "work"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+
+    collect_fp_artifacts(
+        "test-dedup",
+        work_dir,
+        scripts_source_dir=scripts_dir,
+        homepage_cache_dir=homepage_cache,
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=semafor_cache,
+    )
+
+    rss_source_dir = work_dir / "articles" / "rss" / "antiwar_news"
+    rss_files = list(rss_source_dir.glob("*.md")) if rss_source_dir.exists() else []
+    assert rss_files == []
+
+    headlines = captured["headlines"]
+    matches = [h for h in headlines if "Shared Story" in h]
+    assert len(matches) == 1
+    assert "Homepage Headline For Shared Story" in matches[0]
+    assert "RSS Headline For Shared Story" not in matches[0]
+
+
 def test_retry_does_refetch_a_previously_failed_article(tmp_path, monkeypatch):
     """The reuse must not cache a failure. Derived from the opposite
     direction to the test above so the two cannot both pass on a stuck

@@ -385,7 +385,13 @@ def collect_fp_artifacts(
                 continue
 
             body_parts = raw.split("\n\n", 2)
-            text = body_parts[2].strip() if len(body_parts) > 2 else ""
+            # Cached Semafor bodies may still carry undecoded HTML entities
+            # (source_cache's write-side fix does not retroactively rewrite
+            # files already on disk for the length of the retention window),
+            # so decode here too, for the same reason as the RSS path above.
+            text = html_mod.unescape(
+                body_parts[2].strip() if len(body_parts) > 2 else ""
+            )
 
             slug = _slugify(title)
             art_path = articles_semafor_dir / f"{slug}.md"

@@ -345,6 +345,62 @@ def test_sync_semafor_routing_fallback_on_classification_failure(tmp_path, monke
     assert "Routing: both" in content
 
 
+def test_sync_antiwar_rss_summary_entities_are_decoded(tmp_path):
+    """Antiwar entries carry no <content>, so the summary must still be decoded.
+
+    Measured 2026-08-18: every cached antiwar body holds literal &#8217;/&#8220;
+    and a trailing [&#8230;], and those characters reach the writer prompt
+    verbatim.
+    """
+    entry = _make_rss_entry(
+        "Ansar Allah Announces Attacks", "https://news.antiwar.com/a/"
+    )
+    entry["summary"] = "he called it a &#8220;landing ship&#8221; [&#8230;]"
+    del entry["content"]
+    feed = MagicMock()
+    feed.entries = [entry]
+
+    with patch("pipeline.source_cache.fetch_feed", return_value=feed):
+        new_files = sync_antiwar_rss_cache(tmp_path)
+
+    assert len(new_files) == 4  # one file per source in FP_DIGEST_RSS_SOURCES
+    body = new_files[0].read_text(encoding="utf-8").split("\n\n", 2)[2]
+    assert "&#8220;" not in body
+    assert "&#8230;" not in body
+    assert "\u201clanding ship\u201d" in body
+    assert "\u2026" in body
+
+
+def test_sync_semafor_description_entities_are_decoded(tmp_path):
+    """A Semafor entry with no <content> still needs its description decoded.
+
+    The identical defect shape as the antiwar RSS summary above — Semafor
+    entries normally carry <content> so this may never bite in production,
+    but the fix belongs everywhere the defect lives (docs/ROADMAP.md).
+    """
+    entry = _make_semafor_entry("Ansar Allah Announces Attacks", "Gulf")
+    entry["summary"] = "he called it a &#8220;landing ship&#8221; [&#8230;]"
+    del entry["content"]
+    feed = MagicMock()
+    feed.entries = [entry]
+
+    with (
+        patch("pipeline.source_cache.fetch_feed", return_value=feed),
+        patch(
+            "pipeline.source_cache.classify_semafor_articles",
+            return_value={0: "fp"},
+        ),
+    ):
+        new_files = sync_semafor_cache(tmp_path)
+
+    assert len(new_files) == 1
+    body = new_files[0].read_text(encoding="utf-8").split("\n\n", 2)[2]
+    assert "&#8220;" not in body
+    assert "&#8230;" not in body
+    assert "\u201clanding ship\u201d" in body
+    assert "\u2026" in body
+
+
 def test_classify_semafor_articles_fills_missing_indices(monkeypatch):
     """LLM omitting some indices gets them filled with 'both'."""
     mock_parsed = MagicMock()
