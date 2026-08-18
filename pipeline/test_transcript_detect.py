@@ -77,10 +77,20 @@ def test_real_silver_transcript_is_detected():
 def test_real_silver_essay_is_not_detected():
     """Real email-cleaned body from the 2026-08-15 Senate-races roundup.
 
-    Poll and ranking tables produce name-shaped line-start labels (e.g.
-    "Texas:", "Ohio:", "Maine:") but each occurs only once, far below the
-    five-turn-per-speaker floor. Pins externally-validated safety data (see
-    the 57-email replay cited above), not new detector behavior.
+    This is the actual near-miss in this feed's fixture set (not the mailbag
+    -- see that test's docstring): the fixture measurably exercises the
+    detector's discrimination, with three distinct one-shot name-shaped
+    labels ("Texas:", "Ohio:", "Iowa:", each occurring exactly once) --
+    label-shaped lines that a cruder detector could plausibly count. Each
+    stays far below the five-turn-per-speaker floor here.
+
+    Caveat: this fixture is a truncated PREFIX of the real body (see the
+    fixture-generation note in the design doc), and truncation can only
+    ever REMOVE labels, never add them -- so a False result here is weaker
+    evidence than a False on the full body would be. The full-archive
+    57-email replay (cited above) is what actually establishes the
+    negative for this post; this fixture exists to catch a regression in
+    that established result, not to independently prove it.
     """
     assert looks_like_transcript((_FIX / "silver_essay.txt").read_text()) is False
 
@@ -137,9 +147,30 @@ def test_real_silver_mailbag_is_not_detected():
     """Real email-cleaned body from the 2026-04-21 SBSQ #31 mailbag post.
 
     "Silver Bulletin Subscriber Questions" was the leading false-positive
-    suspect for this feed: the speaker-turn regex does match a bare "Q:".
-    But this series does not label its answers, so only one label can recur
-    and the two-speaker floor holds. Pins externally-validated safety data
-    (see the 57-email replay cited above), not new detector behavior.
+    suspect for this feed. What this fixture actually proves, verified
+    directly against the detector's own regex: this particular post carries
+    ZERO speaker-turn-shaped line starts at all -- not even a bare "Q:" --
+    so it passes trivially and pins only "a real mailbag post from this
+    series does not look like a transcript," nothing about *why*.
+
+    It does NOT exercise the "one recurring label can't clear the
+    two-speaker floor" mechanism this series was suspected of triggering --
+    see test_repeated_q_label_with_unlabeled_answers_is_not_transcript below
+    for a synthetic case that actually does exercise that mechanism.
     """
     assert looks_like_transcript((_FIX / "silver_mailbag.txt").read_text()) is False
+
+
+def test_repeated_q_label_with_unlabeled_answers_is_not_transcript():
+    """Synthetic case for the mechanism the real mailbag fixture above
+    cannot exercise (it has no speaker labels at all): a single recurring
+    "Q:" label whose answers are unlabeled prose. The speaker-turn regex
+    does match a bare "Q:", so this pins that one recurring label -- no
+    matter how many times it recurs -- can never clear the two-DISTINCT-
+    speaker floor on its own.
+    """
+    body = "\n".join(
+        f"Q: Question number {i}?\nSome unlabeled prose answering it at length.\n"
+        for i in range(6)
+    )
+    assert looks_like_transcript(body) is False

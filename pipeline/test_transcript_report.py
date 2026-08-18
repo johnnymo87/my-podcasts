@@ -6,6 +6,7 @@ import pytest
 
 from pipeline.report_engine import ReportOutput
 from pipeline.transcript_report import (
+    _MIN_SCRIPT_CHARS,
     TRANSCRIPT_FEEDS,
     build_report_prompt,
     generate_report,
@@ -15,6 +16,19 @@ from pipeline.transcript_report import (
 
 _BODY = "Alice: hello\nBob: hi\n"
 _SUBJECT = "Some Subject"
+
+
+def test_min_script_chars_is_derived_from_the_prompt_floor_not_inherited():
+    """Adversarial-review find: 500 was copied from rundown_writer.py's own
+    _MIN_SCRIPT_CHARS without re-deriving it for this pipeline. The prompts
+    here demand 800-1500 words (~4400-9000 chars) and a rejected generation
+    here means UNBOUNDED email redelivery (no backoff/errored/alert path
+    like the daily jobs have), so the floor must sit well below a
+    legitimately terse briefing but well above anything that could pass for
+    one -- 500 (11% of the prompt's own floor) left the entire 500-4000
+    range open to refusals and truncations shipping as a full episode.
+    """
+    assert _MIN_SCRIPT_CHARS == 2000
 
 
 # The chinatalk and yglesias prompt templates in this module were checked
@@ -29,7 +43,10 @@ _SUBJECT = "Some Subject"
 
 
 _TRANSCRIPT = "".join(f"Alice: line {i}\nBob: line {i}\n" for i in range(5))
-_LONG_SCRIPT = "A spoken briefing sentence. " * 40  # > _MIN_SCRIPT_CHARS
+# generate_report is mocked wherever this is used, so _MIN_SCRIPT_CHARS never
+# actually gates it -- kept comfortably above it anyway so this fixture stays
+# a plausible stand-in for real output if that mocking ever changes.
+_LONG_SCRIPT = "A spoken briefing sentence. " * 80  # > _MIN_SCRIPT_CHARS (2000)
 
 
 def test_unregistered_feed_is_passthrough():

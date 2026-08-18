@@ -63,6 +63,25 @@ def extract_script(text: str) -> str:
        length -- it cannot be a last resort that only fires when the
        candidate list is empty.
 
+       That recovery was originally unconditional -- ANY trailing
+       ``<script>`` with no matching close was treated as an unclosed block,
+       regardless of whether a perfectly good, properly-closed script already
+       existed. Adversarial review found this was ITSELF a silent-wrong path:
+       a well-formed real script followed by model chatter that merely
+       mentions ``<script>`` in passing (e.g. "Note: I wrapped it in
+       <script>...") let that chatter compete on length and win. That is the
+       same improbability class as defect 1 -- models chattering around tags
+       is proven production behavior, not a hypothetical -- so the recovery
+       is now conditional: the tail is added as a candidate only when either
+       (a) the mangled-tag cleanup regex actually stripped something from it
+       (the ne0 shape: a real mangled closing tag like ``</scrip>``), or (b)
+       there are no well-formed candidates at all (nothing else to prefer).
+       A true "placeholder plus never-closed, no mangled tag" case now falls
+       through to just the placeholder candidate, which is short enough to
+       trip ``min_chars`` downstream -- a loud failure (no episode) instead
+       of a silent wrong one (wrong episode), which is the correct direction
+       for this pipeline.
+
     3. **No-tag fallback leaking summary prose.**
        ``pipeline/script_processor.py:strip_markdown_for_tts`` does not strip
        HTML, so when there is no ``<script>`` tag at all, returning the raw
@@ -100,9 +119,18 @@ def extract_script(text: str) -> str:
     last_open_start = open_tags[-1].start() if open_tags else -1
     last_close_start = close_tags[-1].start() if close_tags else -1
     if open_tags and last_open_start > last_close_start:
-        tail = text[last_open_end:].strip()
-        tail = re.sub(r"</?scr[a-z]*[^>]*>?\s*$", "", tail, flags=re.IGNORECASE).strip()
-        candidates.append(tail)
+        tail_before = text[last_open_end:].strip()
+        tail_after = re.sub(
+            r"</?scr[a-z]*[^>]*>?\s*$", "", tail_before, flags=re.IGNORECASE
+        ).strip()
+        mangled_tag_was_stripped = tail_after != tail_before
+        # Only trust this tail as the real script when it carries positive
+        # evidence of a mis-closed tag (ne0), or when there is nothing else
+        # to prefer. Otherwise a stray mention of "<script>" in trailing
+        # model chatter would compete on length against a real, well-formed
+        # script and could win -- see the docstring above.
+        if mangled_tag_was_stripped or not candidates:
+            candidates.append(tail_after)
     if candidates:
         return max(candidates, key=len).strip()
     fallback = re.sub(

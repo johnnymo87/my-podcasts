@@ -38,7 +38,19 @@ logger = logging.getLogger(__name__)
 # publish path like this one: the 2026-08-18 incident's placeholder script
 # was 3 characters, not empty, so an emptiness-only check would have missed
 # it here too.
-_MIN_SCRIPT_CHARS = 500
+#
+# 2000, not 500. Every prompt below demands 800-1500 words -- roughly
+# 4400-9000 chars -- so 2000 sits well below a legitimately terse briefing
+# while still catching anything that could only be a refusal or a
+# truncation. The original 500 was copied from rundown_writer.py's own
+# _MIN_SCRIPT_CHARS without re-deriving it for this call site: that module's
+# failure path is bounded (retry backoff -> errored -> alert), so a
+# too-permissive floor there is eventually caught. A failure on this path
+# means the email is redelivered UNBOUNDED -- there is no backoff, errored
+# state, or alert for this queue -- so a floor that lets 500-4000 chars of
+# refusal/truncation prose through would ship it as a full "Report:" episode
+# replacing the entire post, and keep doing so on every redelivery.
+_MIN_SCRIPT_CHARS = 2000
 
 _CHINATALK_TEMPLATE = """\
 You are writing a spoken briefing about a podcast conversation that ran
@@ -133,7 +145,7 @@ briefing (roughly 800–1500 words) covering:
 - What topics were discussed, in the order that best illuminates the
   conversation (not necessarily the order they appeared).
 - The key claims, arguments, and evidence each participant offered,
-  with attribution ("Silver argued...", "the guest pushed back,
+  with attribution ("the host argued...", "the guest pushed back,
   saying...").
 - Any notable disagreements or points of tension.
 - Concrete numbers, forecasts, and examples that gave the conversation

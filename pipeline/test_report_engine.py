@@ -44,6 +44,24 @@ def test_extract_script_unclosed_final_block_is_recovered():
     assert "</scrip>" not in extract_script(raw)
 
 
+def test_extract_script_trailing_chatter_does_not_outcompete_real_script():
+    """Adversarial-review find: a well-formed, properly-closed real script
+    followed by unrelated model chatter after a STRAY literal '<script>'
+    mention must not lose to that chatter on length.
+
+    Before this fix, ANY trailing '<script>' with no matching close was
+    treated as an unclosed block and appended as a length-competing
+    candidate -- even when a perfectly good, properly-closed script already
+    existed. That is the same improbability class as the placeholder bug
+    that fired in production on 2026-08-18: models chattering around tags is
+    proven behavior, not a hypothetical.
+    """
+    real = "Real script sentence. " * 40
+    chatter = "Model chatter about what it did. " * 60
+    raw = f"<script>{real}</script>\nNote: I wrapped it in <script>\n{chatter}"
+    assert extract_script(raw).strip() == real.strip()
+
+
 def test_extract_script_no_tags_falls_back_without_summary_prose():
     raw = "<summary>Brief.</summary>\n\nThe briefing without script tags."
     assert extract_script(raw) == "The briefing without script tags."
