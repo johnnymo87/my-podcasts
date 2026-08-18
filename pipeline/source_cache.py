@@ -164,7 +164,11 @@ def sync_semafor_cache(cache_dir: Path) -> list[Path]:
             if entry.get("content")
             else ""
         )
-        text = _strip_html(content_html) if content_html else description
+        # Semafor entries normally carry <content>, but when they don't, the
+        # description is the body — and it arrives HTML-encoded. Strip and
+        # unescape it the same way, or entities reach the writer prompt
+        # verbatim (the identical defect fixed below for antiwar RSS).
+        text = _strip_html(content_html or description)
 
         slug = _slugify(title)
         filename = f"{date_str}-{slug}.md"
@@ -225,7 +229,10 @@ def sync_antiwar_rss_cache(cache_dir: Path) -> list[Path]:
                 else ""
             )
             summary = (entry.get("summary") or "").strip()
-            text = _strip_html(content_html) if content_html else summary
+            # Antiwar's feeds ship no <content>, so the summary is the body —
+            # and it arrives HTML-encoded. Strip and unescape it the same way,
+            # or entities reach the writer prompt verbatim.
+            text = _strip_html(content_html or summary)
 
             slug = _slugify(title)
             filename = f"{date_str}-{source.name}-{slug}.md"

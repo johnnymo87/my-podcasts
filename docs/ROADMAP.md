@@ -230,6 +230,15 @@ an explicit decision to stay filesystem-only with anchored, uniqueness-checked g
 `5m3`, `wfh`, and `98p` all touch `fp_collector.py` — three separate passes over those
 files would be waste.
 
+**`my-podcasts-tgb` already took one pass over `fp_collector.py` without bundling
+`wfh`, and that was deliberate, not an oversight.** `tgb` (RSS full-text fetch for
+truncated antiwar.com teasers; implemented on `fp-rss-fulltext`, not yet merged or
+deployed — see AGENTS.md "FP Digest Pipeline") runs at collection time, before the
+editor call, so it touches no directive→article join at all. Bundling `wfh` into it
+would have added the riskier half of a P2 bug to an otherwise contained
+collection-phase change. The bundling argument above still holds for `5m3`/`wfh`/`98p`,
+which do share the join.
+
 ### 3. Exa hardening batch — `avf` + `d8w` + `j7f` + `gz4` (P3)
 
 **Why grouped:** all four touch `exa_client.py` or its immediate callers and
@@ -401,3 +410,8 @@ Kept because each cost real time and each recurred.
   live R2 objects confirmed it — but the prior measurement had a known 1-in-147
   mismatch, so confirming took one command and assuming would have silently
   pointed a feed entry at the wrong artifact.
+- **"Plans are wrong about their own premises" extends to bead descriptions.**
+  `my-podcasts-tgb`'s own headline numbers — "630-char teasers," "7x" — were
+  wrong: 630 was the whole cache file including its ~270-char metadata header,
+  not the body (which measured 361 chars median), and the real end-to-end gain
+  measured 5.4x, not 7x. A bead is a claim to verify, not a citation.

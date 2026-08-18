@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import html as html_mod
 import json
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -8,6 +10,7 @@ from zoneinfo import ZoneInfo
 import requests
 import trafilatura
 
+from pipeline.article_resolver import extract_url as _extract_url_header
 from pipeline.article_resolver import slugify as _slugify
 from pipeline.exa_client import search_related
 from pipeline.fp_editor import generate_fp_research_plan
@@ -39,6 +42,67 @@ def _extract_article_text(url: str) -> str:
         return (text or "").strip()
     except Exception:
         return ""
+
+
+# Bodies shorter than this are RSS teasers worth re-fetching in full.
+#
+# Measured 2026-08-18 over all 1780 files in the antiwar RSS cache: the three
+# antiwar feeds top out at 454 chars (n=1633, median ~350) while the full-text
+# caitlinjohnstone feed bottoms out at 767 (n=147, median 4623). 600 sits in
+# that gap. Deliberately a content-only rule rather than a feed allowlist, so
+# it retires itself if antiwar ever publishes full text.
+#
+# Note the gate sees the body *after* HTML entities are decoded, while the
+# corpus was measured on raw bodies. Decoding only shortens (&#8217; -> '), so
+# every measured body moves away from the threshold, not toward it.
+_TEASER_MAX_CHARS = 600
+
+# Worst case for the 14-day adaptive lookback ceiling is ~140 candidates at
+# ~10 new cache files/day; at ~1.5s per fetch plus a 1s delay that is ~6
+# minutes. Cap the work and take the newest candidates.
+_MAX_RSS_FETCHES = 40
+
+# Seconds between outbound article fetches; matches the Levine path's
+# fetch_all_articles(..., delay_between=1.0).
+_RSS_FETCH_DELAY = 1.0
+
+
+def _should_fetch_full_text(excerpt: str, url: str) -> bool:
+    """True when a cached RSS body looks like a teaser worth re-fetching."""
+    if not url.strip():
+        return False
+    return len(excerpt) < _TEASER_MAX_CHARS
+
+
+def _prior_fetched_body(art_path: Path, excerpt: str, url: str) -> str | None:
+    """Return a previous attempt's fetched body for this article, if any.
+
+    The work dir survives retries, so a body already longer than the cache
+    excerpt is text a prior attempt successfully fetched. Returns None when
+    there is nothing to reuse:
+
+    - the file doesn't exist yet;
+    - the file's ``URL:`` header doesn't match ``url``. ``slugify`` truncates
+      at 50 chars, so two distinct in-window articles from the same source
+      can share ``art_path`` — reusing across that collision would attach
+      one article's text to the other's headline, a wrong body under a true
+      headline (the worst outcome for a pipeline that publishes unread);
+    - the prior body, decoded, is no longer than ``excerpt``. ``excerpt`` is
+      already HTML-decoded by the caller, but a work dir written before this
+      decode existed still holds the raw, entity-encoded excerpt, which is
+      *longer* than its decoded form purely from encoding. Decoding here
+      before comparing keeps the comparison apples-to-apples, and a merely
+      excerpt-length body (decoded) means that attempt's fetch failed and
+      should be retried.
+    """
+    if not art_path.exists():
+        return None
+    raw = art_path.read_text(encoding="utf-8")
+    if _extract_url_header(raw) != url:
+        return None
+    parts = raw.split("\n\n", 2)
+    body = html_mod.unescape(parts[2].strip() if len(parts) > 2 else "")
+    return body if len(body) > len(excerpt) else None
 
 
 def collect_fp_artifacts(
@@ -153,10 +217,12 @@ def collect_fp_artifacts(
         else Path("/persist/my-podcasts/antiwar-rss-cache")
     )
     rss_articles_data: list[dict] = []
+    fetch_log: list[dict] = []
 
     if not _rss_cache.exists():
         print(f"[fp_collector] WARNING: RSS cache not found at {_rss_cache}")
     if _rss_cache.exists():
+        pending: list[dict] = []
         for cache_path in sorted(_rss_cache.glob("*.md")):
             if not _in_window(cache_path.name):
                 continue
@@ -180,19 +246,92 @@ def collect_fp_artifacts(
                 continue
 
             body_parts = raw.split("\n\n", 2)
-            text = body_parts[2].strip() if len(body_parts) > 2 else ""
-
-            source_dir = articles_rss_dir / source
-            source_dir.mkdir(parents=True, exist_ok=True)
-
-            slug = _slugify(title)
-            art_path = source_dir / f"{slug}.md"
-            content = f"# {title}\n\nURL: {url}\nSource: {source}\n\n{text}"
-            art_path.write_text(content, encoding="utf-8")
-
-            rss_articles_data.append(
+            # Cached antiwar bodies are the raw RSS <summary>, so they carry
+            # undecoded HTML entities (&#8217;, the trailing [&#8230;]). Decode
+            # here as well as at sync time, because cache files already on disk
+            # keep the old encoding for the length of the retention window.
+            text = html_mod.unescape(
+                body_parts[2].strip() if len(body_parts) > 2 else ""
+            )
+            pending.append(
                 {"headline": title, "url": url, "source": source, "text": text}
             )
+
+        # Upgrade teasers to full text, newest first, bounded.
+        candidates = [
+            item
+            for item in reversed(pending)
+            if _should_fetch_full_text(item["text"], item["url"])
+        ][:_MAX_RSS_FETCHES]
+        fetched_count = 0
+        for item in candidates:
+            # Collection re-runs from the top on every retry (the sentinel is
+            # written last), and the retry budget is 51 attempts — so reuse
+            # this work dir's own prior output rather than re-requesting. A
+            # body that is still excerpt-length means last attempt's fetch
+            # failed, and that one is worth retrying.
+            prior = _prior_fetched_body(
+                articles_rss_dir / item["source"] / f"{_slugify(item['headline'])}.md",
+                item["text"],
+                item["url"],
+            )
+            if prior is not None:
+                # Log BEFORE overwriting item["text"]: excerpt_chars must
+                # capture the pre-reuse (excerpt) length, or it silently
+                # equals fetched_chars for every reused entry and the
+                # sidecar loses the number it exists to record.
+                fetch_log.append(
+                    {
+                        "url": item["url"],
+                        "headline": item["headline"],
+                        "excerpt_chars": len(item["text"]),
+                        "fetched_chars": len(prior),
+                        "upgraded": True,
+                        "reused": True,
+                    }
+                )
+                item["text"] = prior
+                continue
+
+            if fetched_count > 0:
+                time.sleep(_RSS_FETCH_DELAY)
+            fetched_count += 1
+            fetched = _extract_article_text(item["url"])
+            # The excerpt is the floor, never the ceiling: an empty
+            # extraction, an HTTP error, or a paywall stub all leave it in
+            # place.
+            upgraded = len(fetched) > len(item["text"])
+            fetch_log.append(
+                {
+                    "url": item["url"],
+                    "headline": item["headline"],
+                    "excerpt_chars": len(item["text"]),
+                    "fetched_chars": len(fetched),
+                    "upgraded": upgraded,
+                    "reused": False,
+                }
+            )
+            if upgraded:
+                item["text"] = fetched
+
+        for item in pending:
+            source_dir = articles_rss_dir / item["source"]
+            source_dir.mkdir(parents=True, exist_ok=True)
+            art_path = source_dir / f"{_slugify(item['headline'])}.md"
+            art_path.write_text(
+                f"# {item['headline']}\n\nURL: {item['url']}\n"
+                f"Source: {item['source']}\n\n{item['text']}",
+                encoding="utf-8",
+            )
+            rss_articles_data.append(item)
+
+    # Written unconditionally — a missing cache dir is exactly the case
+    # where "did this feature do anything?" most needs an answer, and it is
+    # the case that would otherwise write no file. This is the only
+    # visibility this feature has: FP has no funnel report.
+    (work_dir / "rss_fetch.json").write_text(
+        json.dumps(fetch_log, indent=2), encoding="utf-8"
+    )
 
     # Phase 2b: Pick up routed links from Things Happen
     articles_routed_dir = work_dir / "articles" / "routed"
@@ -268,7 +407,13 @@ def collect_fp_artifacts(
                 continue
 
             body_parts = raw.split("\n\n", 2)
-            text = body_parts[2].strip() if len(body_parts) > 2 else ""
+            # Cached Semafor bodies may still carry undecoded HTML entities
+            # (source_cache's write-side fix does not retroactively rewrite
+            # files already on disk for the length of the retention window),
+            # so decode here too, for the same reason as the RSS path above.
+            text = html_mod.unescape(
+                body_parts[2].strip() if len(body_parts) > 2 else ""
+            )
 
             slug = _slugify(title)
             art_path = articles_semafor_dir / f"{slug}.md"
