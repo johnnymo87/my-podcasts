@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import requests
 import trafilatura
 
+from pipeline.article_resolver import extract_url as _extract_url_header
 from pipeline.article_resolver import slugify as _slugify
 from pipeline.exa_client import search_related
 from pipeline.fp_editor import generate_fp_research_plan
@@ -73,18 +74,34 @@ def _should_fetch_full_text(excerpt: str, url: str) -> bool:
     return len(excerpt) < _TEASER_MAX_CHARS
 
 
-def _prior_fetched_body(art_path: Path, excerpt: str) -> str | None:
+def _prior_fetched_body(art_path: Path, excerpt: str, url: str) -> str | None:
     """Return a previous attempt's fetched body for this article, if any.
 
     The work dir survives retries, so a body already longer than the cache
     excerpt is text a prior attempt successfully fetched. Returns None when
-    there is nothing to reuse — including when the prior body is merely the
-    excerpt, which means that attempt's fetch failed and should be retried.
+    there is nothing to reuse:
+
+    - the file doesn't exist yet;
+    - the file's ``URL:`` header doesn't match ``url``. ``slugify`` truncates
+      at 50 chars, so two distinct in-window articles from the same source
+      can share ``art_path`` — reusing across that collision would attach
+      one article's text to the other's headline, a wrong body under a true
+      headline (the worst outcome for a pipeline that publishes unread);
+    - the prior body, decoded, is no longer than ``excerpt``. ``excerpt`` is
+      already HTML-decoded by the caller, but a work dir written before this
+      decode existed still holds the raw, entity-encoded excerpt, which is
+      *longer* than its decoded form purely from encoding. Decoding here
+      before comparing keeps the comparison apples-to-apples, and a merely
+      excerpt-length body (decoded) means that attempt's fetch failed and
+      should be retried.
     """
     if not art_path.exists():
         return None
-    parts = art_path.read_text(encoding="utf-8").split("\n\n", 2)
-    body = parts[2].strip() if len(parts) > 2 else ""
+    raw = art_path.read_text(encoding="utf-8")
+    if _extract_url_header(raw) != url:
+        return None
+    parts = raw.split("\n\n", 2)
+    body = html_mod.unescape(parts[2].strip() if len(parts) > 2 else "")
     return body if len(body) > len(excerpt) else None
 
 
@@ -256,8 +273,13 @@ def collect_fp_artifacts(
             prior = _prior_fetched_body(
                 articles_rss_dir / item["source"] / f"{_slugify(item['headline'])}.md",
                 item["text"],
+                item["url"],
             )
             if prior is not None:
+                # Log BEFORE overwriting item["text"]: excerpt_chars must
+                # capture the pre-reuse (excerpt) length, or it silently
+                # equals fetched_chars for every reused entry and the
+                # sidecar loses the number it exists to record.
                 fetch_log.append(
                     {
                         "url": item["url"],

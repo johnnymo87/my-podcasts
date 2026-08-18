@@ -1328,3 +1328,189 @@ def test_retry_does_refetch_a_previously_failed_article(tmp_path, monkeypatch):
 
     assert full.strip() in art_path.read_text()
     assert "Teaser body" not in art_path.read_text()
+
+
+def test_retry_reuse_does_not_cross_a_slug_collision(tmp_path, monkeypatch):
+    """Two different in-window articles can share a work-dir path.
+
+    ``slugify`` truncates at 50 chars, so two distinct headlines from the
+    same source that agree on their first 50 slug chars write to the same
+    ``art_path``. A retry must not let the reuse check hand one article's
+    text to the other under its own headline — that is a wrong body under a
+    true headline, the worst outcome for an unread-publish pipeline. Keying
+    reuse to the file's ``URL:`` header (not just the path) is what prevents
+    it.
+    """
+    rss_cache = tmp_path / "rss"
+    rss_cache.mkdir()
+    today = _today_et()
+
+    # Both headlines slugify to the same 50 'y' chars; they differ only
+    # after the truncation point.
+    headline_alpha = "Y" * 55 + " Report Alpha"
+    headline_beta = "Y" * 55 + " Report Beta"
+    assert _slugify(headline_alpha) == _slugify(headline_beta)
+    url_alpha = "https://news.antiwar.com/story-alpha/"
+    url_beta = "https://news.antiwar.com/story-beta/"
+
+    # Explicit filenames control cache glob order: alpha sorts before beta,
+    # so pending = [alpha, beta] and the end-of-run write loop (which walks
+    # `pending` in that order) leaves beta's body as the final file content.
+    (rss_cache / f"{today}-antiwar_news-000-alpha.md").write_text(
+        f"# {headline_alpha}\n\nURL: {url_alpha}\nPublished: {today}\n"
+        f"Source: antiwar_news\nType: article\n\nRSS article text.",
+        encoding="utf-8",
+    )
+    (rss_cache / f"{today}-antiwar_news-001-beta.md").write_text(
+        f"# {headline_beta}\n\nURL: {url_beta}\nPublished: {today}\n"
+        f"Source: antiwar_news\nType: article\n\nRSS article text.",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("pipeline.fp_collector.time.sleep", lambda s: None)
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+    work_dir = tmp_path / "work"
+
+    def _fake_extract_run1(url: str) -> str:
+        if url == url_alpha:
+            return "TARGET-ALPHA " * 60
+        if url == url_beta:
+            return "TARGET-BETA " * 60
+        return ""
+
+    monkeypatch.setattr(
+        "pipeline.fp_collector._extract_article_text", _fake_extract_run1
+    )
+    collect_fp_artifacts(
+        "job-1",
+        work_dir,
+        scripts_source_dir=tmp_path / "scripts",
+        fp_routed_dir=tmp_path / "routed",
+        homepage_cache_dir=tmp_path / "hp",
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=tmp_path / "sem",
+    )
+
+    shared_path = (
+        work_dir
+        / "articles"
+        / "rss"
+        / "antiwar_news"
+        / f"{_slugify(headline_alpha)}.md"
+    )
+    # Last-write-wins on the shared path is a pre-existing, accepted
+    # collision (it never used to reach rss_articles_data). Confirm the
+    # setup produced it, as the premise for what follows.
+    assert "TARGET-BETA" in shared_path.read_text()
+
+    calls: list[str] = []
+
+    def _fake_extract_run2(url: str) -> str:
+        calls.append(url)
+        return f"REFETCHED for {url} " * 60
+
+    monkeypatch.setattr(
+        "pipeline.fp_collector._extract_article_text", _fake_extract_run2
+    )
+    captured: dict = {}
+
+    def _fake_plan(headlines, **kwargs):
+        captured["headlines"] = headlines
+        return _make_empty_plan()
+
+    monkeypatch.setattr("pipeline.fp_collector.generate_fp_research_plan", _fake_plan)
+
+    collect_fp_artifacts(
+        "job-1",
+        work_dir,
+        scripts_source_dir=tmp_path / "scripts",
+        fp_routed_dir=tmp_path / "routed",
+        homepage_cache_dir=tmp_path / "hp",
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=tmp_path / "sem",
+    )
+
+    headlines = captured["headlines"]
+    alpha_snippet = next(h for h in headlines if "Report Alpha" in h)
+    beta_snippet = next(h for h in headlines if "Report Beta" in h)
+
+    # The regression: alpha's snippet silently inherited beta's cached body
+    # via the shared path, with no fetch made for alpha's own URL.
+    assert "TARGET-BETA" not in alpha_snippet
+    assert url_alpha in calls
+
+    # Beta's own URL matches what's on disk, so it is a legitimate reuse and
+    # must not regress into a wasted re-fetch.
+    assert url_beta not in calls
+    assert "TARGET-BETA" in beta_snippet
+
+
+def test_retry_reuse_decodes_before_comparing_to_a_predecode_work_dir(
+    tmp_path, monkeypatch
+):
+    """A work dir written by the pre-full-text-fetch code holds a raw,
+    entity-encoded excerpt. The new code decodes the cache excerpt on read,
+    which makes it shorter — so comparing the old raw body's length to the
+    newly-decoded excerpt's length is not apples to apples, and the raw
+    body looks "longer" (and gets falsely "reused") purely from encoding,
+    not because any fetch happened. The comparison must decode the
+    work-dir body first.
+    """
+    rss_cache = tmp_path / "rss"
+    rss_cache.mkdir()
+    today = _today_et()
+
+    headline = "Old Deploy Article"
+    url = "https://news.antiwar.com/old-deploy/"
+    raw_encoded_body = "he called it a &#8220;landing ship&#8221; [&#8230;]"
+
+    _write_rss_cache_file(
+        rss_cache,
+        today,
+        "antiwar_news",
+        headline,
+        url,
+        text=raw_encoded_body,
+    )
+
+    work_dir = tmp_path / "work"
+    articles_rss_dir = work_dir / "articles" / "rss" / "antiwar_news"
+    articles_rss_dir.mkdir(parents=True)
+    art_path = articles_rss_dir / f"{_slugify(headline)}.md"
+    # Hand-write the work-dir article exactly as the pre-diff code would
+    # have left it: the raw, still-encoded excerpt, untouched by any fetch.
+    art_path.write_text(
+        f"# {headline}\n\nURL: {url}\nSource: antiwar_news\n\n{raw_encoded_body}",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("pipeline.fp_collector.time.sleep", lambda s: None)
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+
+    calls: list[str] = []
+
+    def _fake_extract(u: str) -> str:
+        calls.append(u)
+        return "FRESH FETCHED TEXT " * 50
+
+    monkeypatch.setattr("pipeline.fp_collector._extract_article_text", _fake_extract)
+
+    collect_fp_artifacts(
+        "job-1",
+        work_dir,
+        scripts_source_dir=tmp_path / "scripts",
+        fp_routed_dir=tmp_path / "routed",
+        homepage_cache_dir=tmp_path / "hp",
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=tmp_path / "sem",
+    )
+
+    assert calls == [url]
+    assert "FRESH FETCHED TEXT" in art_path.read_text()
+    assert "&#8230;" not in art_path.read_text()

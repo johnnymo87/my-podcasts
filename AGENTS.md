@@ -317,9 +317,11 @@ nothing lands in the 180-day persistent cache.
 **The excerpt is the floor, not a default.** Fetched text replaces the excerpt only
 when `len(fetched) > len(excerpt)`, so an empty extraction, an HTTP error, or a paywall
 stub degrades to exactly what shipped before and never drops a story.
-`work_dir/rss_fetch.json` records per-article `excerpt_chars`/`fetched_chars`/
-`upgraded`/`reused` unconditionally — the only visibility this feature has, since FP
-has no funnel report the way The Rundown does.
+`work_dir/rss_fetch.json` is written unconditionally (even with no cache dir), but
+it holds entries — `excerpt_chars`/`fetched_chars`/`upgraded`/`reused` — only for
+candidates that passed the gate and the cap; a light day legitimately produces zero
+entries in a file that still exists. This is the only visibility this feature has,
+since FP has no funnel report the way The Rundown does.
 
 **Retries reuse a prior fetch instead of re-requesting.** Collection re-runs from the
 top on every retry (`collection_done.json` is written last), and `MAX_RETRY_FAILURES`
