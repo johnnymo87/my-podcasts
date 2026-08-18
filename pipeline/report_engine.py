@@ -14,8 +14,10 @@ writer can depend on this module without an import cycle.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from pipeline.opencode_client import (
     create_session,
@@ -100,15 +102,16 @@ def extract_script(text: str) -> str:
     *first* closing tag seen, silently dropping the text after it. This is
     now caught loudly rather than silently: the truncated result still
     contains a literal ``<script>`` substring, which trips the leaked-markup
-    guard in ``run_report_prompt``.
+    guard in ``parse_report``.
 
     What no longer needs a guard here: a malformed result that still
-    contains a literal ``<script>``/``<summary>`` tag (an unclosed
-    ``<summary>`` with no ``<script>`` tags at all, or the nested-tag case
-    above) is caught by ``run_report_prompt``'s leaked-markup check, which
-    runs after this function returns. This function does not special-case
-    that input -- it would only duplicate a check that already exists at the
-    boundary that owns ``label`` and the other publish-path refusals.
+    contains a literal ``<script>``/``<summary>``/``<covered>`` tag (an
+    unclosed ``<summary>`` with no ``<script>`` tags at all, or the
+    nested-tag case above) is caught by ``parse_report``'s leaked-markup
+    check, which runs after this function returns. This function does not
+    special-case that input -- it would only duplicate a check that already
+    exists at the boundary that owns ``label`` and the other publish-path
+    refusals.
     """
     candidates = re.findall(
         r"<script>\s*(.*?)\s*</script>", text, re.DOTALL | re.IGNORECASE
@@ -140,6 +143,92 @@ def extract_script(text: str) -> str:
     return fallback.strip()
 
 
+def persist_raw_output(path: Path, text: str) -> None:
+    """Write raw model output to ``path`` atomically.
+
+    The daily writers persist the model's reply before parsing it, so a retry
+    can re-parse instead of paying for another 900-second generation. That
+    makes the file an *input* to a later run, which is why the write must be
+    all-or-nothing.
+
+    A plain ``write_text`` is not. Adversarial review demonstrated the
+    failure: truncate the file mid-``<script>`` and the next retry's
+    unclosed-tail recovery returns a clean-looking **half script** that passes
+    every publish-boundary refusal -- 3072 characters of real episode text
+    ending mid-sentence, shipped silently. Truncation lands mid-script in
+    practice because the script dominates the file's length.
+
+    The trigger is not exotic: deploying this pipeline is a
+    ``systemctl restart`` of the very process doing the write. An empty file
+    from a killed write self-heals loudly (no trustworthy markup -> refuse ->
+    unlink -> regenerate); a half-written one does not, which is exactly
+    backwards.
+
+    ``os.replace`` is atomic on POSIX, so a reader sees either the previous
+    file or the complete new one, never a partial.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _has_trustworthy_script_markup(text: str) -> bool:
+    """Did the model actually delimit a script, or merely mention the tag?
+
+    This is the test behind ``require_tags``, and the naive version of it --
+    "does the string ``<script>`` appear anywhere" -- is not good enough. It
+    was the first thing tried, and adversarial review broke it immediately
+    with this shape::
+
+        <summary>...</summary><covered>...</covered>
+        Okay, I need to produce a <script> tag now. Let me think. <3300 chars
+        of the model reasoning to itself, no further tags>
+
+    The bare mention satisfies a substring check. ``extract_script`` then
+    finds no well-formed pair, falls into its unclosed-tail branch via the
+    ``not candidates`` arm, and returns everything after the mention -- which
+    is the model's raw reasoning, contains no markup for the leak guard to
+    catch, and is far longer than any ``min_chars`` floor. Measured: 3382
+    characters of reasoning published as an episode, passing every other
+    refusal.
+
+    So trustworthiness requires **positive evidence that a script was
+    delimited**, which is either:
+
+    1. a well-formed ``<script>...</script>`` pair somewhere in the text, or
+    2. a trailing unclosed ``<script>`` whose tail ends in a *mangled* closing
+       tag (``</scrip>``, ``</script``, ...) -- the ``my-podcasts-ne0``
+       production shape, where the model genuinely wrote a script and only
+       fumbled the closing tag.
+
+    Case 2 cannot be dropped in favor of "must contain ``</script>``": that
+    would re-break ne0 recovery, which is the whole reason the unclosed-tail
+    branch exists. The disjunction keeps that recovery while refusing the
+    bare-mention shape.
+
+    Callers without ``require_tags`` are unaffected -- this only decides
+    whether to refuse, never what to extract.
+    """
+    if re.search(r"<script>\s*.*?\s*</script>", text, re.DOTALL | re.IGNORECASE):
+        return True
+    open_tags = list(re.finditer(r"<script>", text, re.IGNORECASE))
+    close_tags = list(re.finditer(r"</script>", text, re.IGNORECASE))
+    if not open_tags:
+        return False
+    last_open_start = open_tags[-1].start()
+    last_close_start = close_tags[-1].start() if close_tags else -1
+    if last_open_start <= last_close_start:
+        return False
+    # Mirror extract_script's tail cleanup exactly: a mangled closing tag is
+    # the positive evidence that distinguishes ne0 from a bare mention.
+    tail_before = text[open_tags[-1].end() :].strip()
+    tail_after = re.sub(
+        r"</?scr[a-z]*[^>]*>?\s*$", "", tail_before, flags=re.IGNORECASE
+    ).strip()
+    return tail_after != tail_before
+
+
 def extract_summary(text: str) -> str:
     """Extract the ``<summary>`` block, returning an empty string if absent.
 
@@ -152,8 +241,8 @@ def extract_summary(text: str) -> str:
     Unlike ``extract_script``, this does not attempt unclosed-tail recovery.
     A lost or truncated summary degrades the episode's feed ``<description>``
     text, not the audio itself, and an unclosed ``<summary>`` with no
-    ``<script>`` tags is caught by ``run_report_prompt``'s leaked-markup
-    guard regardless of what this function returns.
+    ``<script>`` tags is caught by ``parse_report``'s leaked-markup guard
+    regardless of what this function returns.
 
     Tag matching is case-insensitive, matching ``extract_script``.
     """
@@ -165,40 +254,27 @@ def extract_summary(text: str) -> str:
     return max(candidates, key=len).strip()
 
 
-def run_report_prompt(
-    instruction: str,
-    *,
-    label: str,
-    min_chars: int = 0,
-) -> ReportOutput:
-    """Run one instruction through opencode-serve and parse the result.
+def fetch_report_text(instruction: str, *, label: str) -> str:
+    """Run one instruction through opencode-serve and return the raw reply.
 
-    Creates a session, sends ``instruction``, waits up to
-    ``WRITER_TIMEOUT_SECONDS`` for the reply, extracts the script and summary,
-    and always deletes the session -- on success, on timeout, or on any
-    extraction failure.
+    Owns the session lifecycle ONLY -- create session, send ``instruction``,
+    wait up to ``WRITER_TIMEOUT_SECONDS`` for the reply, read the last
+    assistant message, ``.strip()`` it, and return it verbatim. It does no
+    parsing and applies none of the publish-boundary refusals; those live in
+    ``parse_report``. The session is always deleted in a ``finally``, on
+    success, on timeout, or on any exception raised while talking to
+    opencode-serve.
 
-    ``label`` names the caller (a feed slug or writer style) in every raised
-    error message, so a failure log line points at the right pipeline.
+    This function exists as its own seam (rather than being fused with
+    parsing, as it used to be inside a single ``run_report_prompt``) so a
+    caller that needs to persist the raw model output before it is parsed --
+    e.g. to retry a parse failure without re-paying a 900-second model call
+    -- has somewhere to interpose. See
+    ``docs/plans/2026-08-18-daily-writer-migration-plan.md`` for the callers
+    that need exactly this (the daily writers).
 
-    ``min_chars`` is an opt-in plausibility floor for callers whose output
-    goes straight to TTS. It defaults to 0 -- no floor -- so callers that
-    review output before publishing (like the one-off ``report_writer`` path)
-    are unaffected. Emptiness alone is the wrong test on a publish path: the
-    2026-08-18 incident's placeholder was a 3-character string, not empty.
-
-    A leaked-markup guard runs after the emptiness check and before
-    ``min_chars``: ``extract_script`` is a total function (see its
-    docstring) that can return text still containing a literal
-    ``<script>``/``<summary>`` tag when the model's tag structure was
-    malformed (an unclosed ``<summary>`` with no ``<script>`` tags at all, or
-    a nested ``<script>``). That text is not empty and can be arbitrarily
-    long, so it would otherwise clear both the emptiness check and any
-    ``min_chars`` floor and reach TTS with raw markup narrated aloud. It runs
-    before ``min_chars`` deliberately: a leaked-markup script is disqualified
-    on its own terms regardless of length, so a caller should never see a
-    "too short" message for a script that was actually rejected for
-    malformed tags.
+    ``label`` names the caller (a feed slug or writer style) in the raised
+    timeout error, so a failure log line points at the right pipeline.
     """
     session_id = create_session()
     try:
@@ -209,21 +285,136 @@ def run_report_prompt(
                 f"{WRITER_TIMEOUT_SECONDS} seconds"
             )
         messages = get_messages(session_id)
-        full_text = get_last_assistant_text(messages).strip()
-        script = extract_script(full_text)
-        summary = extract_summary(full_text)
-        if not script.strip():
-            raise RuntimeError(f"{label} report writer returned empty script")
-        if re.search(r"</?(?:script|summary)\b", script, re.IGNORECASE):
-            raise RuntimeError(
-                f"{label} report writer returned a script with leaked "
-                "markup; the model's tag structure was malformed"
-            )
-        if min_chars and len(script.strip()) < min_chars:
-            raise RuntimeError(
-                f"{label} report writer returned a script too short to be "
-                f"real: {len(script.strip())} chars (minimum {min_chars})"
-            )
-        return ReportOutput(script=script, summary=summary)
+        return get_last_assistant_text(messages).strip()
     finally:
         delete_session(session_id)
+
+
+def parse_report(
+    text: str,
+    *,
+    label: str,
+    min_chars: int = 0,
+    require_tags: bool = False,
+) -> ReportOutput:
+    """Parse raw model output into a ``ReportOutput``, or refuse to publish it.
+
+    Owns extraction (``extract_script`` / ``extract_summary``) PLUS every
+    publish-boundary refusal, in this order: ``require_tags`` (checked
+    against the raw ``text``, before extraction), extract script, extract
+    summary, refuse empty, refuse leaked markup, refuse below ``min_chars``.
+
+    **Why every refusal lives inside this function, with no bypass.** This
+    is the one public entry point for turning raw model text into something
+    safe to hand to TTS. There is deliberately no "parse without the guard"
+    function and no flag that disables a refusal -- a caller that wants to
+    interpose (e.g. to persist raw output between fetch and parse, see
+    ``fetch_report_text``) still has to route back through this same guarded
+    function to get a ``ReportOutput``. The hazard being closed is a future
+    caller composing ``fetch_report_text`` with its own hand-rolled
+    extraction and silently dropping a refusal -- the exact drift that
+    produced beads ``78b`` (a second, drifted assembly implementation) and
+    ``ne0`` (a 3-character placeholder shipped as an episode because nothing
+    downstream re-checked it).
+
+    ``label`` names the caller in every raised error message.
+
+    ``min_chars`` is an opt-in plausibility floor for callers whose output
+    goes straight to TTS. It defaults to 0 -- no floor -- so callers that
+    review output before publishing (like the one-off ``report_writer``
+    path) are unaffected. Emptiness alone is the wrong test on a publish
+    path: the 2026-08-18 incident's placeholder was a 3-character string,
+    not empty.
+
+    The leaked-markup guard runs after the emptiness check and before
+    ``min_chars``: ``extract_script`` is a total function (see its
+    docstring) that can return text still containing a literal
+    ``<script>``/``<summary>``/``<covered>`` tag when the model's tag
+    structure was malformed (an unclosed ``<summary>`` with no ``<script>``
+    tags at all, a nested ``<script>``, or a ``<covered>`` block that leaked
+    through untouched). That text is not empty and can be arbitrarily long,
+    so it would otherwise clear both the emptiness check and any
+    ``min_chars`` floor and reach TTS with raw markup narrated aloud. It runs
+    before ``min_chars`` deliberately: a leaked-markup script is disqualified
+    on its own terms regardless of length, so a caller should never see a
+    "too short" message for a script that was actually rejected for
+    malformed tags.
+
+    **Why ``covered`` is hardcoded into the guard rather than a parameter.**
+    The guard's semantics are "known pipeline markup must never reach TTS,"
+    which is a universal property of every caller of this module, not a
+    per-caller preference -- a caller that forgot to pass ``covered`` into a
+    parameterized tag set would get a silent hole for zero benefit. Measured
+    gap that motivated adding it: the input
+    ``'<summary>s</summary><covered>- h1</covered> ' + long_text`` (no
+    ``<script>`` tags at all) used to return a script containing the literal
+    ``<covered>`` block, which ``strip_markdown_for_tts`` does not remove, so
+    it was narrated aloud. Only the daily writers (``rundown_writer`` /
+    ``fp_writer``) emit ``<covered>``, but the guard protects the shared
+    module, not one caller.
+
+    **Why ``require_tags`` defaults to ``False`` rather than being the
+    module-wide behavior.** When no ``<script>`` tag is present at all,
+    ``extract_script``'s fallback returns essentially the raw model output
+    (with the ``<summary>`` block and stray tags stripped) -- measured, 6522
+    chars in and 6521 chars out, i.e. cosmetic. That means the model's raw
+    *reasoning* gets narrated to subscribers, and ``min_chars`` can never
+    catch it because raw output is long. ``report_writer`` (one-off,
+    operator-reviewed) relies on exactly this permissive fallback today --
+    an operator reviews the dry-run output before publishing, so the
+    fallback is a convenience, not a live-feed hazard. Automated,
+    no-human-in-the-loop publish paths (the daily writers, the transcript
+    report path) should pass ``require_tags=True`` to convert that fallback
+    into a loud refusal instead.
+    """
+    if require_tags and not _has_trustworthy_script_markup(text):
+        raise RuntimeError(
+            f"{label} report writer returned no trustworthy <script> markup; "
+            "refusing rather than falling back to narrating raw model "
+            "output (require_tags=True for this caller)"
+        )
+    script = extract_script(text)
+    summary = extract_summary(text)
+    if not script.strip():
+        raise RuntimeError(f"{label} report writer returned empty script")
+    if re.search(r"</?(?:script|summary|covered)\b", script, re.IGNORECASE):
+        raise RuntimeError(
+            f"{label} report writer returned a script with leaked "
+            "markup; the model's tag structure was malformed"
+        )
+    if min_chars and len(script.strip()) < min_chars:
+        raise RuntimeError(
+            f"{label} report writer returned a script too short to be "
+            f"real: {len(script.strip())} chars (minimum {min_chars})"
+        )
+    return ReportOutput(script=script, summary=summary)
+
+
+def run_report_prompt(
+    instruction: str,
+    *,
+    label: str,
+    min_chars: int = 0,
+    require_tags: bool = False,
+) -> ReportOutput:
+    """Run one instruction through opencode-serve and parse the result.
+
+    This is literally the composition of ``fetch_report_text`` (session
+    lifecycle) and ``parse_report`` (extraction plus every publish-boundary
+    refusal) -- nothing else happens here. It exists so existing callers
+    (``transcript_report.py``, ``report_writer.py``) keep one call with an
+    unchanged signature and unchanged behavior; a caller that needs to
+    interpose between fetch and parse (to persist raw output, for retries
+    that skip the model call) composes the two functions itself instead of
+    calling this one, and still goes through ``parse_report``'s guards
+    either way.
+
+    See ``fetch_report_text`` and ``parse_report`` for what each half does
+    and why the refusals are where they are.
+    """
+    return parse_report(
+        fetch_report_text(instruction, label=label),
+        label=label,
+        min_chars=min_chars,
+        require_tags=require_tags,
+    )

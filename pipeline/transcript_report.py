@@ -193,7 +193,21 @@ def generate_report(*, body: str, subject: str, feed_slug: str) -> ReportOutput:
         "tags. Then write the full spoken script wrapped in "
         "<script>...</script> tags. Output nothing outside these tags.\n\n" + prompt
     )
-    return run_report_prompt(instruction, label=feed_slug, min_chars=_MIN_SCRIPT_CHARS)
+    # require_tags=True: when the model emits no <script> tag at all, the
+    # engine's fallback returns essentially the raw reply with the <summary>
+    # block and stray tags stripped -- measured at 6522 chars in, 6521 out, so
+    # cosmetic. On this path that means the model's own reasoning replaces the
+    # post and is narrated to subscribers, and _MIN_SCRIPT_CHARS cannot catch
+    # it because raw output is long. This module's contract is
+    # re-raise-over-degrade (see maybe_rewrite_transcript), and a silent
+    # raw-output fallback contradicts it. Refusing re-raises, the email goes
+    # unacked, and redelivery regenerates from scratch.
+    return run_report_prompt(
+        instruction,
+        label=feed_slug,
+        min_chars=_MIN_SCRIPT_CHARS,
+        require_tags=True,
+    )
 
 
 def maybe_rewrite_transcript(

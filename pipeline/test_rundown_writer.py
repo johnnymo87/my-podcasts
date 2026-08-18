@@ -6,12 +6,18 @@ import pytest
 
 from pipeline.rundown_writer import (
     WriterOutput,
-    _extract_script,
     build_rundown_prompt,
     generate_rundown_script,
     parse_covered,
-    parse_summary,
 )
+
+
+# generate_rundown_script now enforces min_chars=500 via report_engine.parse_report
+# (task 2 of the report_engine migration). Fixtures that exercise the happy path
+# need a script body past that floor; short strings like "Hey, welcome to The
+# Rundown." (30 chars) would trip the new plausibility guard for reasons unrelated
+# to what the test is actually checking.
+_LONG_SCRIPT = ("Hey, welcome to The Rundown. " * 20).strip()
 
 
 def test_build_prompt_basic():
@@ -116,12 +122,12 @@ def test_prompt_matches_legacy_rendering_when_there_is_nothing_to_fix():
     assert legacy_block in prompt
 
 
-@patch("pipeline.rundown_writer.delete_session")
-@patch("pipeline.rundown_writer.get_last_assistant_text")
-@patch("pipeline.rundown_writer.get_messages")
-@patch("pipeline.rundown_writer.wait_for_idle")
-@patch("pipeline.rundown_writer.send_prompt_async")
-@patch("pipeline.rundown_writer.create_session")
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.get_last_assistant_text")
+@patch("pipeline.report_engine.get_messages")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
 def test_generate_script(
     mock_create,
     mock_send,
@@ -134,7 +140,9 @@ def test_generate_script(
     mock_create.return_value = "ses_123"
     mock_wait.return_value = True
     mock_messages.return_value = [{"role": "assistant", "parts": []}]
-    mock_text.return_value = "Generated podcast script here"
+    # No <script> tags here would now trip require_tags=True (a separate test
+    # pins that refusal below); this test is about the basic happy path.
+    mock_text.return_value = f"<script>{_LONG_SCRIPT}</script>"
 
     result = generate_rundown_script(
         sections=[("Tech", ["Article"])],
@@ -142,7 +150,7 @@ def test_generate_script(
         work_dir=tmp_path,
     )
 
-    assert result.script == "Generated podcast script here"
+    assert result.script == _LONG_SCRIPT
     assert result.summary == ""
     mock_create.assert_called_once()
     mock_send.assert_called_once()
@@ -150,10 +158,10 @@ def test_generate_script(
     mock_delete.assert_called_once_with("ses_123")
 
 
-@patch("pipeline.rundown_writer.delete_session")
-@patch("pipeline.rundown_writer.wait_for_idle")
-@patch("pipeline.rundown_writer.send_prompt_async")
-@patch("pipeline.rundown_writer.create_session")
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
 def test_generate_script_timeout_raises(
     mock_create, mock_send, mock_wait, mock_delete, tmp_path
 ):
@@ -173,12 +181,12 @@ def test_generate_script_timeout_raises(
     mock_delete.assert_called_once_with("ses_timeout")
 
 
-@patch("pipeline.rundown_writer.delete_session")
-@patch("pipeline.rundown_writer.get_last_assistant_text")
-@patch("pipeline.rundown_writer.get_messages")
-@patch("pipeline.rundown_writer.wait_for_idle")
-@patch("pipeline.rundown_writer.send_prompt_async")
-@patch("pipeline.rundown_writer.create_session")
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.get_last_assistant_text")
+@patch("pipeline.report_engine.get_messages")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
 def test_generate_script_extracts_script_tags(
     mock_create,
     mock_send,
@@ -191,9 +199,7 @@ def test_generate_script_extracts_script_tags(
     mock_create.return_value = "ses_456"
     mock_wait.return_value = True
     mock_messages.return_value = [{"role": "assistant", "parts": []}]
-    mock_text.return_value = (
-        "Let me think.\n\n<script>Hey, welcome to The Rundown.</script>"
-    )
+    mock_text.return_value = f"Let me think.\n\n<script>{_LONG_SCRIPT}</script>"
 
     result = generate_rundown_script(
         sections=[("Tech", ["Article"])],
@@ -201,16 +207,16 @@ def test_generate_script_extracts_script_tags(
         work_dir=tmp_path,
     )
 
-    assert result.script == "Hey, welcome to The Rundown."
+    assert result.script == _LONG_SCRIPT
     assert result.summary == ""
 
 
-@patch("pipeline.rundown_writer.delete_session")
-@patch("pipeline.rundown_writer.get_last_assistant_text")
-@patch("pipeline.rundown_writer.get_messages")
-@patch("pipeline.rundown_writer.wait_for_idle")
-@patch("pipeline.rundown_writer.send_prompt_async")
-@patch("pipeline.rundown_writer.create_session")
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.get_last_assistant_text")
+@patch("pipeline.report_engine.get_messages")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
 def test_generate_rundown_script_rejects_empty_output(
     mock_create,
     mock_send,
@@ -238,62 +244,12 @@ def test_generate_rundown_script_rejects_empty_output(
     assert not (tmp_path / "raw_writer_output.txt").exists()
 
 
-def test_extract_script_with_tags():
-    """<script> tags extract the spoken script."""
-    raw = (
-        "Let me analyze what's new.\n\n"
-        "<summary>Today covers markets and AI.</summary>\n\n"
-        "<script>Hey, welcome to The Rundown for Thursday.</script>"
-    )
-    assert _extract_script(raw) == "Hey, welcome to The Rundown for Thursday."
-
-
-def test_extract_script_tags_with_reasoning():
-    """Reasoning before <script> tags is stripped."""
-    raw = (
-        "I see 8 stories. Let me figure out what's new vs repeated.\n"
-        "Stories 1-3 are new, 4-8 were covered yesterday.\n\n"
-        "<script>\nHey, welcome. Three stories today.\n\n"
-        "First up, markets moved.\n</script>"
-    )
-    assert _extract_script(raw) == (
-        "Hey, welcome. Three stories today.\n\nFirst up, markets moved."
-    )
-
-
-def test_extract_script_no_tags_returns_raw():
-    """Without <script> tags, the full text is returned as-is."""
-    raw = "Hey, welcome to The Rundown for Monday."
-    assert _extract_script(raw) == raw
-
-
-def test_parse_summary_extracts_tags():
-    text = "<summary>A brief summary.</summary>\n\nHey, welcome to The Rundown."
-    result = parse_summary(text)
-    assert result.summary == "A brief summary."
-    assert result.script == "Hey, welcome to The Rundown."
-
-
-def test_parse_summary_no_tags():
-    text = "Hey, welcome to The Rundown."
-    result = parse_summary(text)
-    assert result.summary == ""
-    assert result.script == "Hey, welcome to The Rundown."
-
-
-def test_parse_summary_multiline():
-    text = "<summary>\nLine one.\nLine two.\n</summary>\n\nThe script."
-    result = parse_summary(text)
-    assert result.summary == "Line one.\nLine two."
-    assert result.script == "The script."
-
-
-@patch("pipeline.rundown_writer.delete_session")
-@patch("pipeline.rundown_writer.get_last_assistant_text")
-@patch("pipeline.rundown_writer.get_messages")
-@patch("pipeline.rundown_writer.wait_for_idle")
-@patch("pipeline.rundown_writer.send_prompt_async")
-@patch("pipeline.rundown_writer.create_session")
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.get_last_assistant_text")
+@patch("pipeline.report_engine.get_messages")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
 def test_generate_rundown_returns_writer_output_with_summary(
     mock_create,
     mock_send,
@@ -307,7 +263,14 @@ def test_generate_rundown_returns_writer_output_with_summary(
     mock_create.return_value = "ses_wout"
     mock_wait.return_value = True
     mock_messages.return_value = [{"role": "assistant", "parts": []}]
-    mock_text.return_value = "<summary>Today's summary.</summary>\n\nThe script text."
+    # An untagged remainder used to become the script via the old
+    # parse_summary + _extract_script(remainder) fallback. require_tags=True
+    # now refuses that shape (a separate test pins the refusal), so this
+    # fixture needs a real <script> block to exercise the intended path:
+    # summary extraction alongside script extraction.
+    mock_text.return_value = (
+        f"<summary>Today's summary.</summary>\n\n<script>{_LONG_SCRIPT}</script>"
+    )
 
     result = generate_rundown_script(
         sections=[("Tech", ["Article"])],
@@ -316,7 +279,7 @@ def test_generate_rundown_returns_writer_output_with_summary(
     )
     assert isinstance(result, WriterOutput)
     assert result.summary == "Today's summary."
-    assert result.script == "The script text."
+    assert result.script == _LONG_SCRIPT
 
 
 def test_parse_covered_extracts_headlines():
@@ -373,12 +336,12 @@ def test_writer_output_covered_defaults_empty():
     assert wo.covered_headlines == []
 
 
-@patch("pipeline.rundown_writer.delete_session")
-@patch("pipeline.rundown_writer.get_last_assistant_text")
-@patch("pipeline.rundown_writer.get_messages")
-@patch("pipeline.rundown_writer.wait_for_idle")
-@patch("pipeline.rundown_writer.send_prompt_async")
-@patch("pipeline.rundown_writer.create_session")
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.get_last_assistant_text")
+@patch("pipeline.report_engine.get_messages")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
 def test_generate_script_parses_covered_tags(
     mock_create,
     mock_send,
@@ -398,7 +361,7 @@ def test_generate_script_parses_covered_tags(
         "- Deutsche Bank Exposure\n"
         "- ChatGPT Lawsuit\n"
         "</covered>\n\n"
-        "<script>Hey, welcome to The Rundown.</script>"
+        f"<script>{_LONG_SCRIPT}</script>"
     )
 
     result = generate_rundown_script(
@@ -407,7 +370,7 @@ def test_generate_script_parses_covered_tags(
         work_dir=tmp_path,
     )
 
-    assert result.script == "Hey, welcome to The Rundown."
+    assert result.script == _LONG_SCRIPT
     assert result.summary == "Markets and AI today."
     assert result.covered_headlines == ["Deutsche Bank Exposure", "ChatGPT Lawsuit"]
 
@@ -456,12 +419,12 @@ def test_rundown_editor_uses_coverage_ledger_over_scripts(monkeypatch):
         assert "Old script text here" not in prompt_used
 
 
-@patch("pipeline.rundown_writer.delete_session")
-@patch("pipeline.rundown_writer.get_last_assistant_text")
-@patch("pipeline.rundown_writer.get_messages")
-@patch("pipeline.rundown_writer.wait_for_idle")
-@patch("pipeline.rundown_writer.send_prompt_async")
-@patch("pipeline.rundown_writer.create_session")
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.get_last_assistant_text")
+@patch("pipeline.report_engine.get_messages")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
 def test_persists_raw_output_before_parsing(
     mock_create,
     mock_send,
@@ -476,9 +439,8 @@ def test_persists_raw_output_before_parsing(
     mock_create.return_value = "ses_persist"
     mock_wait.return_value = True
     mock_messages.return_value = [{"role": "assistant", "parts": []}]
-    mock_text.return_value = (
-        "<summary>Today's summary.</summary>\n\n<script>Today's script.</script>"
-    )
+    raw_text = f"<summary>Today's summary.</summary>\n\n<script>{_LONG_SCRIPT}</script>"
+    mock_text.return_value = raw_text
 
     result = generate_rundown_script(
         sections=[("Tech", ["Article"])],
@@ -488,19 +450,17 @@ def test_persists_raw_output_before_parsing(
 
     raw_path = tmp_path / "raw_writer_output.txt"
     assert raw_path.exists()
-    assert raw_path.read_text(encoding="utf-8") == (
-        "<summary>Today's summary.</summary>\n\n<script>Today's script.</script>"
-    )
-    assert result.script == "Today's script."
+    assert raw_path.read_text(encoding="utf-8") == raw_text
+    assert result.script == _LONG_SCRIPT
     assert result.summary == "Today's summary."
 
 
-@patch("pipeline.rundown_writer.delete_session")
-@patch("pipeline.rundown_writer.get_last_assistant_text")
-@patch("pipeline.rundown_writer.get_messages")
-@patch("pipeline.rundown_writer.wait_for_idle")
-@patch("pipeline.rundown_writer.send_prompt_async")
-@patch("pipeline.rundown_writer.create_session")
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.get_last_assistant_text")
+@patch("pipeline.report_engine.get_messages")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
 def test_reuses_persisted_output_when_present(
     mock_create,
     mock_send,
@@ -513,7 +473,7 @@ def test_reuses_persisted_output_when_present(
     """If raw_writer_output.txt already exists, the model is not called."""
     raw_path = tmp_path / "raw_writer_output.txt"
     raw_path.write_text(
-        "<summary>Cached summary.</summary>\n\n<script>Cached script.</script>",
+        f"<summary>Cached summary.</summary>\n\n<script>{_LONG_SCRIPT}</script>",
         encoding="utf-8",
     )
 
@@ -523,7 +483,7 @@ def test_reuses_persisted_output_when_present(
         work_dir=tmp_path,
     )
 
-    assert result.script == "Cached script."
+    assert result.script == _LONG_SCRIPT
     assert result.summary == "Cached summary."
     mock_create.assert_not_called()
     mock_send.assert_not_called()
@@ -532,12 +492,12 @@ def test_reuses_persisted_output_when_present(
     mock_delete.assert_not_called()
 
 
-@patch("pipeline.rundown_writer.delete_session")
-@patch("pipeline.rundown_writer.get_last_assistant_text")
-@patch("pipeline.rundown_writer.get_messages")
-@patch("pipeline.rundown_writer.wait_for_idle")
-@patch("pipeline.rundown_writer.send_prompt_async")
-@patch("pipeline.rundown_writer.create_session")
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.get_last_assistant_text")
+@patch("pipeline.report_engine.get_messages")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
 def test_deletes_persisted_output_on_parse_failure(
     mock_create,
     mock_send,
@@ -569,10 +529,10 @@ def test_deletes_persisted_output_on_parse_failure(
     mock_create.assert_not_called()
 
 
-@patch("pipeline.rundown_writer.delete_session")
-@patch("pipeline.rundown_writer.wait_for_idle")
-@patch("pipeline.rundown_writer.send_prompt_async")
-@patch("pipeline.rundown_writer.create_session")
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
 def test_does_not_persist_when_wait_for_idle_times_out(
     mock_create, mock_send, mock_wait, mock_delete, tmp_path
 ):
@@ -593,6 +553,140 @@ def test_does_not_persist_when_wait_for_idle_times_out(
     raw_path = tmp_path / "raw_writer_output.txt"
     assert not raw_path.exists()
     mock_delete.assert_called_once_with("ses_timeout_persist")
+
+
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.get_last_assistant_text")
+@patch("pipeline.report_engine.get_messages")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
+def test_generate_script_requires_a_script_tag(
+    mock_create,
+    mock_send,
+    mock_wait,
+    mock_messages,
+    mock_text,
+    mock_delete,
+    tmp_path,
+):
+    """require_tags=True is in force: no <script> tag at all is a loud refusal.
+
+    Before this migration, raw model output with no <script> tags at all
+    passed straight through (via parse_summary's remainder + _extract_script's
+    permissive fallback) and got narrated to subscribers as the episode. This
+    is an automated, no-human-in-the-loop publish path, so that fallback must
+    now be closed.
+    """
+    mock_create.return_value = "ses_notags"
+    mock_wait.return_value = True
+    mock_messages.return_value = [{"role": "assistant", "parts": []}]
+    mock_text.return_value = (
+        "Let me think about today's stories and how to frame them for the "
+        "listener before I write anything down. Still thinking it over."
+    )
+
+    with pytest.raises(RuntimeError, match="no trustworthy <script> markup"):
+        generate_rundown_script(
+            sections=[("Tech", ["Article"])],
+            date_str="2026-03-10",
+            work_dir=tmp_path,
+        )
+
+    # A require_tags refusal is a parse failure like any other -- the raw
+    # file must not survive to loop the next retry on the same broken output.
+    assert not (tmp_path / "raw_writer_output.txt").exists()
+
+
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.get_last_assistant_text")
+@patch("pipeline.report_engine.get_messages")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
+def test_generate_script_refuses_leaked_covered_tag(
+    mock_create,
+    mock_send,
+    mock_wait,
+    mock_messages,
+    mock_text,
+    mock_delete,
+    tmp_path,
+):
+    """The <covered> leak guard is in force through this writer.
+
+    Only the daily writers emit <covered>, so report_engine's guard for it
+    (added in task 1) was previously untested through a real caller. A
+    well-formed <script> block whose content happens to still carry a
+    literal <covered> tag (e.g. truncated/mangled tag structure) must be
+    refused, not narrated aloud with the tag read as text.
+    """
+    mock_create.return_value = "ses_leak"
+    mock_wait.return_value = True
+    mock_messages.return_value = [{"role": "assistant", "parts": []}]
+    mock_text.return_value = (
+        "<script>Hey listeners, <covered>oops</covered> here is today's "
+        "briefing, padded out well past the minimum plausible length so "
+        "only the leaked markup guard -- not the length floor -- is what "
+        "trips this refusal.</script>"
+    )
+
+    with pytest.raises(RuntimeError, match="leaked"):
+        generate_rundown_script(
+            sections=[("Tech", ["Article"])],
+            date_str="2026-03-10",
+            work_dir=tmp_path,
+        )
+
+    assert not (tmp_path / "raw_writer_output.txt").exists()
+
+
+def test_generate_refuses_before_reading_persisted_raw_file(tmp_path):
+    """The no-sections refusal fires before the reuse path, even with a file present.
+
+    A retry after an all-empty collection run must not be able to launder a
+    stale-but-valid script left on disk from an earlier, unrelated successful
+    run -- the guard has to run first regardless of what raw_writer_output.txt
+    contains.
+    """
+    raw_path = tmp_path / "raw_writer_output.txt"
+    raw_path.write_text(f"<script>{_LONG_SCRIPT}</script>", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="no section has any article text"):
+        generate_rundown_script(
+            sections=[("Alpha", [])],
+            date_str="2026-03-10",
+            work_dir=tmp_path,
+        )
+
+    # The refusal must not have touched the persisted file either way.
+    assert raw_path.exists()
+
+
+def test_only_runtimeerror_triggers_raw_file_cleanup(tmp_path):
+    """The except clause catches RuntimeError only -- pin that deliberately.
+
+    Every refusal report_engine.parse_report raises today is a RuntimeError,
+    so this passes. A future engine exception of a different type must NOT be
+    silently swallowed into a delete-and-retry loop; it should propagate, and
+    the persisted raw file should be left untouched rather than deleted for an
+    error the except clause was never written to handle.
+    """
+    raw_path = tmp_path / "raw_writer_output.txt"
+    raw_path.write_text(f"<script>{_LONG_SCRIPT}</script>", encoding="utf-8")
+
+    with patch(
+        "pipeline.rundown_writer.parse_report",
+        side_effect=ValueError("not a RuntimeError"),
+    ):
+        with pytest.raises(ValueError):
+            generate_rundown_script(
+                sections=[("Tech", ["Article"])],
+                date_str="2026-03-10",
+                work_dir=tmp_path,
+            )
+
+    assert raw_path.exists()
 
 
 def test_rundown_editor_falls_back_to_scripts(monkeypatch):
@@ -669,30 +763,6 @@ def test_prompt_forbids_a_closing_recap():
     assert "naming no stories" in PROMPT_TEMPLATE
     # The old wording invited the behavior; make sure it is gone.
     assert "a brief sign-off are\nuseful" not in PROMPT_TEMPLATE
-
-
-def test_extract_script_picks_the_longest_block_not_the_first():
-    """A placeholder <script>...</script> before the real one must not win.
-
-    Real incident, 2026-08-18 FP Digest: the model emitted a literal
-    `<script>...</script>` sketch at offset 647 before writing the real script
-    at 2523. The non-greedy regex matched the placeholder, so a 3-byte script
-    was TTS'd and a 2636-byte mp3 shipped to subscribers (a normal episode is
-    ~3 MB). The full correct script was sitting in raw_writer_output.txt.
-    """
-    from pipeline.rundown_writer import _extract_script
-
-    raw = (
-        "planning notes\n<script>...</script>\nmore notes\n"
-        "<script>\nThe real briefing text, which is much longer.\n</script>\n"
-    )
-    assert _extract_script(raw) == "The real briefing text, which is much longer."
-
-
-def test_extract_script_returns_text_when_no_tags():
-    from pipeline.rundown_writer import _extract_script
-
-    assert _extract_script("no tags here") == "no tags here"
 
 
 def test_writer_rejects_an_implausibly_short_script():
