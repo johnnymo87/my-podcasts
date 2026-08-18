@@ -92,4 +92,7 @@ def generate_report(
         "tags. Then write the full spoken script wrapped in "
         "<script>...</script> tags. Output nothing outside these tags.\n\n" + prompt
     )
-    return run_report_prompt(instruction, label="report")
+    # "episode", not "report": the engine's messages read "{label} report
+    # writer ...", so label="report" produced "report report writer". This
+    # module backs the one-off `episode` command.
+    return run_report_prompt(instruction, label="episode")
