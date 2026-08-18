@@ -661,3 +661,31 @@ def test_semafor_routing_header_preferred_over_category(tmp_path, monkeypatch):
     assert "Business Article With FP Routing" in contents
     assert "Tech Article With TH Routing" not in contents
     assert "Article With Skip Routing" not in contents
+
+
+def test_should_fetch_full_text_gate_matches_measured_corpus():
+    """The gate separates antiwar teasers (max 454c) from Johnstone (min 767c).
+
+    Threshold sits in the measured gap; see
+    docs/plans/2026-08-18-fp-rss-full-text.md.
+    """
+    from pipeline.fp_collector import _should_fetch_full_text
+
+    # Longest antiwar teaser measured across 1633 cache files.
+    assert _should_fetch_full_text("x" * 454, "https://news.antiwar.com/a/") is True
+    # Shortest caitlinjohnstone body measured across 147 cache files.
+    assert _should_fetch_full_text("x" * 767, "https://x.substack.com/p/a") is False
+
+
+def test_should_fetch_full_text_requires_a_url():
+    from pipeline.fp_collector import _should_fetch_full_text
+
+    assert _should_fetch_full_text("short", "") is False
+    assert _should_fetch_full_text("short", "   ") is False
+
+
+def test_should_fetch_full_text_boundary_is_exclusive():
+    from pipeline.fp_collector import _should_fetch_full_text
+
+    assert _should_fetch_full_text("x" * 599, "https://a/") is True
+    assert _should_fetch_full_text("x" * 600, "https://a/") is False

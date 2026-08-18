@@ -41,6 +41,36 @@ def _extract_article_text(url: str) -> str:
         return ""
 
 
+# Bodies shorter than this are RSS teasers worth re-fetching in full.
+#
+# Measured 2026-08-18 over all 1780 files in the antiwar RSS cache: the three
+# antiwar feeds top out at 454 chars (n=1633, median ~350) while the full-text
+# caitlinjohnstone feed bottoms out at 767 (n=147, median 4623). 600 sits in
+# that gap. Deliberately a content-only rule rather than a feed allowlist, so
+# it retires itself if antiwar ever publishes full text.
+#
+# Note the gate sees the body *after* HTML entities are decoded, while the
+# corpus was measured on raw bodies. Decoding only shortens (&#8217; -> '), so
+# every measured body moves away from the threshold, not toward it.
+_TEASER_MAX_CHARS = 600
+
+# Worst case for the 14-day adaptive lookback ceiling is ~140 candidates at
+# ~10 new cache files/day; at ~1.5s per fetch plus a 1s delay that is ~6
+# minutes. Cap the work and take the newest candidates.
+_MAX_RSS_FETCHES = 40
+
+# Seconds between outbound article fetches; matches the Levine path's
+# fetch_all_articles(..., delay_between=1.0).
+_RSS_FETCH_DELAY = 1.0
+
+
+def _should_fetch_full_text(excerpt: str, url: str) -> bool:
+    """True when a cached RSS body looks like a teaser worth re-fetching."""
+    if not url.strip():
+        return False
+    return len(excerpt) < _TEASER_MAX_CHARS
+
+
 def collect_fp_artifacts(
     job_id: str,
     work_dir: Path,
