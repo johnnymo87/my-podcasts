@@ -199,7 +199,11 @@ Origin exclusion by registrable domain; non-daemon timeout thread; unguarded
 
 ### 4. Set funnel thresholds — `my-podcasts-3qs` (P3) — **calendar-gated**
 
-Do **not** start before ~2026-08-31. Needs ~2 weeks of real `run-stats.jsonl`
+Do **not** start before ~2026-08-31, and note the clock is **paused** while
+Levine is away (week of 08-17) — his links are the only source producing
+paywalled stubs, so a Levine-free week yields zero evidence about the feature
+being thresholded. What `3qs` needs is ~2 weeks of **Tue-Fri runs with Levine
+present**, not 2 weeks of calendar. Needs ~2 weeks of real `run-stats.jsonl`
 weekday history. Guessing thresholds inside a project premised on not yet having
 numbers is self-refuting; `include_in_episode` measured 4-5 on ten consecutive
 runs, so any obvious rule fires on normal days. Threshold *ratios* against the
@@ -234,6 +238,12 @@ loss would cause an actively wrong decision.
   intermediate commit must be independently safe; an import error is a
   crash-loop. Check `pending_the_rundown`/`pending_fp_digest` in
   `/persist/my-podcasts/state.sqlite3` before restarting.
+- **Levine is on vacation the week of 2026-08-17** (operator-confirmed, back the
+  week of 08-24). Every Rundown funnel that week reads `levine 0` / `EXA 0
+  flagged` — correct arithmetic on an empty denominator. A wake fires 08-25 to
+  confirm content actually resumes, because **a vacation and a broken delivery
+  path look identical from inside the pipeline**: both show `levine 0` with no
+  errors, and only the mailbox or the expected return date distinguishes them.
 - **Mondays have no Levine content, structurally.** Money Stuff publishes
   **Mon-Thu only** (verified across three consecutive weeks of cache files). A
   Monday's adaptive lookback is 4 days — Fri/Sat/Sun/Mon — which contains no
