@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from pipeline.rundown_writer import (
     WriterOutput,
     _extract_script,
@@ -667,3 +669,40 @@ def test_prompt_forbids_a_closing_recap():
     assert "naming no stories" in PROMPT_TEMPLATE
     # The old wording invited the behavior; make sure it is gone.
     assert "a brief sign-off are\nuseful" not in PROMPT_TEMPLATE
+
+
+def test_extract_script_picks_the_longest_block_not_the_first():
+    """A placeholder <script>...</script> before the real one must not win.
+
+    Real incident, 2026-08-18 FP Digest: the model emitted a literal
+    `<script>...</script>` sketch at offset 647 before writing the real script
+    at 2523. The non-greedy regex matched the placeholder, so a 3-byte script
+    was TTS'd and a 2636-byte mp3 shipped to subscribers (a normal episode is
+    ~3 MB). The full correct script was sitting in raw_writer_output.txt.
+    """
+    from pipeline.rundown_writer import _extract_script
+
+    raw = (
+        "planning notes\n<script>...</script>\nmore notes\n"
+        "<script>\nThe real briefing text, which is much longer.\n</script>\n"
+    )
+    assert _extract_script(raw) == "The real briefing text, which is much longer."
+
+
+def test_extract_script_returns_text_when_no_tags():
+    from pipeline.rundown_writer import _extract_script
+
+    assert _extract_script("no tags here") == "no tags here"
+
+
+def test_writer_rejects_an_implausibly_short_script():
+    """`...` is not empty, so the empty-check let it through to TTS.
+
+    The guard must be a plausibility floor, not an emptiness check.
+    """
+    from pipeline.rundown_writer import _validate_script_length
+
+    with pytest.raises(RuntimeError, match="too short"):
+        _validate_script_length("...", "Rundown")
+    # A real script passes untouched.
+    _validate_script_length("word " * 200, "Rundown")

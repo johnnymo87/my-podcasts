@@ -11,6 +11,13 @@ import pytest
 from pipeline.fp_processor import process_fp_digest_job
 
 
+# Processors reject scripts too short to be a real episode
+# (rundown_writer._MIN_SCRIPT_CHARS). A 16-char 'episode' is not a
+# realistic fixture -- the 2026-08-18 incident shipped a 3-char script
+# precisely because nothing downstream checked plausibility.
+_FILLER = " The briefing continues with further detail." * 15
+
+
 def test_process_fp_digest_job(tmp_path, monkeypatch) -> None:
     """Verify TTS, R2 upload, episode insert, and feed regeneration are called."""
     from pipeline.db import StateStore
@@ -30,7 +37,9 @@ def test_process_fp_digest_job(tmp_path, monkeypatch) -> None:
 
     # Write a pre-made script to a temp file
     script_file = tmp_path / "fp_script.txt"
-    script_file.write_text("This is the Foreign Policy briefing.", encoding="utf-8")
+    script_file.write_text(
+        "This is the Foreign Policy briefing." + _FILLER, encoding="utf-8"
+    )
 
     # Mock ttsjoin and ffprobe subprocess
     def fake_subprocess_run(cmd, **kwargs):
@@ -119,7 +128,7 @@ def test_process_fp_digest_with_show_notes(tmp_path, monkeypatch) -> None:
     )
 
     script_file = tmp_path / "fp_script_sn.txt"
-    script_file.write_text("The FP briefing.", encoding="utf-8")
+    script_file.write_text("The FP briefing." + _FILLER, encoding="utf-8")
 
     # Mock subprocess and feed regen
     def fake_subprocess_run(cmd, **kwargs):
@@ -214,7 +223,7 @@ def test_process_fp_filters_by_covered_headlines(tmp_path, monkeypatch) -> None:
     (work_dir / "covered.json").write_text(json.dumps(["Gaza Ceasefire Talks"]))
 
     script_file = tmp_path / "fp_cov_script.txt"
-    script_file.write_text("The FP briefing.", encoding="utf-8")
+    script_file.write_text("The FP briefing." + _FILLER, encoding="utf-8")
 
     def fake_subprocess_run(cmd, **kwargs):
         if cmd[0] == "ttsjoin":
@@ -248,6 +257,46 @@ def test_process_fp_filters_by_covered_headlines(tmp_path, monkeypatch) -> None:
     assert len(articles) == 1
     assert articles[0]["title"] == "Gaza Ceasefire Talks"
 
+    store.close()
+
+
+def test_process_fp_digest_job_rejects_implausibly_short_script(
+    tmp_path, monkeypatch
+) -> None:
+    """A 3-character script is not empty, but it is not an episode either.
+
+    Real incident 2026-08-18: the writer emitted a placeholder
+    `<script>...</script>` before the real one, `_extract_script` matched the
+    placeholder, and the emptiness check passed `...` straight through to TTS.
+    A 2636-byte mp3 shipped to subscribers; a normal episode is ~3 MB.
+    """
+    from pipeline.db import StateStore
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+
+    past = (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()
+    store._conn.execute(
+        """INSERT INTO pending_fp_digest
+           (id, date_str, status, process_after)
+           VALUES (?, ?, ?, ?)""",
+        ("fp-job-short", "2026-03-18", "pending", past),
+    )
+    store._conn.commit()
+
+    script_file = tmp_path / "fp_short_script.txt"
+    script_file.write_text("...", encoding="utf-8")
+
+    def fail_if_called(cmd, **kwargs):
+        raise AssertionError(f"subprocess.run should not be called: {cmd}")
+
+    monkeypatch.setattr(subprocess, "run", fail_if_called)
+
+    job = [j for j in store.list_due_fp_digest() if j["id"] == "fp-job-short"][0]
+    with pytest.raises(RuntimeError, match="too short"):
+        process_fp_digest_job(job, store, r2_client, script_path=script_file)
+
+    r2_client.upload_file.assert_not_called()
     store.close()
 
 
