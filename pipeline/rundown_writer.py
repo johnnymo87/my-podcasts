@@ -4,14 +4,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pipeline.opencode_client import (
-    create_session,
-    delete_session,
-    get_last_assistant_text,
-    get_messages,
-    send_prompt_async,
-    wait_for_idle,
-)
+from pipeline.report_engine import fetch_report_text, parse_report
 
 
 PROMPT_TEMPLATE = """\
@@ -151,6 +144,12 @@ def parse_summary(text: str) -> WriterOutput:
 
     Returns WriterOutput with summary and the remaining script text.
     If no summary tags found, summary is empty string.
+
+    Dead in this module as of the report_engine migration (``generate_rundown_script``
+    now uses ``report_engine.parse_report``, which extracts from the full raw
+    text rather than a summary-stripped remainder) -- retained only because
+    ``pipeline.fp_writer`` still imports it. Deleted in the same commit that
+    migrates ``fp_writer`` off it (my-podcasts-xlf, task 3).
     """
     match = re.search(r"<summary>\s*(.*?)\s*</summary>", text, re.DOTALL)
     if match:
@@ -192,6 +191,11 @@ def _extract_script(text: str) -> str:
     real one -- on 2026-08-18 an FP Digest episode shipped as a 2636-byte mp3
     because the old non-greedy ``re.search`` matched a 3-character placeholder
     at offset 647 instead of the 11814-character script at offset 2523.
+
+    Dead in this module as of the report_engine migration (``generate_rundown_script``
+    now uses ``report_engine.parse_report``) -- retained only because
+    ``pipeline.fp_writer`` still imports it. Deleted in the same commit that
+    migrates ``fp_writer`` off it (my-podcasts-xlf, task 3).
     """
     import re
 
@@ -262,27 +266,27 @@ def generate_rundown_script(
             "and the script that will be read aloud.\n\n" + prompt
         )
 
-        session_id = create_session()
-        try:
-            send_prompt_async(session_id, instruction)
-            if not wait_for_idle(session_id, timeout=900):
-                raise RuntimeError(
-                    "opencode session did not complete within 900 seconds"
-                )
-            messages = get_messages(session_id)
-            full_text = get_last_assistant_text(messages).strip()
-            if raw_path is not None:
-                raw_path.parent.mkdir(parents=True, exist_ok=True)
-                raw_path.write_text(full_text, encoding="utf-8")
-        finally:
-            delete_session(session_id)
+        full_text = fetch_report_text(instruction, label="Rundown")
+        if raw_path is not None:
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_path.write_text(full_text, encoding="utf-8")
 
     try:
         covered = parse_covered(full_text)
-        summary_result = parse_summary(full_text)
-        script = _extract_script(summary_result.script)
-        if not script.strip():
-            raise RuntimeError("Rundown writer returned empty script")
+        # min_chars=500 is re-derived here, not copied from the transcript
+        # path's 2000. The daily writer's failure path is *bounded*: consumer
+        # backoff (1m/2m/4m/8m/15m, ~12h budget) then status='errored' plus a
+        # retry-exhaustion alert -- the same regime the original 500 was
+        # measured for ("far below the smallest plausible episode (~5000
+        # chars), so it only ever catches garbage"). The transcript path's
+        # *unbounded* email-redelivery regime is what forced 2000 there; that
+        # reasoning does not transfer to this caller.
+        # require_tags=True because this is an automated, no-human-in-the-loop
+        # publish path -- a missing <script> tag must be a loud refusal, not
+        # a narration of the model's raw reasoning.
+        report = parse_report(
+            full_text, label="Rundown", min_chars=500, require_tags=True
+        )
     except RuntimeError:
         if raw_path is not None:
             try:
@@ -292,7 +296,7 @@ def generate_rundown_script(
         raise
 
     return WriterOutput(
-        script=script,
-        summary=summary_result.summary,
+        script=report.script,
+        summary=report.summary,
         covered_headlines=covered,
     )
