@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import html as html_mod
 import json
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -69,6 +71,21 @@ def _should_fetch_full_text(excerpt: str, url: str) -> bool:
     if not url.strip():
         return False
     return len(excerpt) < _TEASER_MAX_CHARS
+
+
+def _prior_fetched_body(art_path: Path, excerpt: str) -> str | None:
+    """Return a previous attempt's fetched body for this article, if any.
+
+    The work dir survives retries, so a body already longer than the cache
+    excerpt is text a prior attempt successfully fetched. Returns None when
+    there is nothing to reuse — including when the prior body is merely the
+    excerpt, which means that attempt's fetch failed and should be retried.
+    """
+    if not art_path.exists():
+        return None
+    parts = art_path.read_text(encoding="utf-8").split("\n\n", 2)
+    body = parts[2].strip() if len(parts) > 2 else ""
+    return body if len(body) > len(excerpt) else None
 
 
 def collect_fp_artifacts(
@@ -183,10 +200,12 @@ def collect_fp_artifacts(
         else Path("/persist/my-podcasts/antiwar-rss-cache")
     )
     rss_articles_data: list[dict] = []
+    fetch_log: list[dict] = []
 
     if not _rss_cache.exists():
         print(f"[fp_collector] WARNING: RSS cache not found at {_rss_cache}")
     if _rss_cache.exists():
+        pending: list[dict] = []
         for cache_path in sorted(_rss_cache.glob("*.md")):
             if not _in_window(cache_path.name):
                 continue
@@ -210,19 +229,87 @@ def collect_fp_artifacts(
                 continue
 
             body_parts = raw.split("\n\n", 2)
-            text = body_parts[2].strip() if len(body_parts) > 2 else ""
-
-            source_dir = articles_rss_dir / source
-            source_dir.mkdir(parents=True, exist_ok=True)
-
-            slug = _slugify(title)
-            art_path = source_dir / f"{slug}.md"
-            content = f"# {title}\n\nURL: {url}\nSource: {source}\n\n{text}"
-            art_path.write_text(content, encoding="utf-8")
-
-            rss_articles_data.append(
+            # Cached antiwar bodies are the raw RSS <summary>, so they carry
+            # undecoded HTML entities (&#8217;, the trailing [&#8230;]). Decode
+            # here as well as at sync time, because cache files already on disk
+            # keep the old encoding for the length of the retention window.
+            text = html_mod.unescape(
+                body_parts[2].strip() if len(body_parts) > 2 else ""
+            )
+            pending.append(
                 {"headline": title, "url": url, "source": source, "text": text}
             )
+
+        # Upgrade teasers to full text, newest first, bounded.
+        candidates = [
+            item
+            for item in reversed(pending)
+            if _should_fetch_full_text(item["text"], item["url"])
+        ][:_MAX_RSS_FETCHES]
+        fetched_count = 0
+        for item in candidates:
+            # Collection re-runs from the top on every retry (the sentinel is
+            # written last), and the retry budget is 51 attempts — so reuse
+            # this work dir's own prior output rather than re-requesting. A
+            # body that is still excerpt-length means last attempt's fetch
+            # failed, and that one is worth retrying.
+            prior = _prior_fetched_body(
+                articles_rss_dir / item["source"] / f"{_slugify(item['headline'])}.md",
+                item["text"],
+            )
+            if prior is not None:
+                fetch_log.append(
+                    {
+                        "url": item["url"],
+                        "headline": item["headline"],
+                        "excerpt_chars": len(item["text"]),
+                        "fetched_chars": len(prior),
+                        "upgraded": True,
+                        "reused": True,
+                    }
+                )
+                item["text"] = prior
+                continue
+
+            if fetched_count > 0:
+                time.sleep(_RSS_FETCH_DELAY)
+            fetched_count += 1
+            fetched = _extract_article_text(item["url"])
+            # The excerpt is the floor, never the ceiling: an empty
+            # extraction, an HTTP error, or a paywall stub all leave it in
+            # place.
+            upgraded = len(fetched) > len(item["text"])
+            fetch_log.append(
+                {
+                    "url": item["url"],
+                    "headline": item["headline"],
+                    "excerpt_chars": len(item["text"]),
+                    "fetched_chars": len(fetched),
+                    "upgraded": upgraded,
+                    "reused": False,
+                }
+            )
+            if upgraded:
+                item["text"] = fetched
+
+        for item in pending:
+            source_dir = articles_rss_dir / item["source"]
+            source_dir.mkdir(parents=True, exist_ok=True)
+            art_path = source_dir / f"{_slugify(item['headline'])}.md"
+            art_path.write_text(
+                f"# {item['headline']}\n\nURL: {item['url']}\n"
+                f"Source: {item['source']}\n\n{item['text']}",
+                encoding="utf-8",
+            )
+            rss_articles_data.append(item)
+
+    # Written unconditionally — a missing cache dir is exactly the case
+    # where "did this feature do anything?" most needs an answer, and it is
+    # the case that would otherwise write no file. This is the only
+    # visibility this feature has: FP has no funnel report.
+    (work_dir / "rss_fetch.json").write_text(
+        json.dumps(fetch_log, indent=2), encoding="utf-8"
+    )
 
     # Phase 2b: Pick up routed links from Things Happen
     articles_routed_dir = work_dir / "articles" / "routed"

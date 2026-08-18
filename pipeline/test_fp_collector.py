@@ -110,7 +110,9 @@ def test_collect_fp_artifacts(
     mock_plan,
     mock_exa,
     tmp_path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setattr("pipeline.fp_collector.time.sleep", lambda s: None)
     today = _today_et()
 
     # Pre-populate homepage cache
@@ -252,8 +254,15 @@ def test_collect_fp_artifacts(
     # Verify search_related called only for needs_exa+include_in_episode directive
     mock_exa.assert_called_once()
 
-    # Verify _extract_article_text was NOT called (cache-based reading, no routed links)
-    mock_extract.assert_not_called()
+    # Verify _extract_article_text was called for the two short RSS bodies
+    # (both under the teaser gate) but never for homepage articles, which are
+    # written directly from the cache and never routed through the fetch
+    # path.
+    assert mock_extract.call_count == 2
+    fetched_urls = {call.args[0] for call in mock_extract.call_args_list}
+    assert fetched_urls == {"http://antiwar.com/story1", "http://caitlin.com/story1"}
+    assert "http://example.com/iran" not in fetched_urls
+    assert "http://example.com/nato" not in fetched_urls
 
 
 def test_routed_levine_links_included(tmp_path, monkeypatch):
@@ -382,6 +391,7 @@ def test_fp_collector_reads_from_caches(tmp_path, monkeypatch):
         lambda *a, **kw: _make_empty_plan(),
     )
     monkeypatch.setattr("pipeline.fp_collector.search_related", lambda *a, **kw: [])
+    monkeypatch.setattr("pipeline.fp_collector.time.sleep", lambda s: None)
 
     today = datetime.now(tz=_et).strftime("%Y-%m-%d")
     yesterday = (datetime.now(tz=_et) - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -708,3 +718,490 @@ def test_collector_cannot_reach_the_network_in_tests():
         fp_collector.requests.get("https://example.invalid/")
 
     assert _extract_article_text("https://example.invalid/") == ""
+
+
+def test_rss_teaser_is_replaced_with_fetched_full_text(tmp_path, monkeypatch):
+    """A short RSS body is upgraded to the fetched article text."""
+    rss_cache = tmp_path / "rss"
+    rss_cache.mkdir()
+    today = _today_et()
+    _write_rss_cache_file(
+        rss_cache,
+        today,
+        "antiwar_news",
+        "Strikes Kill Eleven",
+        "https://news.antiwar.com/strikes/",
+        text="Teaser body [&#8230;]",
+    )
+    full = "Full article text. " * 100
+    monkeypatch.setattr("pipeline.fp_collector._extract_article_text", lambda url: full)
+    monkeypatch.setattr("pipeline.fp_collector.time.sleep", lambda s: None)
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+    work_dir = tmp_path / "work"
+
+    collect_fp_artifacts(
+        "job-1",
+        work_dir,
+        scripts_source_dir=tmp_path / "scripts",
+        fp_routed_dir=tmp_path / "routed",
+        homepage_cache_dir=tmp_path / "hp",
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=tmp_path / "sem",
+    )
+
+    art = (
+        work_dir
+        / "articles"
+        / "rss"
+        / "antiwar_news"
+        / f"{_slugify('Strikes Kill Eleven')}.md"
+    ).read_text()
+    assert "Full article text." in art
+    assert "Teaser body" not in art
+
+
+def test_failed_fetch_degrades_to_the_excerpt(tmp_path, monkeypatch):
+    """A fetch failure must never drop or shorten the story."""
+    rss_cache = tmp_path / "rss"
+    rss_cache.mkdir()
+    today = _today_et()
+    _write_rss_cache_file(
+        rss_cache,
+        today,
+        "antiwar_news",
+        "Strikes Kill Eleven",
+        "https://news.antiwar.com/strikes/",
+        text="Teaser body [&#8230;]",
+    )
+    monkeypatch.setattr("pipeline.fp_collector._extract_article_text", lambda url: "")
+    monkeypatch.setattr("pipeline.fp_collector.time.sleep", lambda s: None)
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+    work_dir = tmp_path / "work"
+
+    collect_fp_artifacts(
+        "job-1",
+        work_dir,
+        scripts_source_dir=tmp_path / "scripts",
+        fp_routed_dir=tmp_path / "routed",
+        homepage_cache_dir=tmp_path / "hp",
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=tmp_path / "sem",
+    )
+
+    art = (
+        work_dir
+        / "articles"
+        / "rss"
+        / "antiwar_news"
+        / f"{_slugify('Strikes Kill Eleven')}.md"
+    ).read_text()
+    assert "Teaser body" in art
+
+
+def test_shorter_fetch_result_never_replaces_the_excerpt(tmp_path, monkeypatch):
+    """The excerpt is the floor: a shorter extraction is discarded."""
+    rss_cache = tmp_path / "rss"
+    rss_cache.mkdir()
+    today = _today_et()
+    _write_rss_cache_file(
+        rss_cache,
+        today,
+        "antiwar_news",
+        "Strikes Kill Eleven",
+        "https://news.antiwar.com/strikes/",
+        text="Teaser body [&#8230;]",
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_collector._extract_article_text", lambda url: "Tiny."
+    )
+    monkeypatch.setattr("pipeline.fp_collector.time.sleep", lambda s: None)
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+    work_dir = tmp_path / "work"
+
+    collect_fp_artifacts(
+        "job-1",
+        work_dir,
+        scripts_source_dir=tmp_path / "scripts",
+        fp_routed_dir=tmp_path / "routed",
+        homepage_cache_dir=tmp_path / "hp",
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=tmp_path / "sem",
+    )
+
+    art = (
+        work_dir
+        / "articles"
+        / "rss"
+        / "antiwar_news"
+        / f"{_slugify('Strikes Kill Eleven')}.md"
+    ).read_text()
+    assert "Teaser body" in art
+    assert "Tiny." not in art
+
+
+def test_full_text_rss_article_is_not_refetched(tmp_path, monkeypatch):
+    """caitlinjohnstone-shaped bodies are already whole; leave them alone."""
+    rss_cache = tmp_path / "rss"
+    rss_cache.mkdir()
+    today = _today_et()
+    _write_rss_cache_file(
+        rss_cache,
+        today,
+        "caitlinjohnstone",
+        "A Whole Essay",
+        "https://caitlinjohnstone.substack.com/p/a-whole-essay",
+        text="x" * 800,
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "pipeline.fp_collector._extract_article_text",
+        lambda url: calls.append(url) or "SHOULD NOT BE USED",
+    )
+    monkeypatch.setattr("pipeline.fp_collector.time.sleep", lambda s: None)
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+    work_dir = tmp_path / "work"
+
+    collect_fp_artifacts(
+        "job-1",
+        work_dir,
+        scripts_source_dir=tmp_path / "scripts",
+        fp_routed_dir=tmp_path / "routed",
+        homepage_cache_dir=tmp_path / "hp",
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=tmp_path / "sem",
+    )
+
+    assert calls == []
+    art = (
+        work_dir
+        / "articles"
+        / "rss"
+        / "caitlinjohnstone"
+        / f"{_slugify('A Whole Essay')}.md"
+    ).read_text()
+    assert "x" * 800 in art
+
+
+def test_fetched_text_reaches_the_editor_snippet(tmp_path, monkeypatch):
+    """The editor sees the fetched text, not the teaser.
+
+    Derived from the editor's own input rather than from the article file, so
+    this cannot pass by construction alongside the file assertion above.
+    """
+    rss_cache = tmp_path / "rss"
+    rss_cache.mkdir()
+    today = _today_et()
+    _write_rss_cache_file(
+        rss_cache,
+        today,
+        "antiwar_news",
+        "Strikes Kill Eleven",
+        "https://news.antiwar.com/strikes/",
+        text="Teaser body [&#8230;]",
+    )
+    full = "Distinctive opening sentence. " + ("Filler text. " * 100)
+    monkeypatch.setattr("pipeline.fp_collector._extract_article_text", lambda url: full)
+    monkeypatch.setattr("pipeline.fp_collector.time.sleep", lambda s: None)
+
+    captured = {}
+
+    def _fake_plan(headlines, **kwargs):
+        captured["headlines"] = headlines
+        return _make_empty_plan()
+
+    monkeypatch.setattr("pipeline.fp_collector.generate_fp_research_plan", _fake_plan)
+    work_dir = tmp_path / "work"
+
+    collect_fp_artifacts(
+        "job-1",
+        work_dir,
+        scripts_source_dir=tmp_path / "scripts",
+        fp_routed_dir=tmp_path / "routed",
+        homepage_cache_dir=tmp_path / "hp",
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=tmp_path / "sem",
+    )
+
+    assert any("Distinctive opening sentence." in h for h in captured["headlines"])
+
+
+def test_fetches_are_capped_and_take_the_newest(tmp_path, monkeypatch):
+    """Bounded work under a 14-day lookback; the cap trims the oldest.
+
+    The newer date must carry at least _MAX_RSS_FETCHES files on its own, or
+    the "all fetched urls are from the newer date" assertion is not entailed
+    by the cap and would fail for a legitimate implementation.
+    """
+    from datetime import timedelta
+
+    from pipeline.fp_collector import _MAX_RSS_FETCHES
+
+    rss_cache = tmp_path / "rss"
+    rss_cache.mkdir()
+    today = _today_et()
+    yesterday = (datetime.now(tz=_et) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    today_urls: set[str] = set()
+    for i in range(_MAX_RSS_FETCHES + 5):
+        url = f"https://news.antiwar.com/today-{i}/"
+        today_urls.add(url)
+        _write_rss_cache_file(rss_cache, today, "antiwar_news", f"Today Story {i}", url)
+    for i in range(5):
+        _write_rss_cache_file(
+            rss_cache,
+            yesterday,
+            "antiwar_news",
+            f"Yesterday Story {i}",
+            f"https://news.antiwar.com/yesterday-{i}/",
+        )
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "pipeline.fp_collector._extract_article_text",
+        lambda url: calls.append(url) or "fetched " * 50,
+    )
+    monkeypatch.setattr("pipeline.fp_collector.time.sleep", lambda s: None)
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+    work_dir = tmp_path / "work"
+
+    collect_fp_artifacts(
+        "job-1",
+        work_dir,
+        scripts_source_dir=tmp_path / "scripts",
+        fp_routed_dir=tmp_path / "routed",
+        homepage_cache_dir=tmp_path / "hp",
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=tmp_path / "sem",
+        lookback_days=3,
+    )
+
+    assert len(calls) == _MAX_RSS_FETCHES
+    assert all(url in today_urls for url in calls)
+
+
+def test_fetch_delay_matches_the_levine_path(tmp_path, monkeypatch):
+    """One 1.0s sleep between fetches, none before the first."""
+    rss_cache = tmp_path / "rss"
+    rss_cache.mkdir()
+    today = _today_et()
+    for i in range(3):
+        _write_rss_cache_file(
+            rss_cache,
+            today,
+            "antiwar_news",
+            f"Teaser Story {i}",
+            f"https://news.antiwar.com/story-{i}/",
+        )
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "pipeline.fp_collector._extract_article_text",
+        lambda url: "fetched text " * 50,
+    )
+    monkeypatch.setattr("pipeline.fp_collector.time.sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+    work_dir = tmp_path / "work"
+
+    collect_fp_artifacts(
+        "job-1",
+        work_dir,
+        scripts_source_dir=tmp_path / "scripts",
+        fp_routed_dir=tmp_path / "routed",
+        homepage_cache_dir=tmp_path / "hp",
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=tmp_path / "sem",
+    )
+
+    assert sleeps == [1.0, 1.0]
+
+
+def test_cached_entities_are_decoded_on_read(tmp_path, monkeypatch):
+    """Bodies already on disk are entity-encoded; decode when reading them.
+
+    Deliberately arranged so the body is NOT upgraded (the fetch fails),
+    because that is the only state in which the on-read decode is observable
+    — a successful fetch would replace the body and hide it. This is the
+    test whose absence made an earlier draft's mutation list dishonest.
+    """
+    rss_cache = tmp_path / "rss"
+    rss_cache.mkdir()
+    today = _today_et()
+    _write_rss_cache_file(
+        rss_cache,
+        today,
+        "antiwar_news",
+        "Ansar Allah Announces Attacks",
+        "https://news.antiwar.com/a/",
+        text="he called it a &#8220;landing ship&#8221; [&#8230;]",
+    )
+    monkeypatch.setattr("pipeline.fp_collector._extract_article_text", lambda url: "")
+    monkeypatch.setattr("pipeline.fp_collector.time.sleep", lambda s: None)
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+    work_dir = tmp_path / "work"
+
+    collect_fp_artifacts(
+        "job-1",
+        work_dir,
+        scripts_source_dir=tmp_path / "scripts",
+        fp_routed_dir=tmp_path / "routed",
+        homepage_cache_dir=tmp_path / "hp",
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=tmp_path / "sem",
+    )
+
+    art = (
+        work_dir
+        / "articles"
+        / "rss"
+        / "antiwar_news"
+        / f"{_slugify('Ansar Allah Announces Attacks')}.md"
+    ).read_text()
+    assert "&#8220;" not in art
+    assert "&#8230;" not in art
+    assert "\u201clanding ship\u201d" in art
+    assert "\u2026" in art
+
+
+def test_retry_reuses_the_prior_attempt_and_makes_no_request(tmp_path, monkeypatch):
+    """A re-run in the same work dir must not re-fetch what it already has.
+
+    Collection re-runs from the top on every retry (collection_done.json is
+    written last), and MAX_RETRY_FAILURES is 51 — so without this, a failing
+    editor turns ~17 requests/day into ~850 against a small nonprofit's site.
+    """
+    rss_cache = tmp_path / "rss"
+    rss_cache.mkdir()
+    today = _today_et()
+    _write_rss_cache_file(
+        rss_cache,
+        today,
+        "antiwar_news",
+        "Strikes Kill Eleven",
+        "https://news.antiwar.com/strikes/",
+        text="Teaser body [&#8230;]",
+    )
+    monkeypatch.setattr("pipeline.fp_collector.time.sleep", lambda s: None)
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+    work_dir = tmp_path / "work"
+
+    full = "Full article text. " * 100
+    monkeypatch.setattr("pipeline.fp_collector._extract_article_text", lambda url: full)
+    collect_fp_artifacts(
+        "job-1",
+        work_dir,
+        scripts_source_dir=tmp_path / "scripts",
+        fp_routed_dir=tmp_path / "routed",
+        homepage_cache_dir=tmp_path / "hp",
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=tmp_path / "sem",
+    )
+
+    art_path = (
+        work_dir
+        / "articles"
+        / "rss"
+        / "antiwar_news"
+        / f"{_slugify('Strikes Kill Eleven')}.md"
+    )
+    assert full.strip() in art_path.read_text()
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "pipeline.fp_collector._extract_article_text",
+        lambda url: calls.append(url) or "SHOULD NOT BE USED",
+    )
+    collect_fp_artifacts(
+        "job-1",
+        work_dir,
+        scripts_source_dir=tmp_path / "scripts",
+        fp_routed_dir=tmp_path / "routed",
+        homepage_cache_dir=tmp_path / "hp",
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=tmp_path / "sem",
+    )
+
+    assert calls == []
+    assert full.strip() in art_path.read_text()
+    assert "SHOULD NOT BE USED" not in art_path.read_text()
+
+
+def test_retry_does_refetch_a_previously_failed_article(tmp_path, monkeypatch):
+    """The reuse must not cache a failure. Derived from the opposite
+    direction to the test above so the two cannot both pass on a stuck
+    implementation."""
+    rss_cache = tmp_path / "rss"
+    rss_cache.mkdir()
+    today = _today_et()
+    _write_rss_cache_file(
+        rss_cache,
+        today,
+        "antiwar_news",
+        "Strikes Kill Eleven",
+        "https://news.antiwar.com/strikes/",
+        text="Teaser body [&#8230;]",
+    )
+    monkeypatch.setattr("pipeline.fp_collector.time.sleep", lambda s: None)
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+    work_dir = tmp_path / "work"
+
+    monkeypatch.setattr("pipeline.fp_collector._extract_article_text", lambda url: "")
+    collect_fp_artifacts(
+        "job-1",
+        work_dir,
+        scripts_source_dir=tmp_path / "scripts",
+        fp_routed_dir=tmp_path / "routed",
+        homepage_cache_dir=tmp_path / "hp",
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=tmp_path / "sem",
+    )
+
+    art_path = (
+        work_dir
+        / "articles"
+        / "rss"
+        / "antiwar_news"
+        / f"{_slugify('Strikes Kill Eleven')}.md"
+    )
+    assert "Teaser body" in art_path.read_text()
+
+    full = "Full article text. " * 100
+    monkeypatch.setattr("pipeline.fp_collector._extract_article_text", lambda url: full)
+    collect_fp_artifacts(
+        "job-1",
+        work_dir,
+        scripts_source_dir=tmp_path / "scripts",
+        fp_routed_dir=tmp_path / "routed",
+        homepage_cache_dir=tmp_path / "hp",
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=tmp_path / "sem",
+    )
+
+    assert full.strip() in art_path.read_text()
+    assert "Teaser body" not in art_path.read_text()
