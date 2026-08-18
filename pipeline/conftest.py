@@ -39,3 +39,30 @@ def _block_real_telegram_posts(request):
         ),
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _block_real_article_fetches(request):
+    """No test may fetch a real article over HTTP.
+
+    ``fp_collector`` fetches article bodies during collection. Its fetch helper
+    swallows every exception and returns "" (the degrade-to-excerpt path), so an
+    unpatched fetch in a test does not fail — it makes a real outbound request to
+    whatever hostname the fixture invented, and the test still passes green.
+    Severing the transport makes that impossible rather than merely discouraged.
+
+    Tests that exercise fetching patch ``pipeline.fp_collector._extract_article_text``,
+    which sits above this and takes precedence.
+    """
+    if request.node.get_closest_marker("allow_network"):
+        yield
+        return
+    with patch(
+        "pipeline.fp_collector.requests.get",
+        side_effect=AssertionError(
+            "A test made a real HTTP GET (outbound) through pipeline's requests "
+            "module. Patch the fetch helper your code path uses (e.g. "
+            "pipeline.fp_collector._extract_article_text)."
+        ),
+    ):
+        yield

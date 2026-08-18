@@ -689,3 +689,22 @@ def test_should_fetch_full_text_boundary_is_exclusive():
 
     assert _should_fetch_full_text("x" * 599, "https://a/") is True
     assert _should_fetch_full_text("x" * 600, "https://a/") is False
+
+
+def test_collector_cannot_reach_the_network_in_tests():
+    """conftest severs fp_collector's HTTP transport structurally.
+
+    Mirrors _block_real_telegram_posts: a test that grows a new outbound fetch
+    must fail loudly rather than silently hit a real host.
+    """
+    import pytest
+
+    # _extract_article_text swallows exceptions and returns "", which is the
+    # degrade-to-excerpt path; assert the transport itself is blocked.
+    from pipeline import fp_collector
+    from pipeline.fp_collector import _extract_article_text
+
+    with pytest.raises(AssertionError, match="real HTTP"):
+        fp_collector.requests.get("https://example.invalid/")
+
+    assert _extract_article_text("https://example.invalid/") == ""
