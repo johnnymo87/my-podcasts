@@ -55,6 +55,7 @@ Work in a fresh worktree (`.worktrees/<name>`), never in the shared checkout.
 | Bead | PR | What it bought |
 |---|---|---|
 | `ne0` | #15 | One `report_engine.py`; silver joins the transcript path |
+| `xlf` | #16 | Daily writers migrated; consolidation actually finished |
 
 PR #15 also backfilled the four historical Silver Bulletin transcripts as
 reports (30-75 min literal reads → 10-15 min briefings) and deleted the
@@ -155,7 +156,7 @@ Four lessons:
   test, because the narrowed glob already covered the tested case. The regex was still
   load-bearing for a different filename shape, which now has its own test.
 
-### 1. Writer robustness — `xlf` + `qd5` + `98p` (P2) — **promoted**
+### 1. Writer robustness — ~~`xlf`~~ DONE (PR #16) + `qd5` + `98p` (P2)
 
 **Promoted to the top after `ne0` fired in production on 2026-08-18**, shipping a
 2636-byte FP Digest episode (a normal one is ~3 MB). The model emitted a
@@ -169,24 +170,33 @@ unclosed-final-block recovery, case-insensitive tags, and a leaked-markup guard.
 `transcript_report.py` (chinatalk, yglesias, silver) and `report_writer.py`
 delegate to it. `ne0` is closed.
 
-**`xlf` is what remains, and it is the interesting half.** `rundown_writer.py`
-and `fp_writer.py` — the two *daily* writers, the highest-stakes ones — still
-carry their own `_extract_script`. PR #14 gave them the longest-block fix only;
-they still have no unclosed-tail recovery, case-sensitive tag matching, no leak
-guard, and a no-match fallback of `return text` that sends raw model output to
-TTS. That fallback output is long, so the 500-char floor does not catch it.
+**`xlf` closed the consolidation in PR #16**, and the "exactly one
+implementation" claim is now true and grep-verified rather than asserted.
+`report_engine` was split into `fetch_report_text` (session lifecycle) and
+`parse_report` (extraction + every refusal), with `run_report_prompt` as their
+composition; the daily writers compose the halves themselves so they can persist
+raw output between the two.
 
-Note `ne0` was closed with the claim "there is now exactly one implementation
-instead of four." **That was false** — adversarial review caught it, `ne0`
-carries a correction note, and `xlf` exists because of it. Do not treat the
-consolidation as finished until `xlf` lands.
+Two things that PR proved, both of which had been *stated wrongly* beforehand:
 
-The migration is **not** a straight swap. `rundown`/`fp` additionally need
-raw-output persistence to `work_dir/raw_writer_output.txt` (retries reuse the
-file and skip the model call), the `<covered>` block, and summary-remainder
-semantics. `report_engine.run_report_prompt` has none of those, so either it
-grows an extension point or the daily writers keep a thin wrapper around it.
-Decide that deliberately rather than by whichever is easier to type.
+- **Migration alone never fixed the no-tag fallback.** The engine's fallback was
+  always "return the text," merely tidier — measured 6522 chars in, 6521 out. Raw
+  model reasoning reached TTS on every path, and `min_chars` cannot catch it
+  because raw output is long. `require_tags` is what closed it, and that was new
+  work, not migration.
+- **`<covered>` was never in the leaked-markup guard.** Only the daily writers
+  emit that block, so the engine had never had to handle it.
+
+Adversarial review then found two live silent-publish paths in the fix itself,
+both fixed in the same PR: `require_tags` was defeated by a bare *mention* of the
+tag in the model's reasoning (3382 chars of reasoning published), and raw-output
+persistence was non-atomic, so a truncation mid-`<script>` re-parsed into a
+clean-looking **half script** that passed every refusal (3072 chars, mid-sentence).
+
+Remaining in this piece: `qd5`, plus the three beads that PR opened —
+`p4c` (mangled tag mid-tail narrates `</scrip>` and trailing chatter — degraded,
+not fabricated), `r8a` (`parse_covered` never got the longest-block and
+case-insensitive hardening its siblings have), and the still-open `9r5`.
 
 `qd5` is FP Digest hallucinating a "thin news day" briefing from an empty plan —
 same family ("the LLM did something we didn't expect and we published it
@@ -314,6 +324,19 @@ loss would cause an actively wrong decision.
   exception falls back to the standard reading" — that was never true of the
   code and must not be restored. The honest cost is `9r5`: the email path has no
   failure counter, so a deterministically-failing body redelivers forever.
+- **A guard must demand positive evidence, not a substring.** `require_tags`
+  first shipped as "does the reply contain `<script>`" and adversarial review
+  broke it the same hour: a reply that merely *mentions* the tag while reasoning
+  satisfies it, then falls into the unclosed-tail branch and publishes the
+  reasoning. The same shape recurs across this repo — the fuzzy article matcher
+  accepted "any word overlap above zero," and `extract_script` once accepted "any
+  trailing `<script>`." In each case the fix was to require evidence the thing
+  was *actually* what it claimed, and to treat ambiguity as a refusal.
+- **Files that a retry re-reads must be written atomically.** `os.replace`, not
+  `write_text`. A truncated `raw_writer_output.txt` re-parses into a clean-looking
+  half script that clears every refusal, whereas an empty one fails loudly and
+  self-heals. Deploying is a `systemctl restart` of the process doing the write,
+  so this is a routine trigger, not an exotic one.
 - **`min_chars` is per-caller and was mis-inherited once already.** 500 came
   from `rundown_writer`, whose failure path is *bounded* (backoff → errored →
   alert). The transcript path's is *unbounded* redelivery, and its prompts ask
