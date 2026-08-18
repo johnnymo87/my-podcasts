@@ -1,16 +1,9 @@
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
+from pipeline.report_engine import ReportOutput, run_report_prompt
 
-from pipeline.opencode_client import (
-    create_session,
-    delete_session,
-    get_last_assistant_text,
-    get_messages,
-    send_prompt_async,
-    wait_for_idle,
-)
+
+__all__ = ["ReportOutput", "build_report_prompt", "generate_report"]
 
 
 _INTERVIEW_TEMPLATE = """\
@@ -77,13 +70,6 @@ SOURCE TEXT:
 _TEMPLATES = {"interview": _INTERVIEW_TEMPLATE, "paper": _PAPER_TEMPLATE}
 
 
-@dataclass(frozen=True)
-class ReportOutput:
-    script: str
-    # Parsed for structural parity with chinatalk_writer; not stored/surfaced.
-    summary: str
-
-
 def build_report_prompt(
     *, body: str, subject: str, style: str = "interview", byline: str = ""
 ) -> str:
@@ -93,23 +79,6 @@ def build_report_prompt(
         raise ValueError(f"Unknown report style: {style!r}") from None
     byline_line = f"Authors/Participants: {byline}\n" if byline else ""
     return template.format(subject=subject, body=body, byline=byline_line)
-
-
-def _extract_script(text: str) -> str:
-    """Extract the spoken script from ``<script>...</script>`` tags.
-
-    If the tag is absent (model didn't follow the format), the full
-    response is returned as-is. The empty-script guard in
-    ``generate_report`` will reject the result if it is whitespace only.
-    """
-    m = re.search(r"<script>\s*(.*?)\s*</script>", text, re.DOTALL)
-    return m.group(1).strip() if m else text
-
-
-def _extract_summary(text: str) -> str:
-    """Extract the ``<summary>`` block, returning an empty string if absent."""
-    m = re.search(r"<summary>\s*(.*?)\s*</summary>", text, re.DOTALL)
-    return m.group(1).strip() if m else ""
 
 
 def generate_report(
@@ -123,18 +92,7 @@ def generate_report(
         "tags. Then write the full spoken script wrapped in "
         "<script>...</script> tags. Output nothing outside these tags.\n\n" + prompt
     )
-
-    session_id = create_session()
-    try:
-        send_prompt_async(session_id, instruction)
-        if not wait_for_idle(session_id, timeout=900):
-            raise RuntimeError("report writer did not complete within 900 seconds")
-        messages = get_messages(session_id)
-        full_text = get_last_assistant_text(messages).strip()
-        script = _extract_script(full_text)
-        summary = _extract_summary(full_text)
-        if not script.strip():
-            raise RuntimeError("report writer returned empty script")
-        return ReportOutput(script=script, summary=summary)
-    finally:
-        delete_session(session_id)
+    # "episode", not "report": the engine's messages read "{label} report
+    # writer ...", so label="report" produced "report report writer". This
+    # module backs the one-off `episode` command.
+    return run_report_prompt(instruction, label="episode")

@@ -12,13 +12,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from email_processor.api import EmailProcessor
-from pipeline.chinatalk_report import maybe_rewrite_chinatalk
 from pipeline.db import Episode, StateStore
 from pipeline.feed import regenerate_and_upload_feed
 from pipeline.presets import resolve_preset
 from pipeline.source_adapters import get_source_adapter
 from pipeline.things_happen_extractor import extract_things_happen
-from pipeline.yglesias_report import maybe_rewrite_yglesias
+from pipeline.transcript_report import maybe_rewrite_transcript
 
 
 if TYPE_CHECKING:
@@ -118,17 +117,10 @@ def process_email_bytes(
     )
     body = adapter.clean_body(raw_email=raw_email, body=body)
 
-    # Some Yglesias newsletters are the full transcript of his Argument
-    # podcast with Jerusalem Demsas. Rather than read 80 minutes of
-    # transcript aloud, rewrite it into a spoken briefing (a "Report:").
-    body, episode_title = maybe_rewrite_yglesias(
-        body=body,
-        title=episode_title,
-        feed_slug=preset.feed_slug,
-        subject_raw=subject_raw,
-    )
-
-    body, episode_title = maybe_rewrite_chinatalk(
+    # Some newsletters ship the verbatim transcript of a podcast conversation
+    # as the email body -- 60-80 minutes of TTS. For a confirmed transcript on
+    # a registered feed, rewrite it into a spoken briefing (a "Report:").
+    body, episode_title = maybe_rewrite_transcript(
         body=body,
         title=episode_title,
         feed_slug=preset.feed_slug,

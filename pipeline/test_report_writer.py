@@ -4,10 +4,9 @@ from unittest.mock import patch
 
 import pytest
 
+from pipeline.report_engine import extract_script, extract_summary
 from pipeline.report_writer import (
     ReportOutput,
-    _extract_script,
-    _extract_summary,
     build_report_prompt,
     generate_report,
 )
@@ -44,29 +43,29 @@ def test_unknown_style_raises():
 
 
 def test_extract_script_without_tags_returns_full_text():
-    assert _extract_script("no tags here") == "no tags here"
+    assert extract_script("no tags here") == "no tags here"
 
 
 def test_extract_script_with_tags_returns_inner_text():
-    result = _extract_script("<summary>s</summary><script>The briefing.</script>")
+    result = extract_script("<summary>s</summary><script>The briefing.</script>")
     assert result == "The briefing."
 
 
 def test_extract_summary_absent_returns_empty():
-    assert _extract_summary("<script>x</script>") == ""
+    assert extract_summary("<script>x</script>") == ""
 
 
 def test_extract_summary_with_tags_returns_inner_text():
-    result = _extract_summary("<summary>Two sentences.</summary><script>x</script>")
+    result = extract_summary("<summary>Two sentences.</summary><script>x</script>")
     assert result == "Two sentences."
 
 
-@patch("pipeline.report_writer.delete_session")
-@patch("pipeline.report_writer.get_last_assistant_text")
-@patch("pipeline.report_writer.get_messages")
-@patch("pipeline.report_writer.wait_for_idle")
-@patch("pipeline.report_writer.send_prompt_async")
-@patch("pipeline.report_writer.create_session")
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.get_last_assistant_text")
+@patch("pipeline.report_engine.get_messages")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
 def test_generate_report_extracts_and_passes_paper_style(
     mock_create, mock_send, mock_wait, mock_msgs, mock_text, mock_del
 ):
@@ -89,12 +88,12 @@ def test_generate_report_extracts_and_passes_paper_style(
     mock_del.assert_called_once()  # session cleaned up
 
 
-@patch("pipeline.report_writer.delete_session")
-@patch("pipeline.report_writer.get_last_assistant_text")
-@patch("pipeline.report_writer.get_messages")
-@patch("pipeline.report_writer.wait_for_idle")
-@patch("pipeline.report_writer.send_prompt_async")
-@patch("pipeline.report_writer.create_session")
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.get_last_assistant_text")
+@patch("pipeline.report_engine.get_messages")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
 def test_generate_report_rejects_empty_script(
     mock_create, mock_send, mock_wait, mock_msgs, mock_text, mock_del
 ):
@@ -107,10 +106,10 @@ def test_generate_report_rejects_empty_script(
     mock_del.assert_called_once()
 
 
-@patch("pipeline.report_writer.delete_session")
-@patch("pipeline.report_writer.wait_for_idle")
-@patch("pipeline.report_writer.send_prompt_async")
-@patch("pipeline.report_writer.create_session")
+@patch("pipeline.report_engine.delete_session")
+@patch("pipeline.report_engine.wait_for_idle")
+@patch("pipeline.report_engine.send_prompt_async")
+@patch("pipeline.report_engine.create_session")
 def test_generate_report_times_out_and_cleans_up(
     mock_create, mock_send, mock_wait, mock_del
 ):
