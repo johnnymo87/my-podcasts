@@ -56,6 +56,7 @@ Work in a fresh worktree (`.worktrees/<name>`), never in the shared checkout.
 |---|---|---|
 | `ne0` | #15 | One `report_engine.py`; silver joins the transcript path |
 | `xlf` | #16 | Daily writers migrated; consolidation actually finished |
+| `tgb` | #18 | FP RSS teasers (361 chars) → full articles; 5.4x measured |
 
 PR #15 also backfilled the four historical Silver Bulletin transcripts as
 reports (30-75 min literal reads → 10-15 min briefings) and deleted the
@@ -207,9 +208,80 @@ dry-run assembler) belongs here now: the Rundown fix in PR #11 is the template,
 and `qd5` is the FP twin of the zero-sections guard that PR added — do them in
 one pass over `fp_writer.py` rather than three.
 
-### 2. FP routing gets empty URLs — `5m3` (P3) — **premise corrected**
+### 2. The FP Digest spine — `4uz` → `98p`+`qd5` → `wfh`+`5m3`+`8m8`
 
-PR2 of the join work, deliberately split out: it changes **another podcast's input**.
+FP Digest has accumulated five open beads across three files. They are ordered
+here as one spine because **the order is the whole design** — get it wrong and
+the work still lands but proves nothing.
+
+Each piece runs the loop at the top of this file: compact → optional
+`oracle-fable` on a real design fork → measure → plan → **`adversarial-reviewer-fable`
+on the plan** → SDD → **`adversarial-reviewer-fable` on the diff** → PR → update
+this file and the beads. "If applicable" is a real qualifier for SDD and the PR
+(a one-commit doc change needs neither); it is **not** a qualifier for the two
+reviews or for measuring first.
+
+**FP-A. Ship the report — `4uz` (P2). Do this FIRST.**
+
+FP publishes daily and emits nothing; The Rundown posts a funnel to Telegram and
+appends to `run-stats.jsonl`. Two independently-safe commits: `RunStats.feed`
+(default `"the-rundown"`) with a feed-aware header, then the FP branch calling
+`_report_run_stats(..., feed="fp-digest")` at ~`consumer.py:757`.
+
+**Why first, and this is the load-bearing decision:** *instrument before you
+intervene.* Ship the report after FP-B/FP-C and the funnel's first FP rows
+describe an already-fixed pipeline — the pre-fix baseline is gone, and the
+before/after replay that made PR #11's recovered-story claim *provable* becomes
+impossible for FP. Adversarial review refused a proposal to bundle all of this
+into one pass for exactly this reason, after I had proposed it.
+
+It is not a consolation prize: **both** of FP's observed incidents are visible in
+`PLAN` + `OUT` alone — the 76-word writer refusal in `fp-digest-5d2519dc` (a dry
+run, not shipped) and the 3-byte `...` script of 2026-08-18.
+
+**FP-B. Writer robustness — `98p` + `qd5` (P2).** Already piece 1 above; it adds
+`writer_inputs.json` and therefore the report's `WRITE` line.
+
+**FP-C. One pass over `fp_collector.py` — `wfh` + `5m3` + `8m8` (P2/P3).** The
+joins, the routed-link URLs, and the collector's acquisition counters. Adds
+`miss_reason`/`shadow` (only if `wfh` takes the index route — the bead leaves
+filesystem-only open) and the `IN`/`DEDUP`/`FETCH`/`EXA` lines.
+
+**`8m8` exists because the tidy story was false.** "The funnel's missing inputs
+are exactly what `wfh` + `98p` produce" was checked itemwise and is half wrong:
+fetch tiers and the collection counters come from *neither* bead. FP's sentinel
+is only `{job_id, completed_at, lookback_days, directives}`, and FP's sources are
+homepage/rss/routed/semafor — so today's `collect_run_stats` renders `IN 0 =
+levine 0, semafor 0, zvi 0` against an FP work dir. **Omit those lines for `fp`
+rather than rendering zeros** until `8m8` lands; a permanent `FETCH levine 0` is
+the decorative-instrumentation trap this file already warns about twice.
+
+Four facts this spine dies without:
+
+- **`consumer.py` imports `run_stats` lazily per call** (`consumer.py:79,99,106`).
+  After a merge without a restart, *old in-memory consumer bytecode calls new
+  on-disk `run_stats`.* Every new parameter must default; never reorder
+  positionals; `RunStats.feed` needs a default so historical rows still parse.
+- **The `feed` field must land before or with the first FP append**, never after.
+  `run-stats.jsonl` had 2 lines and zero `feed` keys when measured, so "missing
+  ⇒ the-rundown" is safe *today* and gets costlier daily. FP rows do not touch
+  `3qs`'s clock, which is gated on Levine-present Tue–Fri **Rundown** rows.
+- **`/tmp` is reaped per file at 10 days, so old work dirs lie.** Measuring FP's
+  join over `/tmp/fp-digest-*` gave 11/67 misses (16%) — but 7 came from one dir
+  whose articles had been reaped while its `plan.json` survived. Filter by mtime
+  first: the real rate is **4/60, ~7%**, not the 18% two beads quote.
+- **Those 4 real misses are editor *reformulations*** — numeral vs spelled-out, a
+  theme name glued onto the headline, two sentence-style paraphrases. Exact+slug
+  recovers **none** of them. So `wfh`'s FP deliverable is telemetry and
+  refusal-on-ambiguity, **not** recovered stories; recovery is `mr1`'s
+  normalization question. Do not sell `wfh` as a recovery fix.
+
+`tgb` shipped ahead of this spine in PR #18 (RSS full-text fetch) and is closed.
+
+### 2a. FP routing gets empty URLs — `5m3` (P3) — **premise corrected**
+
+Part of FP-C above. PR2 of the join work, deliberately split out: it changes
+**another podcast's input**.
 
 The bead says exact-headline matching loses ~8% of links to a whitespace quirk.
 Measurement says otherwise: **all 12** routed links on disk have an empty `url`
@@ -230,14 +302,18 @@ an explicit decision to stay filesystem-only with anchored, uniqueness-checked g
 `5m3`, `wfh`, and `98p` all touch `fp_collector.py` — three separate passes over those
 files would be waste.
 
-**`my-podcasts-tgb` already took one pass over `fp_collector.py` without bundling
-`wfh`, and that was deliberate, not an oversight.** `tgb` (RSS full-text fetch for
-truncated antiwar.com teasers; implemented on `fp-rss-fulltext`, not yet merged or
-deployed — see AGENTS.md "FP Digest Pipeline") runs at collection time, before the
-editor call, so it touches no directive→article join at all. Bundling `wfh` into it
-would have added the riskier half of a P2 bug to an otherwise contained
-collection-phase change. The bundling argument above still holds for `5m3`/`wfh`/`98p`,
-which do share the join.
+**`my-podcasts-tgb` took one pass over `fp_collector.py` without bundling `wfh`,
+and that was deliberate.** `tgb` (RSS full-text fetch for truncated antiwar.com
+teasers, PR #18) runs at collection time, before the editor call, so it touches
+no directive→article join at all. Bundling `wfh` would have attached the riskier
+half of a P2 bug to an otherwise contained collection-phase change.
+
+**That precedent has since been misapplied once, in both directions — watch for
+it.** Attaching a *swallow-everything reporter* (`_report_run_stats` cannot fail
+a job by construction) to two *job-path* changes that burn retry budget is the
+same mistake inverted: it merges their blast radii and buys nothing. The test is
+not "same file," it is "same failure mode." `5m3`/`wfh`/`8m8` share both, which
+is why FP-C bundles them and FP-A stands alone.
 
 ### 3. Exa hardening batch — `avf` + `d8w` + `j7f` + `gz4` (P3)
 
@@ -405,6 +481,17 @@ Kept because each cost real time and each recurred.
   as `bool(text)` sat next to `chars = len(text)` and was therefore always
   consistent with it. Instrumentation must be derived from a different structure
   than the one it validates.
+- **Instrument before you intervene.** The reporting for a broken stage must ship
+  *before* the fix to that stage, or its first rows describe an already-fixed
+  pipeline and there is no baseline left to prove the fix by. I proposed the
+  opposite for FP — one tidy pass fixing the joins and lighting up the funnel
+  together — and adversarial review killed it on this ground alone. The tell that
+  it was rationalization: it also happened to be the more interesting work.
+- **A bead is a claim to verify, not a citation.** `tgb`'s own headline numbers
+  ("630-char teasers", "7x") were the whole file including its metadata header;
+  the body measured 361 chars and the real gain 5.4x. `wfh`'s "18% unresolved"
+  was 7% once reaped work dirs were filtered out. Both were written by the same
+  hand that later trusted them.
 - **Measure the remediation, not just the fix.** "Keep the newest row" was
   inherited guidance from a prior cleanup. Re-checking all 16 keys against the
   live R2 objects confirmed it — but the prior measurement had a known 1-in-147
