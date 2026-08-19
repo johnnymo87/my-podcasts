@@ -53,12 +53,36 @@ _WRITE_TIERS = (
 _TOP_DOMAINS = 8
 _MAX_REPORT_CHARS = 4000
 
+# Display names and rendered stage sets, keyed by feed. FP Digest's collector
+# writes none of the acquisition artifacts (no per-source candidate counts, no
+# tiers.json, no exa_outcomes, no writer_inputs.json), so those stages are
+# OMITTED for fp-digest rather than rendered as zeros: a permanent
+# "FETCH levine 0" would assert FP has a Levine source it has never had, and
+# decorative zeros are how a 93% stub rate went unnoticed for months. When
+# my-podcasts-8m8 lands and the FP collector writes those artifacts, add the
+# stage names here -- that is the whole change.
+_FEED_NAMES = {"the-rundown": "The Rundown", "fp-digest": "FP Digest"}
+_FEED_STAGES = {
+    "the-rundown": frozenset(
+        {"in", "route", "dedup", "fetch", "plan", "exa", "write", "out", "paywalled"}
+    ),
+    "fp-digest": frozenset({"plan", "out"}),
+}
+_DEFAULT_STAGES = _FEED_STAGES["the-rundown"]
+
 
 class RunStats(BaseModel):
     """Funnel counts for one Rundown run, derived from its work dir."""
 
     job_id: str
     date_str: str
+    # Which podcast this run belongs to. Defaults to "the-rundown" because
+    # every run-stats.jsonl row written before this field existed was a
+    # Rundown row -- a missing key therefore reads correctly as history
+    # rather than as "unknown". That reading is only safe while FP has
+    # never appended, which is why this field ships in the same PR as (and
+    # no later than) FP's first append. See my-podcasts-4uz.
+    feed: str = "the-rundown"
     reused_collection: bool = False
 
     # From collection_done.json. lookback_days is reported as written by the
@@ -215,6 +239,7 @@ def collect_run_stats(
     job_id: str,
     date_str: str,
     reused_collection: bool = False,
+    feed: str = "the-rundown",
 ) -> RunStats:
     """Reconstruct funnel counts from ``work_dir``. Never raises.
 
@@ -224,7 +249,10 @@ def collect_run_stats(
     degrades to a default instead of propagating.
     """
     stats = RunStats(
-        job_id=job_id, date_str=date_str, reused_collection=reused_collection
+        job_id=job_id,
+        date_str=date_str,
+        reused_collection=reused_collection,
+        feed=feed,
     )
 
     if not work_dir.is_dir():
@@ -448,8 +476,10 @@ def render_report(stats: RunStats) -> str:
     """
     lines: list[str] = []
 
+    stages = _FEED_STAGES.get(stats.feed, _DEFAULT_STAGES)
+    feed_name = _FEED_NAMES.get(stats.feed, stats.feed)
     date_token = f" {stats.date_str}" if stats.date_str else ""
-    header = f"The Rundown{date_token} (job {stats.job_id}) - script stage"
+    header = f"{feed_name}{date_token} (job {stats.job_id}) - script stage"
     duration = _fmt_duration(stats.collect_duration_seconds)
     tail_bits = []
     if duration:
@@ -463,80 +493,100 @@ def render_report(stats: RunStats) -> str:
     lines.append(header)
     lines.append("")
 
-    in_total = sum(stats.candidates.values())
-    in_parts = ", ".join(f"{k} {v}" for k, v in stats.candidates.items())
-    lines.append(f"IN     {in_total} = {in_parts}")
+    if "in" in stages:
+        in_total = sum(stats.candidates.values())
+        in_parts = ", ".join(f"{k} {v}" for k, v in stats.candidates.items())
+        lines.append(f"IN     {in_total} = {in_parts}")
 
-    route_total = sum(stats.routed_away.values())
-    if route_total:
-        route_breakdown = ", ".join(
-            f"{k} {v}" for k, v in stats.routed_away.items() if v
+    if "route" in stages:
+        route_total = sum(stats.routed_away.values())
+        if route_total:
+            route_breakdown = ", ".join(
+                f"{k} {v}" for k, v in stats.routed_away.items() if v
+            )
+            lines.append(f"ROUTE  -{route_total} ({route_breakdown}, fp/skip)")
+
+    if "dedup" in stages:
+        dedup_total = sum(stats.deduped.values())
+        dedup_breakdown = ", ".join(f"{k} {v}" for k, v in stats.deduped.items() if v)
+        dedup_sign = "-" if dedup_total else ""
+        dedup_line = f"DEDUP  {dedup_sign}{dedup_total}"
+        if dedup_breakdown:
+            dedup_line += f" ({dedup_breakdown})"
+        lines.append(dedup_line)
+
+    if "fetch" in stages:
+        fetch_count = stats.levine_articles
+        if fetch_count is None:
+            fetch_count = sum(stats.fetch_tiers.values())
+        fetch_breakdown = ", ".join(
+            f"{k} {v}" for k, v in stats.fetch_tiers.items() if v
         )
-        lines.append(f"ROUTE  -{route_total} ({route_breakdown}, fp/skip)")
+        fetch_line = f"FETCH  levine {fetch_count}"
+        if fetch_breakdown:
+            fetch_line += f": {fetch_breakdown}"
+        lines.append(fetch_line)
 
-    dedup_total = sum(stats.deduped.values())
-    dedup_breakdown = ", ".join(f"{k} {v}" for k, v in stats.deduped.items() if v)
-    dedup_sign = "-" if dedup_total else ""
-    dedup_line = f"DEDUP  {dedup_sign}{dedup_total}"
-    if dedup_breakdown:
-        dedup_line += f" ({dedup_breakdown})"
-    lines.append(dedup_line)
+    if "plan" in stages:
+        if stats.feed == "fp-digest":
+            lines.append(f"PLAN   {stats.directives_total} directives")
+        else:
+            lines.append(
+                f"PLAN   {stats.directives_total} directives = "
+                f"{stats.directives_episode} episode, "
+                f"{stats.directives_fp_routed} fp-routed"
+            )
 
-    fetch_count = stats.levine_articles
-    if fetch_count is None:
-        fetch_count = sum(stats.fetch_tiers.values())
-    fetch_breakdown = ", ".join(f"{k} {v}" for k, v in stats.fetch_tiers.items() if v)
-    fetch_line = f"FETCH  levine {fetch_count}"
-    if fetch_breakdown:
-        fetch_line += f": {fetch_breakdown}"
-    lines.append(fetch_line)
+    if "exa" in stages:
+        exa_breakdown = ", ".join(
+            f"{v} {k}" for k, v in stats.exa_outcomes.items() if v
+        )
+        exa_line = f"EXA    {stats.exa_flagged} flagged"
+        if exa_breakdown:
+            exa_line += f" -> {exa_breakdown}"
+        lines.append(exa_line)
 
-    lines.append(
-        f"PLAN   {stats.directives_total} directives = "
-        f"{stats.directives_episode} episode, {stats.directives_fp_routed} fp-routed"
-    )
+    if "write" in stages:
+        write_breakdown = ", ".join(
+            f"{v} {k}" for k, v in stats.writer_buckets.items() if v
+        )
+        write_line = (
+            f"WRITE  {stats.writer_selected} selected -> "
+            f"{stats.writer_with_text} with text"
+        )
+        if write_breakdown:
+            write_line += f" ({write_breakdown})"
+        write_line += f", {stats.writer_dropped} dropped"
+        if stats.writer_exa_appended:
+            write_line += f", {stats.writer_exa_appended} +open-access"
+        # Regression canary, not a routine statistic -- see RunStats
+        # docstring. Only ever surfaced when non-zero, so a healthy run's
+        # report carries no noise and this cannot cry wolf on the common
+        # case.
+        if stats.writer_dropped_before_prompt:
+            write_line += (
+                f", {stats.writer_dropped_before_prompt} DROPPED-AFTER-RESOLVE(!)"
+            )
+        miss_breakdown = ", ".join(
+            f"{k} {v}" for k, v in stats.writer_miss_reasons.items() if v
+        )
+        if miss_breakdown:
+            write_line += f" [misses: {miss_breakdown}"
+            if stats.writer_miss_shadow_hits:
+                write_line += f" ({stats.writer_miss_shadow_hits} w/ shadow)"
+            write_line += "]"
+        lines.append(write_line)
 
-    exa_breakdown = ", ".join(f"{v} {k}" for k, v in stats.exa_outcomes.items() if v)
-    exa_line = f"EXA    {stats.exa_flagged} flagged"
-    if exa_breakdown:
-        exa_line += f" -> {exa_breakdown}"
-    lines.append(exa_line)
+    if "out" in stages:
+        out_parts = []
+        if stats.script_words is not None:
+            out_parts.append(f"{stats.script_words} words")
+        out_parts.append(f"{stats.themes_count} themes")
+        if stats.covered_headlines is not None:
+            out_parts.append(f"{stats.covered_headlines} headlines covered")
+        lines.append(f"OUT    {', '.join(out_parts)}")
 
-    write_breakdown = ", ".join(
-        f"{v} {k}" for k, v in stats.writer_buckets.items() if v
-    )
-    write_line = (
-        f"WRITE  {stats.writer_selected} selected -> {stats.writer_with_text} with text"
-    )
-    if write_breakdown:
-        write_line += f" ({write_breakdown})"
-    write_line += f", {stats.writer_dropped} dropped"
-    if stats.writer_exa_appended:
-        write_line += f", {stats.writer_exa_appended} +open-access"
-    # Regression canary, not a routine statistic -- see RunStats docstring.
-    # Only ever surfaced when non-zero, so a healthy run's report carries no
-    # noise and this cannot cry wolf on the common case.
-    if stats.writer_dropped_before_prompt:
-        write_line += f", {stats.writer_dropped_before_prompt} DROPPED-AFTER-RESOLVE(!)"
-    miss_breakdown = ", ".join(
-        f"{k} {v}" for k, v in stats.writer_miss_reasons.items() if v
-    )
-    if miss_breakdown:
-        write_line += f" [misses: {miss_breakdown}"
-        if stats.writer_miss_shadow_hits:
-            write_line += f" ({stats.writer_miss_shadow_hits} w/ shadow)"
-        write_line += "]"
-    lines.append(write_line)
-
-    out_parts = []
-    if stats.script_words is not None:
-        out_parts.append(f"{stats.script_words} words")
-    out_parts.append(f"{stats.themes_count} themes")
-    if stats.covered_headlines is not None:
-        out_parts.append(f"{stats.covered_headlines} headlines covered")
-    lines.append(f"OUT    {', '.join(out_parts)}")
-
-    if stats.paywalled_domains:
+    if "paywalled" in stages and stats.paywalled_domains:
         lines.append("")
         histogram = ", ".join(
             f"{domain} {count}" for domain, count in stats.paywalled_domains

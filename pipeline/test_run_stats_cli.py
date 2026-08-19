@@ -64,3 +64,34 @@ def test_run_stats_send_failure_reported(tmp_path: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert "send failed" in result.output
+
+
+def test_run_stats_infers_fp_digest_feed_from_work_dir_name(tmp_path: Path) -> None:
+    """A fp-digest-* work dir must render as FP Digest, not a mislabeled
+    Rundown report -- with --send this would otherwise post a mislabeled
+    report to Telegram."""
+    work_dir = tmp_path / "fp-digest-abc123"
+    work_dir.mkdir()
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["run-stats", "--work-dir", str(work_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "FP Digest" in result.output
+    assert "abc123" in result.output
+    assert "The Rundown" not in result.output
+
+
+def test_run_stats_still_infers_the_rundown_feed_from_work_dir_name(
+    tmp_path: Path,
+) -> None:
+    """Existing the-rundown-* work dirs must keep rendering as The Rundown."""
+    work_dir = tmp_path / "the-rundown-job-999"
+    work_dir.mkdir()
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["run-stats", "--work-dir", str(work_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "The Rundown" in result.output
+    assert "job-999" in result.output

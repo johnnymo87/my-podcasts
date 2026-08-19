@@ -54,7 +54,11 @@ def _compute_lookback(
 
 
 def _report_run_stats(
-    work_dir: Path, job_id: str, date_str: str, reused_collection: bool = False
+    work_dir: Path,
+    job_id: str,
+    date_str: str,
+    reused_collection: bool = False,
+    feed: str = "the-rundown",
 ) -> None:
     """Emit the content-acquisition funnel for a finished script stage.
 
@@ -83,6 +87,7 @@ def _report_run_stats(
             job_id=job_id,
             date_str=date_str,
             reused_collection=reused_collection,
+            feed=feed,
         )
     except Exception as exc:
         print(f"[consumer] run stats collection failed: {exc}")
@@ -671,7 +676,10 @@ def consume_forever(
                         collection_sentinel = work_dir / "collection_done.json"
                         plan_path = work_dir / "plan.json"
 
-                        if collection_sentinel.exists() and plan_path.exists():
+                        reused_collection = (
+                            collection_sentinel.exists() and plan_path.exists()
+                        )
+                        if reused_collection:
                             print(
                                 f"Reusing prior collection for FP digest: "
                                 f"{job['id']} ({job['date_str']})"
@@ -755,6 +763,13 @@ def consume_forever(
                                 _json.dumps(writer_output.covered_headlines),
                                 encoding="utf-8",
                             )
+                        _report_run_stats(
+                            work_dir,
+                            job_id=job["id"],
+                            date_str=job["date_str"],
+                            reused_collection=reused_collection,
+                            feed="fp-digest",
+                        )
                         # Next loop will pick up the script and run TTS
                 except Exception as exc:
                     retry = store.mark_fp_digest_failed(job["id"], str(exc))

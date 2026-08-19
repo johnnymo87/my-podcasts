@@ -535,6 +535,212 @@ def test_consume_forever_passes_reused_collection_false_on_fresh_collection(
     store.close()
 
 
+# ---------------------------------------------------------------------------
+# Task 2 (fp-funnel plan): FP branch emits the funnel report
+# ---------------------------------------------------------------------------
+
+
+def test_fp_digest_emits_run_stats_with_its_own_feed(monkeypatch, tmp_path) -> None:
+    """FP's funnel row must be attributable, or run-stats.jsonl silently
+    mixes two podcasts under one default feed name."""
+    from pipeline.db import StateStore
+    from pipeline.rundown_writer import WriterOutput
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+    job_id = store.insert_pending_fp_digest("2026-03-17")
+    assert job_id is not None
+
+    call_count = 0
+
+    def fake_pull(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return []
+        raise _Done("done")
+
+    mock_consumer = MagicMock()
+    mock_consumer.pull.side_effect = fake_pull
+    monkeypatch.setattr(time, "sleep", lambda n: None)
+    monkeypatch.setattr("pipeline.consumer._work_dir_base", lambda: tmp_path)
+
+    # Prior collection already on disk so the writer runs immediately.
+    work_dir = tmp_path / f"fp-digest-{job_id}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "plan.json").write_text('{"themes": ["A"], "directives": []}')
+    (work_dir / "collection_done.json").write_text("{}")
+
+    report_calls: list[dict] = []
+    monkeypatch.setattr(
+        "pipeline.consumer._report_run_stats",
+        lambda *a, **kw: report_calls.append(kw),
+    )
+
+    writer_output = WriterOutput(
+        script="a script", summary="a summary", covered_headlines=["Headline 1"]
+    )
+
+    with (
+        patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
+        patch(
+            "pipeline.consumer.generate_fp_script",
+            return_value=writer_output,
+        ),
+    ):
+        try:
+            consume_forever(store, r2_client, poll_interval=5)
+        except _Done:
+            pass
+
+    assert len(report_calls) == 1
+    assert report_calls[0]["feed"] == "fp-digest"
+    store.close()
+
+
+def test_fp_digest_reports_even_when_the_writer_covered_nothing(
+    monkeypatch, tmp_path
+) -> None:
+    """Write this NOW, not conditionally.
+
+    5 of the 13 real FP work dirs are writer refusals with no covered.json --
+    the single highest-value class for this report. If the report call is
+    ever placed inside `if writer_output.covered_headlines:`, the funnel
+    vanishes on exactly the runs an operator needs it for, and every
+    healthy-path test still passes.
+    """
+    from pipeline.db import StateStore
+    from pipeline.rundown_writer import WriterOutput
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+    job_id = store.insert_pending_fp_digest("2026-03-17")
+    assert job_id is not None
+
+    call_count = 0
+
+    def fake_pull(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return []
+        raise _Done("done")
+
+    mock_consumer = MagicMock()
+    mock_consumer.pull.side_effect = fake_pull
+    monkeypatch.setattr(time, "sleep", lambda n: None)
+    monkeypatch.setattr("pipeline.consumer._work_dir_base", lambda: tmp_path)
+
+    work_dir = tmp_path / f"fp-digest-{job_id}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "plan.json").write_text('{"themes": ["A"], "directives": []}')
+    (work_dir / "collection_done.json").write_text("{}")
+
+    report_calls: list[dict] = []
+    monkeypatch.setattr(
+        "pipeline.consumer._report_run_stats",
+        lambda *a, **kw: report_calls.append(kw),
+    )
+
+    # The writer refused: no covered headlines, no covered.json.
+    writer_output = WriterOutput(script="a script", summary="a summary")
+
+    with (
+        patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
+        patch(
+            "pipeline.consumer.generate_fp_script",
+            return_value=writer_output,
+        ),
+    ):
+        try:
+            consume_forever(store, r2_client, poll_interval=5)
+        except _Done:
+            pass
+
+    assert not (work_dir / "covered.json").exists()
+    assert len(report_calls) == 1
+    assert report_calls[0]["feed"] == "fp-digest"
+    store.close()
+
+
+def test_fp_digest_run_stats_failure_leaves_job_retryable_and_script_intact(
+    monkeypatch, tmp_path
+) -> None:
+    """Pin what a raising reporter actually costs -- which is NOT nothing.
+
+    Renamed after adversarial review: the earlier name
+    ("..._cannot_fail_the_job") asserted the opposite of the test body, which
+    checks failure_count == 1. A reporter that raises DOES fail the attempt
+    and burn one retry, because the call site is unwrapped (mirroring the
+    Rundown's at consumer.py:597) and the arguments are evaluated in the
+    caller. Production is safe not because the call site is guarded but
+    because _report_run_stats swallows everything internally -- so a future
+    reader must not conclude from this test that reporter exceptions are free.
+
+    What is genuinely guaranteed: script.txt is written before the reporter is
+    ever called, so the writer's work survives and the job stays retryable
+    rather than being permanently errored.
+    """
+    from pipeline.db import StateStore
+    from pipeline.rundown_writer import WriterOutput
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+    job_id = store.insert_pending_fp_digest("2026-03-17")
+    assert job_id is not None
+
+    call_count = 0
+
+    def fake_pull(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return []
+        raise _Done("done")
+
+    mock_consumer = MagicMock()
+    mock_consumer.pull.side_effect = fake_pull
+    monkeypatch.setattr(time, "sleep", lambda n: None)
+    monkeypatch.setattr("pipeline.consumer._work_dir_base", lambda: tmp_path)
+
+    work_dir = tmp_path / f"fp-digest-{job_id}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "plan.json").write_text('{"themes": ["A"], "directives": []}')
+    (work_dir / "collection_done.json").write_text("{}")
+
+    monkeypatch.setattr(
+        "pipeline.consumer._report_run_stats",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    writer_output = WriterOutput(script="a script", summary="a summary")
+
+    with (
+        patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer),
+        patch(
+            "pipeline.consumer.generate_fp_script",
+            return_value=writer_output,
+        ),
+    ):
+        try:
+            consume_forever(store, r2_client, poll_interval=5)
+        except _Done:
+            pass
+
+    script_file = work_dir / "script.txt"
+    assert script_file.exists()
+    assert script_file.read_text(encoding="utf-8") == "a script"
+
+    row = store._conn.execute(
+        "SELECT status, failure_count, last_error FROM pending_fp_digest WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    assert row["status"] == "pending"
+    assert row["failure_count"] == 1
+    assert "boom" in row["last_error"]
+    store.close()
+
+
 def test_compute_lookback_none_returns_default():
     store = MagicMock()
     store.days_since_last_episode.return_value = None

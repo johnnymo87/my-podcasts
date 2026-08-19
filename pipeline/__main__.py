@@ -1118,8 +1118,12 @@ def run_stats_command(work_dir: Path, send: bool) -> None:
     from pipeline.alerts import send_alert
     from pipeline.run_stats import collect_run_stats, render_report
 
-    job_id = work_dir.name.replace("the-rundown-", "")
-    stats = collect_run_stats(work_dir, job_id=job_id, date_str="")
+    name = work_dir.name
+    if name.startswith("fp-digest-"):
+        feed, job_id = "fp-digest", name[len("fp-digest-") :]
+    else:
+        feed, job_id = "the-rundown", name.replace("the-rundown-", "")
+    stats = collect_run_stats(work_dir, job_id=job_id, date_str="", feed=feed)
     report = render_report(stats)
     click.echo(report)
     if send:
