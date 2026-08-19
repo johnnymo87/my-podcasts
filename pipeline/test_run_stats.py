@@ -32,6 +32,12 @@ def _populated_work_dir(tmp_path):
             "enriched": 9,
             "candidates": {"levine": 21, "semafor": 19, "zvi": 7},
             "deduped": {"levine": 6, "semafor": 0, "zvi": 0},
+            # Non-zero so the golden report below actually exercises the ROUTE
+            # line. Adversarial review found ROUTE had no coverage anywhere in
+            # the suite, which meant its sign, its breakdown and its "fp/skip"
+            # suffix could regress silently -- and making render_report
+            # feed-aware re-indented exactly that block.
+            "routed_away": {"levine": 0, "semafor": 3, "zvi": 0},
             "exa_outcomes": {
                 "slug-hit-0": "hit",
                 "slug-hit-1": "hit",
@@ -1059,6 +1065,7 @@ def test_render_report_golden_full_string_for_the_rundown(tmp_path):
         "collect 4m12s, lookback 3d\n"
         "\n"
         "IN     47 = levine 21, semafor 19, zvi 7\n"
+        "ROUTE  -3 (semafor 3, fp/skip)\n"
         "DEDUP  -6 (levine 6)\n"
         "FETCH  levine 15: live 6, paywalled 8, http_error 1\n"
         "PLAN   14 directives = 9 episode, 5 fp-routed\n"

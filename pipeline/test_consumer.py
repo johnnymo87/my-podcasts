@@ -663,13 +663,23 @@ def test_fp_digest_reports_even_when_the_writer_covered_nothing(
     store.close()
 
 
-def test_fp_digest_run_stats_failure_cannot_fail_the_job(monkeypatch, tmp_path) -> None:
-    """_report_run_stats is total by design; prove it for the FP path too.
+def test_fp_digest_run_stats_failure_leaves_job_retryable_and_script_intact(
+    monkeypatch, tmp_path
+) -> None:
+    """Pin what a raising reporter actually costs -- which is NOT nothing.
 
-    script.txt is written before _report_run_stats is ever called, so even
-    if reporting itself blows up, the writer's work is not lost: the job
-    is left retryable (not permanently errored) rather than the whole
-    attempt vanishing.
+    Renamed after adversarial review: the earlier name
+    ("..._cannot_fail_the_job") asserted the opposite of the test body, which
+    checks failure_count == 1. A reporter that raises DOES fail the attempt
+    and burn one retry, because the call site is unwrapped (mirroring the
+    Rundown's at consumer.py:597) and the arguments are evaluated in the
+    caller. Production is safe not because the call site is guarded but
+    because _report_run_stats swallows everything internally -- so a future
+    reader must not conclude from this test that reporter exceptions are free.
+
+    What is genuinely guaranteed: script.txt is written before the reporter is
+    ever called, so the writer's work survives and the job stays retryable
+    rather than being permanently errored.
     """
     from pipeline.db import StateStore
     from pipeline.rundown_writer import WriterOutput
