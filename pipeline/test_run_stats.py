@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import json
 
-from pipeline.run_stats import append_jsonl, collect_run_stats, render_report
+from pipeline.run_stats import (
+    RunStats,
+    append_jsonl,
+    collect_run_stats,
+    render_report,
+)
 
 
 def _write_json(path, data):
@@ -935,5 +940,135 @@ def test_missing_shadow_key_on_a_miss_is_not_counted_as_a_hit(tmp_path):
     )
 
     stats = collect_run_stats(work_dir, job_id="j", date_str="2026-08-15")
+
+    assert stats.writer_miss_shadow_hits == 0
+
+
+def _rundown_stats():
+    return RunStats(job_id="j", date_str="2026-08-19")
+
+
+def test_run_stats_feed_defaults_to_the_rundown():
+    """Historical jsonl rows carry no `feed` key and must still parse."""
+    stats = RunStats(job_id="j", date_str="2026-08-19")
+    assert stats.feed == "the-rundown"
+    revived = RunStats.model_validate_json('{"job_id":"j","date_str":"2026-08-19"}')
+    assert revived.feed == "the-rundown"
+
+
+def test_render_report_is_unchanged_for_the_rundown():
+    """Commit 1 must be a strict no-op for the feed already in production."""
+    stats = _rundown_stats()
+    report = render_report(stats)
+    assert report.startswith("The Rundown 2026-08-19 (job j) - script stage")
+    for stage in ("IN ", "DEDUP ", "FETCH ", "PLAN ", "EXA ", "WRITE ", "OUT "):
+        assert stage in report
+
+
+def test_fp_report_header_names_the_feed():
+    stats = RunStats(job_id="j", date_str="2026-08-19", feed="fp-digest")
+    report = render_report(stats)
+    assert report.startswith("FP Digest 2026-08-19 (job j) - script stage")
+
+
+def test_fp_report_omits_stages_with_no_data_source():
+    """Not zeros: FP writes no candidates/tiers/exa/writer_inputs at all.
+
+    Rendering `IN 0 = levine 0, semafor 0, zvi 0` on an FP dir would assert
+    FP has Levine and Zvi sources, which it does not. See my-podcasts-8m8.
+    """
+    stats = RunStats(job_id="j", date_str="2026-08-19", feed="fp-digest")
+    report = render_report(stats)
+    for absent in ("IN ", "ROUTE ", "DEDUP ", "FETCH ", "EXA ", "WRITE ", "paywalled"):
+        assert absent not in report
+    assert "levine" not in report
+    assert "zvi" not in report
+
+
+def test_fp_plan_line_drops_the_degenerate_routing_split():
+    """directives_fp_routed is 0 on all 13 real FP work dirs -- FP *is* the fp feed."""
+    stats = RunStats(
+        job_id="j",
+        date_str="2026-08-19",
+        feed="fp-digest",
+        directives_total=6,
+        directives_episode=6,
+        directives_fp_routed=0,
+    )
+    line = [x for x in render_report(stats).splitlines() if x.startswith("PLAN")][0]
+    assert line == "PLAN   6 directives"
+
+
+def test_fp_report_keeps_out_line_that_catches_the_real_incidents():
+    """The 2026-08-18 placeholder published as `1 words`; 5d2519dc refused at 76."""
+    stats = RunStats(
+        job_id="j",
+        date_str="2026-08-19",
+        feed="fp-digest",
+        directives_total=6,
+        script_words=1,
+        themes_count=5,
+        covered_headlines=4,
+    )
+    report = render_report(stats)
+    assert "OUT    1 words, 5 themes, 4 headlines covered" in report
+    assert "PLAN   6 directives" in report
+
+
+def test_unknown_feed_falls_back_to_the_full_rundown_shaped_report():
+    """A typo'd feed must not silently render an empty report."""
+    stats = RunStats(job_id="j", date_str="2026-08-19", feed="wat")
+    report = render_report(stats)
+    assert "PLAN " in report and "OUT " in report
+
+
+def test_collect_run_stats_forwards_feed_onto_run_stats(tmp_path):
+    """collect_run_stats must thread its `feed` argument onto the RunStats it
+    builds, not just accept and drop it -- the FP call site depends on this."""
+    work_dir = tmp_path / "fp-digest-abc123"
+    work_dir.mkdir()
+
+    stats = collect_run_stats(
+        work_dir, job_id="abc123", date_str="2026-08-19", feed="fp-digest"
+    )
+
+    assert stats.feed == "fp-digest"
+
+
+def test_collect_run_stats_feed_defaults_to_the_rundown(tmp_path):
+    work_dir = tmp_path / "the-rundown-abc123"
+    work_dir.mkdir()
+
+    stats = collect_run_stats(work_dir, job_id="abc123", date_str="2026-08-19")
+
+    assert stats.feed == "the-rundown"
+
+
+def test_render_report_golden_full_string_for_the_rundown(tmp_path):
+    """Byte-for-byte regression: The Rundown's report is in daily production
+    use, and hand-wrapping every render block in `if "<stage>" in stages:`
+    is exactly where an indent or spacing slip would sneak in unnoticed by
+    the substring assertions above."""
+    work_dir = _populated_work_dir(tmp_path)
+    stats = collect_run_stats(work_dir, job_id="job-full", date_str="2026-08-15")
+
+    report = render_report(stats)
+
+    assert report == (
+        "The Rundown 2026-08-15 (job job-full) - script stage - "
+        "collect 4m12s, lookback 3d\n"
+        "\n"
+        "IN     47 = levine 21, semafor 19, zvi 7\n"
+        "DEDUP  -6 (levine 6)\n"
+        "FETCH  levine 15: live 6, paywalled 8, http_error 1\n"
+        "PLAN   14 directives = 9 episode, 5 fp-routed\n"
+        "EXA    7 flagged -> 3 hit, 3 empty, 1 error\n"
+        "WRITE  9 selected -> 8 with text (3 live, 2 paywalled, 2 cache, "
+        "1 exa), 1 dropped\n"
+        "OUT    25 words, 4 themes, 6 headlines covered\n"
+        "\n"
+        "paywalled: bloomberg.com 3, ft.com 2, economist.com 1, "
+        "nytimes.com 1, wsj.com 1"
+    )
 
     assert stats.writer_miss_shadow_hits == 0
