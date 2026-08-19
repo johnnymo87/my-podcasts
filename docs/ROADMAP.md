@@ -221,7 +221,7 @@ this file and the beads. "If applicable" is a real qualifier for SDD and the PR
 (a one-commit doc change needs neither); it is **not** a qualifier for the two
 reviews or for measuring first.
 
-**FP-A. Ship the report — `4uz` (P2). Do this FIRST.**
+**FP-A. Ship the report — ~~`4uz`~~ DONE (PR #20).**
 
 FP publishes daily and emits nothing; The Rundown posts a funnel to Telegram and
 appends to `run-stats.jsonl`. Two independently-safe commits: `RunStats.feed`
@@ -239,6 +239,26 @@ It is not a consolation prize: **both** of FP's observed incidents are visible i
 `PLAN` + `OUT` alone — the 76-word writer refusal in `fp-digest-5d2519dc` (a dry
 run, not shipped) and the 3-byte `...` script of 2026-08-18.
 
+**Shipped, and the thin report turned out to separate *three* failure classes,
+not two.** Rendered against every real FP work dir on disk:
+
+```
+PLAN   6 directives / OUT 2511 words   <- healthy
+PLAN   0 directives / OUT   76 words   <- collector produced nothing
+PLAN   7 directives / OUT   76 words   <- collector fine, assembly lost EVERY story
+PLAN   6 directives / OUT    1 words   <- the 2026-08-18 placeholder that published
+```
+
+Rows 2 and 3 look identical at the `OUT` stage and have completely different
+causes; `PLAN` alone tells them apart. Row 3 (`fp-digest-5d2519dc`) is standing
+evidence for `98p`/`wfh` — the plan held 7 directives and the writer was handed
+nothing. Healthy runs sit at 1602-2528 words, so the separation from the 60-111
+word refusals is 14x and needs no tuning.
+
+Measured while building it, and worth keeping: `directives_fp_routed == 0` and
+`directives_episode == directives_total` on **all 13** real FP work dirs, so the
+episode/fp-routed split is degenerate for FP and its `PLAN` line drops it.
+
 **FP-B. Writer robustness — `98p` + `qd5` (P2).** Already piece 1 above; it adds
 `writer_inputs.json` and therefore the report's `WRITE` line.
 
@@ -255,6 +275,18 @@ homepage/rss/routed/semafor — so today's `collect_run_stats` renders `IN 0 =
 levine 0, semafor 0, zvi 0` against an FP work dir. **Omit those lines for `fp`
 rather than rendering zeros** until `8m8` lands; a permanent `FETCH levine 0` is
 the decorative-instrumentation trap this file already warns about twice.
+
+PR #20 implemented that omission as a per-feed stage allowlist, `_FEED_STAGES` in
+`run_stats.py`. **When `8m8` lands, adding the stage names there is the whole
+render change.** Two things its author should know, both found by review:
+
+- **The jsonl rows still carry the zeros the report omits.** `collect_run_stats`
+  gives an FP dir `candidates={levine 0, semafor 0, zvi 0}` and empty tiers, so
+  the durable record asserts FP has a Levine source — the same falsehood, moved
+  to disk. Harmless only while readers filter on `feed`; `3qs` must.
+- **FP does run Exa** (`fp_collector.py:530-543` writes `enrichment/exa/*.md`).
+  What it doesn't write is *outcomes* in the sentinel, so today's Exa activity —
+  including its silent `no_key` and error paths — is entirely unmeasured.
 
 Four facts this spine dies without:
 
