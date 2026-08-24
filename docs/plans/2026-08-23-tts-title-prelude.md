@@ -139,6 +139,13 @@ def test_dedupe_ignores_case_and_punctuation() -> None:
     assert prepend_title("2026-08-17 - Money Stuff - Goat Hedge", body) == body
 
 
+def test_dedupe_requires_whole_token_match() -> None:
+    """"Better than gold" is not stated by "Better than golden retrievers"."""
+    body = "Better than golden retrievers, honestly.\n\nText.\n"
+    result = prepend_title("Better than gold", body)
+    assert result.startswith("Better than gold.\n\n")
+
+
 def test_dedupe_only_looks_at_the_opening() -> None:
     """A title mentioned deep in the body is not an opening statement."""
     body = "Unrelated lede.\n\n" + ("filler. " * 60) + "Goat Hedge\n"
@@ -180,6 +187,9 @@ Expected: `ImportError: cannot import name 'prepend_title'`
 Append to `pipeline/title_prelude.py`:
 
 ```python
+# Drops non-ASCII alphanumerics, unlike the article-file ``slugify`` family
+# documented in AGENTS.md. A title with no ASCII alphanumerics at all
+# normalizes to empty and the prelude is skipped -- a safe degradation.
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 # How much of the body counts as "the opening" for dedupe purposes.
@@ -191,10 +201,17 @@ def _normalize(text: str) -> str:
 
 
 def _already_states(spoken: str, body: str) -> bool:
-    normalized_title = _normalize(spoken)
-    if not normalized_title:
+    """Does ``body`` open by stating ``spoken``?
+
+    Compares token lists rather than using ``startswith``, which matches a
+    partial final token: the real title "Better than gold" would otherwise be
+    suppressed by a body opening "Better than golden retrievers...".
+    """
+    title_tokens = _normalize(spoken).split()
+    if not title_tokens:
         return True
-    return _normalize(body[:_OPENING_CHARS]).startswith(normalized_title)
+    body_tokens = _normalize(body[:_OPENING_CHARS]).split()
+    return body_tokens[: len(title_tokens)] == title_tokens
 
 
 def prepend_title(episode_title: str, body: str) -> str:
@@ -236,15 +253,30 @@ Covers levine, silver, chinatalk, yglesias, general.
 
 **Step 1: Write the failing test**
 
-Read `pipeline/test_processor_titles.py` first and match its existing fixture
-style for invoking `process_email_bytes` with `ttsjoin` and R2 stubbed out. Add:
+**Budget real time for this step — the harness does not exist.** No test in the
+suite drives `process_email_bytes`. `pipeline/test_processor_titles.py` is 33
+lines of pure `format_title` unit tests, and `pipeline/test_transcript_wiring.py`
+only asserts against `inspect.getsource`. You are building the first integration
+harness for this function, which means stubbing all of:
+
+- raw multipart email bytes that `EmailProcessor(raw_email).parse()` accepts
+- `StateStore` and the `R2Client`
+- `subprocess.run` for both `ttsjoin` and `ffprobe` — this is where you capture
+  the input file, by reading `input_txt` inside the fake before it is deleted
+  with the tempdir
+- the feed regeneration call
+- `maybe_rewrite_transcript`, or a body that does not trip the detector
+
+Resist the temptation to write another `inspect.getsource` test. A source-string
+assertion would pass whether or not the prelude reaches the audio, which is the
+only thing that matters here.
 
 ```python
 def test_tts_input_opens_with_episode_title(...):
     """The audio states the title; the DB row and artifacts are unaffected."""
-    # Drive process_email_bytes with a Levine-shaped body whose headline is
-    # absent from the text, capturing the file handed to ttsjoin.
+    # Body is Levine-shaped: opens with boilerplate, headline absent.
     assert captured_tts_input.startswith("Money Stuff: ")
+    assert episode_row.title == "2026-08-17 - Money Stuff - Goat Hedge"
 ```
 
 **Step 2: Run to verify it fails**
@@ -294,14 +326,22 @@ Covers `episode` (substack, arxiv, papers) and `publish-script`.
 **Files:**
 - Modify: `pipeline/script_processor.py` (import; new line after `:173`)
 - Modify: `pipeline/__main__.py:850` (dry-run TTS reimplementation)
-- Test: `pipeline/test_script_processor.py` (create if absent)
+- Test: `pipeline/test_script_processor.py` — **exists, 486 lines. Append, do not
+  create.** Its existing `test_publish_script_tts_receives_stripped_text`
+  (`:301-348`) has been audited against this change and still passes; do not
+  rewrite it.
 
-**Step 1: Write the failing test**
+**Step 1: Write the failing tests**
 
 ```python
 def test_publish_script_tts_input_opens_with_title(...):
     # Capture the file handed to ttsjoin; assert it opens with the title and
     # that the script file on disk is untouched.
+
+
+def test_publish_script_skips_prelude_for_daily_digests(...):
+    # feed_slug="the-rundown", title="2026-08-21 - The Rundown"
+    # TTS input must equal the stripped script, unprefixed.
 ```
 
 **Step 2: Run to verify it fails**
@@ -315,13 +355,22 @@ In `pipeline/script_processor.py`, import `prepend_title` and insert directly
 after `tts_text = strip_markdown_for_tts(raw_script)` (`:173`):
 
 ```python
-    tts_text = prepend_title(title, tts_text)
+    # The daily digests' writer prompts already produce a self-announcing
+    # opening, so a prelude would double it. Their automated processors bypass
+    # publish_script entirely -- this guard is for the documented
+    # consumer-down recovery, which publishes those scripts through here.
+    if feed_slug not in {"the-rundown", "fp-digest"}:
+        tts_text = prepend_title(title, tts_text)
 ```
 
-Apply the identical line in the `publish-script --dry-run` branch of
-`pipeline/__main__.py` (after its own `strip_markdown_for_tts` call, `:850`).
-That branch is a second implementation of the same TTS step; leaving it behind
-is how `my-podcasts-78b` happened.
+Prepend **after** the markdown strip, not before: the strip's `*`-regexes then
+never see the title, and dedupe compares against the same text TTS will read.
+
+Apply the identical guarded block in the `publish-script --dry-run` branch of
+`pipeline/__main__.py` (after its own `strip_markdown_for_tts` call, `:850`;
+`title` and `feed_slug` are both in scope there, `title` at `:829`). That branch
+is a second implementation of the same TTS step; leaving it behind is how
+`my-podcasts-78b` happened.
 
 **Step 4: Run to verify it passes**
 
@@ -343,7 +392,8 @@ Covers aaronson.
 
 **Files:**
 - Modify: `pipeline/blog_poller.py` (import; new line before `:151`)
-- Test: `pipeline/test_blog_poller.py` (create if absent)
+- Test: `pipeline/test_blog_poller.py` — **exists, 235 lines. Append, do not
+  create.** Its assertions are on DB rows, not TTS input; none break.
 
 **Step 1: Write the failing test**
 
@@ -403,17 +453,30 @@ title to the TTS input only, that The Rundown and FP Digest are deliberately
 excluded, and that the blog path passes `post.title` rather than
 `episode_title`. Point at the design doc.
 
-**Step 3: Commit and deploy**
+**Step 3: File the follow-up bead**
+
+```bash
+bd create "Strip Levine 'View in browser' boilerplate from TTS body" \
+  -d "The title prelude makes the existing Bloomberg boilerplate more audible. Strip it in LevineAdapter.clean_body (pipeline/source_adapters.py). See docs/plans/2026-08-23-tts-title-prelude-design.md."
+```
+
+**Step 4: Commit and deploy**
 
 ```bash
 git add AGENTS.md
 git commit -m "docs: record the spoken title prelude in AGENTS.md"
-git pull --rebase && git push
+git pull --rebase
+bd dolt push
+git push
 sudo systemctl restart my-podcasts-consumer
 sudo systemctl status my-podcasts-consumer --no-pager
 ```
 
-**Step 4: Verify on real audio**
+The restart is what deploys the **email and blog** paths, which run inside the
+consumer. The `episode` / `publish-script` CLI paths need no restart — they run
+in your shell from the working tree.
+
+**Step 5: Verify on real audio**
 
 The next Levine or ChinaTalk episode should open with its title. Confirm by
 listening, not by reading logs — the whole point is audible.
@@ -422,5 +485,6 @@ listening, not by reading logs — the whole point is audible.
 
 ## Explicitly out of scope
 
-- The Rundown and FP Digest (`things_happen_processor.py`, `fp_processor.py`). Their prompts already write a self-announcing opening.
-- Stripping Levine's `View in browser / Subscribe to Bloomberg.com` boilerplate. File a bead; the prelude ships fine without it.
+- The Rundown and FP Digest (`things_happen_processor.py`, `fp_processor.py`). Their prompts already write a self-announcing opening. Task 4's `feed_slug` guard extends that exclusion to manual publishes of those feeds.
+- Stripping Levine's `View in browser / Subscribe to Bloomberg.com` boilerplate — Task 6 Step 3 files it as a bead. The prelude ships fine without it.
+- The mild self-statement redundancy in one-off report mode (see the design doc's "Accepted redundancy" note). Accepted, not fixed.

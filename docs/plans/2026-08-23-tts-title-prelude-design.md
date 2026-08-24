@@ -44,6 +44,24 @@ briefing."` and the string "Foreign Policy Digest" never appears — so a
 containment-based dedupe cannot suppress the redundancy there either. Prepending
 would yield 10 doubled openings a week for no gain. Left alone deliberately.
 
+**The exclusion needs a code guard, because the automated path is not the only
+one.** `things_happen_processor` and `fp_processor` never call `publish_script`,
+so wiring `publish_script` does not touch normal daily runs. But the documented
+consumer-down recovery — `--dry-run`, then `publish-script`, then `jobs complete`
+— publishes those exact scripts *through* `publish_script`. An operator passing
+`--title "2026-08-21 - The Rundown"` would get precisely the doubled opening this
+section excludes, on the path taken during an incident, when nobody is listening
+for it. So `publish_script` skips the prelude when `feed_slug` is `the-rundown`
+or `fp-digest`.
+
+**Accepted redundancy: one-off report mode.** Report-mode scripts often name
+their own subject early. A real archived papers script opens "Today I want to
+walk you through... It's called 'Capital as Artificial Intelligence'..." — so the
+audio becomes "Report: Capital as Artificial Intelligence. Today I want to walk
+you through...". That second mention is conversational rather than a repeated
+header, and these episodes are operator-reviewed before publishing. Accepted
+knowingly, not overlooked.
+
 ## Design
 
 New leaf module `pipeline/title_prelude.py`, importing only `re` (same
@@ -66,10 +84,10 @@ prepend_title(episode_title, body) -> str
 
 _already_states(spoken, body)
   norm = casefold, non-alphanumeric -> single space, strip
-  return norm(body[:300]).startswith(norm(spoken))
+  compare TOKEN LISTS: norm(body[:300]).split()[:n] == norm(spoken).split()
 ```
 
-Transformations, verified against the 400 most recent real episode titles:
+Transformations, verified against all 790 real episode titles in the DB:
 
 | Input | Output |
 |---|---|
@@ -89,11 +107,29 @@ but TTS prosody on `?.` is a gamble.
 space; blank lines are not chunk boundaries and `\n\n` is inert. Without terminal
 punctuation the title merges into the body's first sentence.
 
-**Dedupe direction.** Prefix match, not containment. It is a cheap guard for a
-body that genuinely opens with its own headline (the `general` feed's
-`_clean_html` output sometimes does). It will not fire on Levine, because the
-headline is absent from the body entirely — which is correct, the prelude is
-exactly what Levine is missing.
+**Dedupe direction.** Prefix match on the opening, not containment anywhere in
+the body. Containment was considered and rejected during review: it is what
+would be needed to suppress the self-announcing daily digests, and it does not
+even work for them (see Scope), while being loose enough to drop a legitimate
+title.
+
+**The prefix must be token-aligned.** A raw `startswith` on normalized text
+matches a partial final token: the real Aaronson title `Better than gold` is
+suppressed by a body opening "Better than golden retrievers...", dropping a
+title the body never stated. Compare token lists instead.
+
+Be honest about what dedupe is worth here: it currently has **no known
+beneficiary**. It will not fire on Levine, because the headline is absent from
+the body entirely — which is correct, the prelude is exactly what Levine is
+missing. The `general` feed, the other candidate, has zero episodes ever. It is
+kept as a cheap guard against a future body that opens by stating its own
+headline, not because a measured case demands it.
+
+**A fully non-ASCII title disables the prelude.** `_normalize` keeps only
+`[a-z0-9]`, so a Chinese-only ChinaTalk title normalizes to empty and is skipped.
+That is a safe degradation, but note it makes a *third* normalization family
+alongside the two `slugify` families `AGENTS.md` documents — and unlike the
+article family, this one deliberately drops non-ASCII alphanumerics.
 
 ## Call sites
 
@@ -103,7 +139,7 @@ Prelude enters the **TTS input only**. Archived and published script artifacts
 | File | Change |
 |---|---|
 | `pipeline/processor.py:133` | `body = prepend_title(episode_title, body)` before the write at `:134`. Sits after `maybe_rewrite_transcript` (`:123`), so it uses the final `Report: ` title. Covers levine, silver, chinatalk, yglesias, general. |
-| `pipeline/script_processor.py:174` | apply to `tts_text` after `strip_markdown_for_tts` (`:173`), before the write at `:192`. Covers one-off `episode` and `publish-script`. |
+| `pipeline/script_processor.py:174` | apply to `tts_text` after `strip_markdown_for_tts` (`:173`), before the write at `:192`, **guarded by `feed_slug not in {"the-rundown", "fp-digest"}`**. Covers one-off `episode` and `publish-script`. |
 | `pipeline/__main__.py:850` | same change in the `publish-script --dry-run` TTS reimplementation, so dry-run audio matches published audio. |
 | `pipeline/blog_poller.py:150` | apply to `adapted_text` before the write at `:151`, passing **`post.title`**, not `episode_title`. |
 
