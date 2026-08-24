@@ -194,7 +194,7 @@ def test_process_blog_post_skips_already_processed(tmp_path, monkeypatch) -> Non
 
 
 def test_blog_tts_input_opens_with_post_title_not_the_dated_title(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, captured_tts_input: list[str]
 ) -> None:
     """The audio states the bare post title, not the "Aug 22 - ..." dated
     episode title -- ``spoken_title`` only strips ISO dates, so routing the
@@ -220,31 +220,17 @@ def test_blog_tts_input_opens_with_post_title_not_the_dated_title(
     mock_response.text = "Body content about watermarking."
     mock_gemini_client.models.generate_content.return_value = mock_response
 
-    captured: list[str] = []
-
-    def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            input_file = Path(cmd[cmd.index("--input-file") + 1])
-            captured.append(input_file.read_text(encoding="utf-8"))
-            output_idx = cmd.index("--output-file") + 1
-            Path(cmd[output_idx]).write_bytes(b"\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
-        elif cmd[0] == "ffprobe":
-            return subprocess.CompletedProcess(cmd, 0, stdout="10.0", stderr="")
-        return subprocess.CompletedProcess(cmd, 0)
-
     with (
         patch("pipeline.blog_poller.genai") as mock_genai,
-        patch("subprocess.run", side_effect=fake_subprocess_run),
         patch("pipeline.feed.regenerate_and_upload_feed"),
     ):
         mock_genai.Client.return_value = mock_gemini_client
         process_blog_post(post, source, store, r2_client)
 
-    assert len(captured) == 1
-    captured_tts_input = captured[0]
-    assert captured_tts_input.startswith("Anthropic's LLM watermarking.")
-    assert "Aug 22" not in captured_tts_input.split("\n", 1)[0]
+    assert len(captured_tts_input) == 1
+    tts_input = captured_tts_input[0]
+    assert tts_input.startswith("Anthropic's LLM watermarking.")
+    assert "Aug 22" not in tts_input.split("\n", 1)[0]
 
     # DB row still carries the full dated title -- only the TTS input changed.
     episodes = store.list_episodes(feed_slug="aaronson")

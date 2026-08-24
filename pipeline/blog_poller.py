@@ -149,8 +149,10 @@ def process_blog_post(
         tmp = Path(tmp_dir)
         input_txt = tmp / f"{episode_slug}.txt"
         output_mp3 = tmp / f"{episode_slug}.mp3"
-        # post.title, not episode_title: the latter is "Aug 22 - <title>",
-        # whose date shape the ISO strip does not match.
+        # post.title, not episode_title: the date prefix on episode_title
+        # ("Aug 22 - <title>") is RSS-ordering bookkeeping, never spoken
+        # content. (Today it also happens to not match spoken_title's ISO
+        # date strip, but that's incidental -- don't rely on it.)
         adapted_text = prepend_title(post.title, adapted_text)
         input_txt.write_text(adapted_text, encoding="utf-8")
 

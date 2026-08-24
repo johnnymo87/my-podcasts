@@ -7,15 +7,15 @@ regen) and asserts on the captured TTS input text, not on source strings.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
-
-import pytest
 
 from email_processor.api import EmailProcessor
 from pipeline.db import StateStore
 from pipeline.processor import process_email_bytes
+
+
+# ``captured_tts_input`` is a shared fixture defined in conftest.py.
 
 
 # Levine-shaped body: opens with boilerplate, never states the headline.
@@ -37,40 +37,14 @@ MIME-Version: 1.0
 """
 
 
-@pytest.fixture
-def captured_tts_input(monkeypatch) -> list[str]:
-    """Stub ttsjoin/ffprobe; return the list ttsjoin's captured input lands in.
-
-    Reads ``--input-file`` before the caller's tempdir is torn down, and
-    looks up flags by name (``cmd.index("--input-file") + 1``) rather than
-    position, so a future reordering of ``process_email_bytes``'s ttsjoin
-    invocation doesn't silently break the capture.
-    """
-    captured: list[str] = []
-
-    def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            input_file = Path(cmd[cmd.index("--input-file") + 1])
-            captured.append(input_file.read_text(encoding="utf-8"))
-            output_file = Path(cmd[cmd.index("--output-file") + 1])
-            output_file.write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
-        if cmd[0] == "ffprobe":
-            return subprocess.CompletedProcess(cmd, 0, stdout="60.0\n")
-        return subprocess.CompletedProcess(cmd, 0)
-
-    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+def test_tts_input_opens_with_episode_title(
+    tmp_path: Path, captured_tts_input: list[str], monkeypatch
+) -> None:
+    """The audio states the title; the DB row and artifacts are unaffected."""
     monkeypatch.setattr(
         "pipeline.processor.regenerate_and_upload_feed",
         lambda store, r2_client: None,
     )
-    return captured
-
-
-def test_tts_input_opens_with_episode_title(
-    tmp_path: Path, captured_tts_input: list[str]
-) -> None:
-    """The audio states the title; the DB row and artifacts are unaffected."""
     store = StateStore(tmp_path / "test.sqlite3")
     r2_client = MagicMock()
 
@@ -106,9 +80,13 @@ def test_tts_input_opens_with_episode_title(
 
 
 def test_tts_input_unchanged_when_body_already_states_title(
-    tmp_path: Path, captured_tts_input: list[str]
+    tmp_path: Path, captured_tts_input: list[str], monkeypatch
 ) -> None:
     """No double-statement when the body already opens with the title."""
+    monkeypatch.setattr(
+        "pipeline.processor.regenerate_and_upload_feed",
+        lambda store, r2_client: None,
+    )
     store = StateStore(tmp_path / "test.sqlite3")
     r2_client = MagicMock()
 

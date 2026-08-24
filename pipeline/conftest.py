@@ -2,9 +2,44 @@
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+
+@pytest.fixture
+def captured_tts_input(monkeypatch) -> list[str]:
+    """Stub ``ttsjoin``/``ffprobe``; return the list ttsjoin's input lands in.
+
+    Shared by every test that asserts on the exact text handed to TTS (the
+    title-prelude tests in ``test_processor_prelude.py`` and
+    ``test_blog_poller.py``). Reads ``--input-file`` before the caller's
+    tempdir is torn down, and looks up flags by name
+    (``cmd.index("--input-file") + 1``) rather than position, so a future
+    reordering of a caller's ttsjoin invocation doesn't silently break the
+    capture.
+
+    Deliberately does *not* patch feed regeneration or R2 upload -- callers
+    differ on which module they import ``regenerate_and_upload_feed`` into
+    and whether they need it patched at all, so that stays call-site-local.
+    """
+    captured: list[str] = []
+
+    def fake_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "ttsjoin":
+            input_file = Path(cmd[cmd.index("--input-file") + 1])
+            captured.append(input_file.read_text(encoding="utf-8"))
+            output_file = Path(cmd[cmd.index("--output-file") + 1])
+            output_file.write_bytes(b"\xff\xfb\x90\x00" * 100)
+            return subprocess.CompletedProcess(cmd, 0)
+        if cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(cmd, 0, stdout="60.0\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    return captured
 
 
 @pytest.fixture(autouse=True)
