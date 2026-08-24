@@ -17,6 +17,7 @@ from pipeline.feed import regenerate_and_upload_feed
 from pipeline.presets import resolve_preset
 from pipeline.source_adapters import get_source_adapter
 from pipeline.things_happen_extractor import extract_things_happen
+from pipeline.title_prelude import prepend_title
 from pipeline.transcript_report import maybe_rewrite_transcript
 
 
@@ -131,6 +132,9 @@ def process_email_bytes(
         tmp = Path(tmp_dir)
         input_txt = tmp / f"{episode_slug}.txt"
         output_mp3 = tmp / f"{episode_slug}.mp3"
+        # TTS input only -- never the archived body, so a retry cannot
+        # prepend twice.
+        body = prepend_title(episode_title, body)
         input_txt.write_text(body, encoding="utf-8")
 
         cmd = [
