@@ -844,10 +844,17 @@ def publish_script_command(
         import subprocess
         import tempfile
 
-        from pipeline.script_processor import TTS_MODEL, strip_markdown_for_tts
+        from pipeline.script_processor import (
+            TTS_MODEL,
+            apply_title_prelude,
+            strip_markdown_for_tts,
+        )
 
         raw = script_file.read_text(encoding="utf-8")
         tts_text = strip_markdown_for_tts(raw)
+        tts_text = apply_title_prelude(
+            feed_slug=feed_slug, title=title, tts_text=tts_text
+        )
 
         with tempfile.TemporaryDirectory(prefix="publish-script-dry-") as tmp_dir:
             tmp = Path(tmp_dir)

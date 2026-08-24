@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 from xml.etree import ElementTree as ET
 
+import pytest
+
 from pipeline.db import Episode, StateStore
 from pipeline.feed import generate_feed_xml
 from pipeline.script_processor import (
@@ -482,5 +484,109 @@ def test_publish_script_sets_source_url(tmp_path, monkeypatch) -> None:
     episodes = store.list_episodes(feed_slug="dwarkesh")
     assert len(episodes) == 1
     assert episodes[0].source_url == "https://www.dwarkesh.com/p/david-reich-2"
+
+    store.close()
+
+
+def test_publish_script_tts_input_opens_with_title(tmp_path, monkeypatch) -> None:
+    """TTS hears the spoken title first; the archived script is untouched."""
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+    archive_root = tmp_path / "persisted-scripts"
+
+    script_file = tmp_path / "script.md"
+    script_file.write_text(
+        "This is the episode body, unrelated to the title.",
+        encoding="utf-8",
+    )
+
+    tts_input_text = []
+
+    def fake_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "ttsjoin":
+            input_file = cmd[cmd.index("--input-file") + 1]
+            tts_input_text.append(Path(input_file).read_text(encoding="utf-8"))
+            output_file = cmd[cmd.index("--output-file") + 1]
+            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
+            return subprocess.CompletedProcess(cmd, 0)
+        if cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(cmd, 0, stdout="30.0\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(
+        "pipeline.script_processor.regenerate_and_upload_feed",
+        lambda s, r: None,
+    )
+    monkeypatch.setattr("pipeline.script_processor.SCRIPT_ARCHIVE_ROOT", archive_root)
+
+    publish_script(
+        script_file=script_file,
+        title="Great Interview",
+        feed_slug="deep-dives",
+        store=store,
+        r2_client=r2_client,
+        date_str="2026-03-13",
+    )
+
+    assert len(tts_input_text) == 1
+    assert tts_input_text[0] == (
+        "Great Interview.\n\nThis is the episode body, unrelated to the title."
+    )
+
+    # The archived artifact is the raw script text, never the TTS input.
+    archived = (
+        archive_root / "deep-dives" / "2026-03-13-great-interview.md"
+    ).read_text(encoding="utf-8")
+    assert archived == "This is the episode body, unrelated to the title."
+
+    store.close()
+
+
+@pytest.mark.parametrize("feed_slug", ["the-rundown", "fp-digest"])
+def test_publish_script_skips_prelude_for_daily_digests(
+    feed_slug, tmp_path, monkeypatch
+) -> None:
+    """The daily digests already self-announce; no prelude is added."""
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+
+    script_file = tmp_path / "script.md"
+    body = "Good morning. It is Friday, and this is your daily briefing."
+    script_file.write_text(body, encoding="utf-8")
+
+    tts_input_text = []
+
+    def fake_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "ttsjoin":
+            input_file = cmd[cmd.index("--input-file") + 1]
+            tts_input_text.append(Path(input_file).read_text(encoding="utf-8"))
+            output_file = cmd[cmd.index("--output-file") + 1]
+            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
+            return subprocess.CompletedProcess(cmd, 0)
+        if cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(cmd, 0, stdout="30.0\n")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    monkeypatch.setattr(
+        "pipeline.script_processor.regenerate_and_upload_feed",
+        lambda s, r: None,
+    )
+    monkeypatch.setattr(
+        "pipeline.script_processor.SCRIPT_ARCHIVE_ROOT", tmp_path / "persisted-scripts"
+    )
+
+    publish_script(
+        script_file=script_file,
+        title="2026-08-21 - The Rundown",
+        feed_slug=feed_slug,
+        store=store,
+        r2_client=r2_client,
+        date_str="2026-08-21",
+    )
+
+    assert len(tts_input_text) == 1
+    assert tts_input_text[0] == body
 
     store.close()

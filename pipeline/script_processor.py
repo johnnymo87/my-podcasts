@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import markdown as md_lib
 
 from pipeline.feed import regenerate_and_upload_feed
+from pipeline.title_prelude import prepend_title
 
 
 if TYPE_CHECKING:
@@ -85,6 +86,24 @@ TTS_MODEL = "tts-1-hd"
 DEFAULT_VOICE = "nova"
 DEFAULT_CATEGORY = "Technology"
 SCRIPT_ARCHIVE_ROOT = Path("/persist/my-podcasts/scripts")
+
+# The daily digests' writer prompts already produce a self-announcing
+# opening, so a prelude would double it. Their automated processors bypass
+# publish_script entirely -- this guard is for the documented
+# consumer-down recovery, which publishes those scripts through here.
+_NO_PRELUDE_FEEDS = frozenset({"the-rundown", "fp-digest"})
+
+
+def apply_title_prelude(*, feed_slug: str, title: str, tts_text: str) -> str:
+    """Prepend the spoken title to ``tts_text``, unless ``feed_slug`` is a
+    daily digest.
+
+    Shared by ``publish_script`` and the ``publish-script --dry-run`` CLI
+    branch so the two publish paths cannot drift.
+    """
+    if feed_slug in _NO_PRELUDE_FEEDS:
+        return tts_text
+    return prepend_title(title, tts_text)
 
 
 def _archive_publish_inputs(
@@ -171,6 +190,7 @@ def publish_script(
     # Read and prepare script text for TTS
     raw_script = script_file.read_text(encoding="utf-8")
     tts_text = strip_markdown_for_tts(raw_script)
+    tts_text = apply_title_prelude(feed_slug=feed_slug, title=title, tts_text=tts_text)
 
     # Process show notes if provided
     summary: str | None = None
