@@ -507,6 +507,12 @@ documented consumer-down recovery does — hence `_NO_PRELUDE_FEEDS` in
 `script_processor.py`, which sources its slugs from each processor's `FEED_SLUG`
 rather than re-literaling them.
 
+That guard covers the `publish_script` paths only, not the email path, which
+calls `prepend_title` directly. `presets.py` does make both slugs email-routable
+by route tag, so an email routed to one of them would get a prelude. Nothing
+sends such email today, and it is arguably the right behavior anyway — an
+arbitrary email body is not a self-announcing writer script.
+
 **Dedupe compares token lists, not `startswith`.** A raw prefix match on
 normalized text matches a partial final token: the real title `Better than gold`
 would be suppressed by a body opening "Better than golden retrievers...".
