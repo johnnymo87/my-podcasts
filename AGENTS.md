@@ -469,6 +469,53 @@ Turn any supported source URL (Substack post, arXiv paper, ...) into a one-off e
 - `pipeline/report_writer.py` — style-keyed report writer (interview + paper, with byline)
 - Read mode reuses `pipeline/blog_poller.py:adapt_for_audio` (Gemini); publishes via `pipeline/script_processor.py:publish_script` (extended with `source_url`)
 
+## Spoken Title Prelude
+
+Per-article episodes open their audio by speaking the episode title. Before this
+existed, no feed did — the TTS input was the body or the generated script and
+nothing else, and `episode_title` only ever reached the DB row. Matt Levine's
+feed looked like an exception; it is not. Verified against three archived
+emails, the cleaned Levine body opens with `Money Stuff\n\nView in browser
+Subscribe to Bloomberg.com...` and the actual headline **appears nowhere in the
+body**.
+
+**Key module:** `pipeline/title_prelude.py` — a leaf (imports only `re`, nothing
+from `pipeline`, like `article_resolver.py`). `spoken_title` strips the **first**
+ISO date (`2026-08-17 - Money Stuff - Foo` -> `Money Stuff: Foo`; only the first,
+so a second date-shaped substring is treated as real title content) and turns
+remaining ` - ` into `: `. `prepend_title` adds `"<title>.\n\n"`, skipping when
+the title is empty or the body already opens by stating it.
+
+**Call sites — TTS input only.** The prelude never enters an archived or
+published script artifact, which is exactly what makes it idempotent: every path
+rebuilds its TTS input in a tempdir from an in-memory string, and retries
+re-parse the raw email or reread `script.txt`, neither of which carries a
+prelude.
+
+| Path | Detail |
+|---|---|
+| `pipeline/processor.py` | email feeds. Sits after `maybe_rewrite_transcript`, so a transcript report speaks its final `Report: ` title |
+| `pipeline/script_processor.py` | `publish_script`, via `apply_title_prelude`, **after** `strip_markdown_for_tts` |
+| `pipeline/__main__.py` | the `publish-script --dry-run` TTS reimplementation, via the same helper so the two cannot drift |
+| `pipeline/blog_poller.py` | passes **`post.title`**, not `episode_title` — the latter is `"Aug 22 - <title>"`, a bookkeeping prefix that must never be spoken |
+
+**The Rundown and FP Digest are excluded, and the exclusion is enforced in
+code.** Their writer prompts already produce a self-announcing opening ("Good
+morning. It is Wednesday... your daily foreign policy briefing"), so a prelude
+would double it. Their own processors never call `publish_script`, but the
+documented consumer-down recovery does — hence `_NO_PRELUDE_FEEDS` in
+`script_processor.py`, which sources its slugs from each processor's `FEED_SLUG`
+rather than re-literaling them.
+
+**Dedupe compares token lists, not `startswith`.** A raw prefix match on
+normalized text matches a partial final token: the real title `Better than gold`
+would be suppressed by a body opening "Better than golden retrievers...".
+Note the guard has no known beneficiary today — it will not fire on Levine
+(headline absent from the body) and the `general` feed has zero episodes. It is
+cheap insurance, not a measured need.
+
+**Design doc:** `docs/plans/2026-08-23-tts-title-prelude-design.md`.
+
 ## Transcript Report Path
 
 Several newsletters occasionally ship the verbatim transcript of a podcast conversation as the email body — 60-80 minutes of narration nobody asked for. For a *confirmed* transcript, the pipeline replaces the TTS body with an AI-written spoken briefing about the conversation and prefixes the episode title with "Report: ". Essays are read normally.
