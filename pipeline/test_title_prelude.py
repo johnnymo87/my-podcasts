@@ -54,7 +54,7 @@ def test_dedupe_ignores_case_and_punctuation() -> None:
 
 
 def test_dedupe_requires_whole_token_match() -> None:
-    """"Better than gold" is not stated by "Better than golden retrievers"."""
+    """ "Better than gold" is not stated by "Better than golden retrievers"."""
     body = "Better than golden retrievers, honestly.\n\nText.\n"
     result = prepend_title("Better than gold", body)
     assert result.startswith("Better than gold.\n\n")
@@ -89,3 +89,22 @@ def test_empty_title_returns_body_unchanged() -> None:
 def test_punctuation_only_title_returns_body_unchanged() -> None:
     """Normalizes to empty, so the guard must not emit a bare '.' prelude."""
     assert prepend_title("---", "Body text.\n") == "Body text.\n"
+
+
+def test_date_strip_is_unanchored_and_can_eat_a_content_date() -> None:
+    """_ISO_DATE_PREFIX strips every date-shaped substring, not just the
+    leading one. A title whose actual content mentions a second date (e.g.
+    "1999-12-31 - Y2K Retrospective") silently loses that date too -- this
+    pins the current behavior, not an endorsement of it (see report)."""
+    raw = "2026-08-17 - 1999-12-31 - Y2K Retrospective"
+    assert spoken_title(raw) == "Y2K Retrospective"
+
+
+def test_normalize_drops_accented_characters_rather_than_transliterating() -> None:
+    """Unlike article_resolver.slugify (which keeps non-ASCII alphanumerics,
+    see AGENTS.md), _normalize's [^a-z0-9]+ strips accents outright instead
+    of folding them to ASCII. "Café" normalizes to "caf", not "cafe", so it
+    will not dedupe against an ASCII-spelled "Cafe" in the body -- a safe
+    degradation (prelude added anyway) but not a match."""
+    result = prepend_title("Café Talk", "Cafe Talk is great.\n")
+    assert result == "Café Talk.\n\nCafe Talk is great.\n"

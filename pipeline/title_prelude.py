@@ -4,7 +4,10 @@ Leaf module: imports nothing from ``pipeline``, so every publish path can use
 it without an import cycle.
 """
 
+from __future__ import annotations
+
 import re
+
 
 _ISO_DATE_PREFIX = re.compile(r"\d{4}-\d{2}-\d{2}\s*-\s*")
 _WHITESPACE = re.compile(r"\s+")
@@ -41,6 +44,9 @@ def _already_states(spoken: str, body: str) -> bool:
     partial final token: the real title "Better than gold" would otherwise be
     suppressed by a body opening "Better than golden retrievers...".
     """
+    # ``spoken`` is not truncated to _OPENING_CHARS -- a title longer than
+    # that can never dedupe. Deliberate: it degrades safely (prelude is
+    # added anyway) rather than risking a false match on a truncated title.
     title_tokens = _normalize(spoken).split()
     if not title_tokens:
         return True
