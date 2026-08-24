@@ -193,6 +193,67 @@ def test_process_blog_post_skips_already_processed(tmp_path, monkeypatch) -> Non
     store.close()
 
 
+def test_blog_tts_input_opens_with_post_title_not_the_dated_title(
+    tmp_path, monkeypatch
+) -> None:
+    """The audio states the bare post title, not the "Aug 22 - ..." dated
+    episode title -- ``spoken_title`` only strips ISO dates, so routing the
+    dated title through it would speak the date aloud and poison dedupe.
+    """
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("PODCAST_BASE_URL", "https://test.example.com")
+
+    store = StateStore(tmp_path / "test.db")
+    r2_client = MagicMock()
+
+    post = BlogPost(
+        title="Anthropic's LLM watermarking",
+        url="https://example.com/post1",
+        pub_date="Sat, 22 Aug 2026 05:17:35 +0000",
+        html_content="<p>Body content about watermarking.</p>",
+        guid="https://example.com/?p=123",
+    )
+    source = BLOG_SOURCES[0]
+
+    mock_gemini_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.text = "Body content about watermarking."
+    mock_gemini_client.models.generate_content.return_value = mock_response
+
+    captured: list[str] = []
+
+    def fake_subprocess_run(cmd, **kwargs):
+        if cmd[0] == "ttsjoin":
+            input_file = Path(cmd[cmd.index("--input-file") + 1])
+            captured.append(input_file.read_text(encoding="utf-8"))
+            output_idx = cmd.index("--output-file") + 1
+            Path(cmd[output_idx]).write_bytes(b"\x00" * 100)
+            return subprocess.CompletedProcess(cmd, 0)
+        elif cmd[0] == "ffprobe":
+            return subprocess.CompletedProcess(cmd, 0, stdout="10.0", stderr="")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    with (
+        patch("pipeline.blog_poller.genai") as mock_genai,
+        patch("subprocess.run", side_effect=fake_subprocess_run),
+        patch("pipeline.feed.regenerate_and_upload_feed"),
+    ):
+        mock_genai.Client.return_value = mock_gemini_client
+        process_blog_post(post, source, store, r2_client)
+
+    assert len(captured) == 1
+    captured_tts_input = captured[0]
+    assert captured_tts_input.startswith("Anthropic's LLM watermarking.")
+    assert "Aug 22" not in captured_tts_input.split("\n", 1)[0]
+
+    # DB row still carries the full dated title -- only the TTS input changed.
+    episodes = store.list_episodes(feed_slug="aaronson")
+    assert len(episodes) == 1
+    assert episodes[0].title == "Aug 22 - Anthropic's LLM watermarking"
+
+    store.close()
+
+
 def test_poll_all_blogs_fetches_and_processes(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("PODCAST_BASE_URL", "https://test.example.com")

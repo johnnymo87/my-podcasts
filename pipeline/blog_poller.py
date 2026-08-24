@@ -20,6 +20,7 @@ from google.genai import types
 from pipeline.blog_sources import BLOG_SOURCES
 from pipeline.feed import regenerate_and_upload_feed
 from pipeline.script_processor import TTS_MODEL
+from pipeline.title_prelude import prepend_title
 
 
 if TYPE_CHECKING:
@@ -148,6 +149,9 @@ def process_blog_post(
         tmp = Path(tmp_dir)
         input_txt = tmp / f"{episode_slug}.txt"
         output_mp3 = tmp / f"{episode_slug}.mp3"
+        # post.title, not episode_title: the latter is "Aug 22 - <title>",
+        # whose date shape the ISO strip does not match.
+        adapted_text = prepend_title(post.title, adapted_text)
         input_txt.write_text(adapted_text, encoding="utf-8")
 
         cmd = [
