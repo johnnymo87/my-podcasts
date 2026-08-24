@@ -992,7 +992,10 @@ def test_fp_report_omits_stages_with_no_data_source():
 
 
 def test_fp_plan_line_drops_the_degenerate_routing_split():
-    """directives_fp_routed is 0 on all 13 real FP work dirs -- FP *is* the fp feed."""
+    """directives_fp_routed is 0 on all 15 real FP work dirs -- FP *is* the fp feed.
+
+    The episode half stays (see the test below); only the routing half goes.
+    """
     stats = RunStats(
         job_id="j",
         date_str="2026-08-19",
@@ -1002,7 +1005,34 @@ def test_fp_plan_line_drops_the_degenerate_routing_split():
         directives_fp_routed=0,
     )
     line = [x for x in render_report(stats).splitlines() if x.startswith("PLAN")][0]
-    assert line == "PLAN   6 directives"
+    assert line == "PLAN   6 directives = 6 episode"
+    assert "fp-routed" not in line
+
+
+def test_fp_plan_line_reports_the_include_in_episode_split():
+    """Total alone is near-uninformative when the editor annotates every candidate.
+
+    Measured over the 15 non-empty /tmp/fp-digest-* plans on 2026-08-24, the FP
+    editor returns a shortlist on 12 (total == episode) but the full annotated
+    candidate list on 3, where the gap is enormous: 143 -> 29, 141 -> 18,
+    14 -> 10. On those days `PLAN 143 directives` says nothing about how many
+    stories the writer was actually asked for, which is the number the report
+    exists to surface.
+
+    Rendered unconditionally, including when the two are equal: a line whose
+    shape depends on the values is one a reader (or a future parser) has to
+    branch on, and its absence would be ambiguous between "equal" and "old
+    code".
+    """
+    stats = RunStats(
+        job_id="j",
+        date_str="2026-08-19",
+        feed="fp-digest",
+        directives_total=143,
+        directives_episode=29,
+    )
+    line = [x for x in render_report(stats).splitlines() if x.startswith("PLAN")][0]
+    assert line == "PLAN   143 directives = 29 episode"
 
 
 def test_fp_report_keeps_out_line_that_catches_the_real_incidents():

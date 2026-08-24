@@ -529,7 +529,15 @@ def render_report(stats: RunStats) -> str:
 
     if "plan" in stages:
         if stats.feed == "fp-digest":
-            lines.append(f"PLAN   {stats.directives_total} directives")
+            # The episode split, but not the routing split: directives_fp_routed
+            # is 0 on every real FP work dir (FP is the routing destination, not
+            # a source), while directives_episode diverges hard from the total on
+            # the days the editor annotates every candidate instead of returning
+            # a shortlist -- 143 -> 29 and 141 -> 18 among the 15 measured.
+            lines.append(
+                f"PLAN   {stats.directives_total} directives = "
+                f"{stats.directives_episode} episode"
+            )
         else:
             lines.append(
                 f"PLAN   {stats.directives_total} directives = "
