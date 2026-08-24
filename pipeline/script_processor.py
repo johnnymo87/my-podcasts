@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 import markdown as md_lib
 
 from pipeline.feed import regenerate_and_upload_feed
+from pipeline.fp_processor import FEED_SLUG as _FP_DIGEST_FEED_SLUG
+from pipeline.things_happen_processor import FEED_SLUG as _THE_RUNDOWN_FEED_SLUG
 from pipeline.title_prelude import prepend_title
 
 
@@ -91,7 +93,7 @@ SCRIPT_ARCHIVE_ROOT = Path("/persist/my-podcasts/scripts")
 # opening, so a prelude would double it. Their automated processors bypass
 # publish_script entirely -- this guard is for the documented
 # consumer-down recovery, which publishes those scripts through here.
-_NO_PRELUDE_FEEDS = frozenset({"the-rundown", "fp-digest"})
+_NO_PRELUDE_FEEDS = frozenset({_THE_RUNDOWN_FEED_SLUG, _FP_DIGEST_FEED_SLUG})
 
 
 def apply_title_prelude(*, feed_slug: str, title: str, tts_text: str) -> str:

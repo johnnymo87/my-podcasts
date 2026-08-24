@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 
 TTS_MODEL = "tts-1-hd"
 TTS_VOICE = "onyx"
+# Also read by script_processor._NO_PRELUDE_FEEDS -- this feed's writer
+# prompt already self-announces, so publish_script must not double it.
 FEED_SLUG = "fp-digest"
 CATEGORY = "News"
 
