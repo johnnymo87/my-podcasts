@@ -91,13 +91,12 @@ def test_punctuation_only_title_returns_body_unchanged() -> None:
     assert prepend_title("---", "Body text.\n") == "Body text.\n"
 
 
-def test_date_strip_is_unanchored_and_can_eat_a_content_date() -> None:
-    """_ISO_DATE_PREFIX strips every date-shaped substring, not just the
-    leading one. A title whose actual content mentions a second date (e.g.
-    "1999-12-31 - Y2K Retrospective") silently loses that date too -- this
-    pins the current behavior, not an endorsement of it (see report)."""
+def test_date_strip_only_eats_the_first_date() -> None:
+    """_ISO_DATE_PREFIX strips only the first date-shaped substring (the one
+    generated date prefix), so a second date-shaped substring that is real
+    title content -- e.g. "1999-12-31 - Y2K Retrospective" -- survives."""
     raw = "2026-08-17 - 1999-12-31 - Y2K Retrospective"
-    assert spoken_title(raw) == "Y2K Retrospective"
+    assert spoken_title(raw) == "1999-12-31: Y2K Retrospective"
 
 
 def test_normalize_drops_accented_characters_rather_than_transliterating() -> None:

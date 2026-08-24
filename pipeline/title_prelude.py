@@ -24,11 +24,14 @@ _OPENING_CHARS = 300
 def spoken_title(episode_title: str) -> str:
     """Render an ``episode_title`` as something worth hearing aloud.
 
-    Strips the ISO date wherever it appears -- not only at the start, because
-    transcript reports are titled ``Report: 2026-08-19 - ChinaTalk - Foo``.
+    Strips the first ISO date, wherever it appears -- not only at the start,
+    because transcript reports are titled ``Report: 2026-08-19 - ChinaTalk -
+    Foo``. Only the first match is stripped: there is only ever one
+    generated date prefix, so a second date-shaped substring is real title
+    content, not something to eat.
     Remaining ``' - '`` separators become ``': '``, which reads as a subtitle.
     """
-    without_date = _ISO_DATE_PREFIX.sub("", episode_title)
+    without_date = _ISO_DATE_PREFIX.sub("", episode_title, count=1)
     with_colons = without_date.replace(" - ", ": ")
     return _WHITESPACE.sub(" ", with_colons).strip()
 
