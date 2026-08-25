@@ -414,7 +414,7 @@ Foreign policy content is exclusively routed to FP Digest, not The Rundown:
 
 ## Source Caching
 
-All external sources are cached daily to persistent storage by the `sync-sources` timer (4:00 AM ET daily). Podcasts read from caches instead of fetching live, with an adaptive lookback window based on days since the last episode (min 2, max 14 days).
+All external sources are cached to persistent storage by the `sync-sources` timer, which runs **twice daily, at 4:00 AM and 8:00 PM ET**. Podcasts read from caches instead of fetching live, with an adaptive lookback window based on days since the last episode (min 2, max 14 days).
 
 **Caches:**
 - Zvi: `/persist/my-podcasts/zvi-cache/` (also synced on-demand by The Rundown collector)
@@ -428,7 +428,7 @@ All caches use 180-day retention (cleaned up by `_cleanup_old_work_dirs` in cons
 
 **CLI:** `uv run python -m pipeline sync-sources`
 
-**Timer:** `sync-sources.timer` — daily at 4:00 AM ET
+**Timer:** `sync-sources.timer` — **twice daily**, 4:00 AM and 8:00 PM ET (two `OnCalendar` lines, `Persistent=true`, `RandomizedDelaySec=5min`). Docs previously said "daily at 4:00 AM"; a next-elapse of ~20:04 is correct, not drift.
 
 **Adaptive lookback:** `pipeline/db.py:days_since_last_episode()` queries the latest episode date per feed. `pipeline/consumer.py:_compute_lookback()` computes `min(max(2, days_since + 1), 14)`.
 
