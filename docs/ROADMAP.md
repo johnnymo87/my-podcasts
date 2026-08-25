@@ -411,6 +411,14 @@ loss would cause an actively wrong decision.
   reboot** (`/etc` is read-only on NixOS). See `my-podcasts-2h7`; the permanent
   fix is in the workstation Nix definition. If a restart hangs, check
   `journalctl` for start-pre before suspecting your own commit.
+  **Re-verified 2026-08-25 and still live.** The drop-in is present, but host
+  uptime is **137.7 days** — it has survived only because nobody rebooted since
+  April — and `curl -6 https://www.google.com` still returns `000`, so the
+  IPv6 egress that caused the outage is unfixed and a reboot re-arms it.
+  Scope is narrow, at least: it is the *only* `nltk.download` in
+  `hosts/devbox/configuration.nix` (line 502), and the nightly restart unit
+  touches `opencode-serve-pool`/`pigeon-daemon`, **not** this consumer, so
+  there is no nightly trigger.
 - **Deploy is a restart.** `my-podcasts-consumer` runs `uv run python -m
   pipeline consume` against the **live working tree** as a long-lived loop with
   `Restart=on-failure`. Merging to `main` does **not** deploy. Every
