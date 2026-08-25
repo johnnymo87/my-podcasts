@@ -408,17 +408,47 @@ loss would cause an actively wrong decision.
   loop itself sustained), and start-pre blocked past the 90s timeout — for data
   already on local disk. Mitigated by a drop-in at
   `/run/systemd/system/my-podcasts-consumer.service.d/`, **which is cleared on
-  reboot** (`/etc` is read-only on NixOS). See `my-podcasts-2h7`; the permanent
-  fix is in the workstation Nix definition. If a restart hangs, check
+  reboot** (`/etc` is read-only on NixOS). If a restart hangs, check
   `journalctl` for start-pre before suspecting your own commit.
-  **Re-verified 2026-08-25 and still live.** The drop-in is present, but host
-  uptime is **137.7 days** — it has survived only because nobody rebooted since
-  April — and `curl -6 https://www.google.com` still returns `000`, so the
-  IPv6 egress that caused the outage is unfixed and a reboot re-arms it.
-  Scope is narrow, at least: it is the *only* `nltk.download` in
-  `hosts/devbox/configuration.nix` (line 502), and the nightly restart unit
-  touches `opencode-serve-pool`/`pigeon-daemon`, **not** this consumer, so
-  there is no nightly trigger.
+  **~~`my-podcasts-2h7`~~ FIXED 2026-08-25** (workstation PR #408): the fetch is
+  now conditional, `timeout 60`-bounded, and non-fatal in the Nix definition,
+  the `/run` drop-in is deleted, and `TimeoutStartSec=180`. The presence check
+  tests a **leaf file**, not the directory, because a timeout mid-unzip leaves a
+  partial `punkt_tab/` that a `-d` test accepts forever. The embedded Python is
+  a deliberate **one-liner** — Nix strips the common indent, so a multi-line
+  body is valid only at the exact strip baseline and a re-indent would raise
+  `IndentationError` that the `|| echo` swallows forever. Do not "tidy" it.
+- **The same outage class is still live in two places.** The startup half is
+  fixed; these are not:
+  - **`my-podcasts-4ld` (P2): `ttsjoin` calls `nltk.download` itself on every
+    run** (`joinery/cli.py:65`), and every `subprocess.run(cmd, check=True)`
+    that invokes it passes **no `timeout=`**. `nltk.download` has no network
+    timeout — verified, it blocks until killed — so an unreachable
+    `raw.githubusercontent.com` hangs the consumer **mid-job, forever, with no
+    unit failure, no restart, and no alert**. That is *worse* detectability than
+    the outage that was just fixed. Beware the lookalike: a journal ending at
+    "Finalizing..." with hours of silence is the same *shape* as this hang but
+    is usually just an idle consumer — distinguish by looking for a live
+    `ttsjoin` process and CPU, not by the silence.
+  - **IPv6 egress is still broken** (`curl -6` → `000`), and
+    `network-online.target` is **decorative on devbox** — no
+    `*-wait-online` unit exists, so `After=network-online.target` guarantees
+    nothing and starting before the network is up is the *normal* case.
+- **`/persist` is a `nofail` network-attached volume, so "the DB is there" is an
+  assumption, not a guarantee.** Its mount unit is ordered `Before=umount.target`
+  only. Until PR #408 the consumer did not order on it at all, so a slow volume
+  attach at boot would have let it create a phantom `/persist/my-podcasts` on the
+  root fs and open a **fresh empty `state.sqlite3`** — dedupe gone, lookback
+  maxed, duplicate publishes, no alert, and no mount retry until the next
+  reboot. Fixed by `RequiresMountsFor=/persist/my-podcasts`. Any *new* unit
+  touching `/persist` needs the same line.
+- **Restart-time verification cannot see boot-time bugs.** Deleting the `/run`
+  drop-in and reloading reproduces the post-reboot *unit config* exactly (confirm
+  with `systemctl show -p DropInPaths`), which is how 2h7 was verified without a
+  reboot — but it cannot exercise volume-attach races, boot network timing, or
+  sops-nix secret availability. The host is at **137 days uptime** and is overdue
+  a deliberate low-stakes reboot; the drop-in was unlikely to be the only
+  `/run`-resident state it was surviving on.
 - **Deploy is a restart.** `my-podcasts-consumer` runs `uv run python -m
   pipeline consume` against the **live working tree** as a long-lived loop with
   `Restart=on-failure`. Merging to `main` does **not** deploy. Every
