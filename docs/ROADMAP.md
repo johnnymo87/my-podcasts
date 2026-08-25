@@ -70,9 +70,29 @@ with text, and the first line ever written to `/persist/my-podcasts/run-stats.js
 No traceback in the journal. Both feeds serve the new episode (116/117 items,
 matching the DB).
 
-**Open-access substitution (`85c`) remains unmeasured**, correctly: the run had
-**zero** Levine stubs, so `EXA 0 flagged` was arithmetically right and the day
-carries no evidence either way. See the Monday note below.
+**Open-access substitution (`85c`) was finally measured on 2026-08-25**, the
+first Levine-bearing run since the funnel existed. It had gone unmeasured for
+eight days for two compounding reasons: the early runs had zero Levine stubs,
+and then Levine went on vacation 08-17 through 08-21, so `run-stats.jsonl`
+contains exactly **one** Levine-bearing line in its whole history.
+
+```
+FETCH  levine 11: live 1, http_error 10
+EXA    8 flagged -> 8 hit
+WRITE  12 selected -> 12 with text (4 cache, 8 http_error+exa), 0 dropped, 8 +open-access
+```
+
+**8 flagged, 8 hit, 8 appended, 0 dropped, and all 12 selected stories reached
+the writer with text.** On a day when 10 of 11 Levine fetches failed, the
+episode still went out at 2979 words. That is the feature doing exactly the job
+it was built for, and it is the first day that could possibly have shown it.
+
+Two cautions on reading this. It is **one** day — the roadmap's own scale note
+(~1.2 stubs per episode across 8 runs) says a single run cannot establish a rate,
+and 8 stubs is far above that average. And the failing tier is `http_error`, not
+`paywalled`: all 10 were `bloomberg.com` URLs, so the `paywalled:` domain
+histogram that was built to name publishers worth routing around **stays empty
+on exactly the publisher that matters most**. Worth a look when trending.
 
 ---
 
