@@ -376,8 +376,10 @@ Origin exclusion by registrable domain; non-daemon timeout thread; unguarded
 
 ### 4. Set funnel thresholds — `my-podcasts-3qs` (P3) — **calendar-gated**
 
-Do **not** start before ~2026-08-31, and note the clock is **paused** while
-Levine is away (week of 08-17) — his links are the only source producing
+Do **not** start before ~**2026-09-08**. The original ~08-31 date assumed an
+uninterrupted fortnight; Levine's vacation (week of 08-17) contributed zero
+evidence, so the clock effectively restarted 08-25. Note the clock is **paused**
+whenever Levine is away — his links are the only source producing
 paywalled stubs, so a Levine-free week yields zero evidence about the feature
 being thresholded. What `3qs` needs is ~2 weeks of **Tue-Fri runs with Levine
 present**, not 2 weeks of calendar. Needs ~2 weeks of real `run-stats.jsonl`
@@ -434,6 +436,16 @@ loss would cause an actively wrong decision.
   briefly looked like a total publish failure. Count with
   `date(created_at)='YYYY-MM-DD'`. A verification query is an instrument; check it
   returns the right shape on a known-good day before trusting a zero from it.
+- **Open-access substitution is PROVEN in production** (2026-08-25, first run
+  with Levine content since it shipped): 10 stubs -> 8 flagged -> 8/8 Exa hits
+  -> 8 delivered as `http_error+exa` with `, 8 +open-access`. Both the trigger
+  and delivery dimensions fired, and `0 dropped` held on the largest episode yet
+  (2979 words, 12 stories).
+- **The old scale numbers below are a floor, not a norm — do not diagnose from
+  them.** They came from eight low-volume runs. A healthy day measured 8 flagged,
+  not 2. What drives the count is how many Levine links land in the window and
+  how many the editor selects, both of which vary widely. **Compare EXA against
+  the same day's stub count, never against a remembered constant.**
 - **Scale of the open-access feature.** It upgrades **~1.2 of ~4.75 selected
   stories per episode** (per-run stubs `[0,1,0,3,1,2,1,2]`). The widely-quoted
   "93% stub rate" is per *Levine file*, and most Levine files are never
