@@ -821,3 +821,42 @@ def test_provider_error_survives_pickle(kind) -> None:
     assert isinstance(err, TTSProviderError)
     assert str(err) == "boom: détail" and err.kind == kind
     assert err.retryable is (kind != "fatal")
+
+
+# --- key redaction happens BEFORE truncation -------------------------------------
+
+
+def _assert_no_key_prefix(message: str) -> None:
+    for n in range(8, len(KEY) + 1):
+        assert KEY[:n] not in message, f"{n}-char key prefix leaked"
+
+
+@pytest.mark.parametrize("lead", [250, 282, 285, 290, 295, 299, 300])
+def test_key_straddling_the_truncation_cut_is_redacted_in_json_message(
+    monkeypatch, lead
+) -> None:
+    body = error_body(400, "INVALID_ARGUMENT", "x" * lead + KEY + "y" * 50)
+    err = _fail(monkeypatch, FakeResponse(400, body))
+    _assert_no_key_prefix(str(err))
+    assert "x" * 250 in str(err)  # still truncated text, not dropped
+
+
+@pytest.mark.parametrize("lead", [250, 282, 285, 290, 295, 299, 300])
+def test_key_straddling_the_truncation_cut_is_redacted_in_raw_body(
+    monkeypatch, lead
+) -> None:
+    err = _fail(
+        monkeypatch,
+        FakeResponse(403, None, text="x" * lead + KEY + "y" * 50),
+    )
+    _assert_no_key_prefix(str(err))
+
+
+def test_key_in_error_status_and_reason_is_redacted(monkeypatch) -> None:
+    body = error_body(
+        400,
+        f"STATUS_{KEY}",
+        "m",
+        [{"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": f"R_{KEY}"}],
+    )
+    _assert_no_key_prefix(str(_fail(monkeypatch, FakeResponse(400, body))))

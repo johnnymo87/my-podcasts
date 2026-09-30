@@ -192,8 +192,18 @@ def _as_list(value: object) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
-def _error_detail(resp: Any) -> str:
-    """HTTP status, ``error.status``, truncated ``error.message``, ErrorInfo reason."""
+def _error_detail(resp: Any, key: str) -> str:
+    """HTTP status, ``error.status``, truncated ``error.message``, ErrorInfo reason.
+
+    Every server-supplied string has ``key`` redacted BEFORE it is truncated: a
+    key straddling the cut would otherwise survive as a partial prefix that a
+    later whole-message redaction no longer recognises.
+    """
+
+    def clean(value: object, limit: int | None = None) -> str:
+        text = str(value).replace(key, "[redacted]")
+        return text if limit is None else text[:limit]
+
     parts = [f"HTTP {resp.status_code}"]
     try:
         body = resp.json()
@@ -202,18 +212,18 @@ def _error_detail(resp: Any) -> str:
     err = _as_dict(_as_dict(body).get("error"))
     if err:
         if err.get("status"):
-            parts.append(str(err["status"]))
+            parts.append(clean(err["status"], _MAX_DETAIL_CHARS))
         if err.get("message"):
-            parts.append(str(err["message"])[:_MAX_DETAIL_CHARS])
+            parts.append(clean(err["message"], _MAX_DETAIL_CHARS))
         for d in _as_list(err.get("details")):
             reason = _as_dict(d).get("reason")
             if reason:
-                parts.append(f"reason={reason}")
+                parts.append(f"reason={clean(reason, _MAX_DETAIL_CHARS)}")
                 break
     else:
         text = getattr(resp, "text", "") or ""
         if text:
-            parts.append(text[:_MAX_DETAIL_CHARS])
+            parts.append(clean(text, _MAX_DETAIL_CHARS))
     return ": ".join(parts)
 
 
@@ -363,7 +373,7 @@ class GeminiProvider:
 
         status = resp.status_code
         if status != 200:
-            detail = _error_detail(resp)
+            detail = _error_detail(resp, key)
             if status >= 500 or status in (408, 409):
                 raise fail("infra", f"Gemini {detail}")
             if status == 429:
