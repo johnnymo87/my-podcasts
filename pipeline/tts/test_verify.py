@@ -141,3 +141,47 @@ def test_analysis_serializes():
     a = analyze(SCRIPT, as_asr(SCRIPT))
     d = a.to_dict()
     assert d["status"] == "pass" and isinstance(d["spans"], list)
+
+
+def _three_chunks():
+    return [
+        PARAS[0] + "\n\n" + PARAS[1],
+        PARAS[2] + "\n\n" + PARAS[3],
+        "\n\n".join(PARAS[4:]),
+    ]
+
+
+def _swap_first_word(text: str) -> str:
+    words = text.split()
+    return " ".join(["xyzzy", *words[1:]])
+
+
+def _swap_last_word(text: str) -> str:
+    words = text.split()
+    return " ".join([*words[:-1], "xyzzy"])
+
+
+def test_dropped_middle_chunk_does_not_flag_its_neighbours():
+    chunks = _three_chunks()
+    transcript = (
+        _swap_last_word(as_asr(chunks[0])) + " " + _swap_first_word(as_asr(chunks[2]))
+    )
+    whole, per_chunk = project_chunks(chunks, transcript)
+    assert whole.status == "omission"
+    assert [p.status for p in per_chunk] == ["pass", "omission", "pass"]
+    assert per_chunk[0].flagged_spans == 0
+    assert per_chunk[2].flagged_spans == 0
+    assert per_chunk[1].flagged_spans == 1
+
+
+def test_chunk_failure_with_passing_whole_uses_chunk_reason():
+    # Whole-episode recall clears the floor, but one small chunk is mostly gone.
+    chunks = _three_chunks()
+    small = "Alpha bravo charlie delta echo foxtrot golf hotel india juliet."
+    chunks.insert(1, small)
+    transcript = " ".join(as_asr(c) for c in chunks if c != small)
+    th = replace(DEFAULT_THRESHOLDS, recall_floor=0.85, min_span_words=50)
+    whole, per_chunk = project_chunks(chunks, transcript, th)
+    assert per_chunk[1].status == "omission"
+    assert whole.status == "omission"
+    assert whole.reasons == ("chunk_recall_below_floor",)

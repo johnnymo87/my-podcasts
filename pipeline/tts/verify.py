@@ -82,7 +82,9 @@ class Span:
 @dataclass(frozen=True)
 class Analysis:
     status: Status
-    # "ok" | "empty_script" | "long_unmatched_span" | "recall_below_floor"
+    # "ok" | "empty_script" | "long_unmatched_span" | "recall_below_floor", and,
+    # from project_chunks only when the whole episode passed but a chunk's own
+    # recall fell below the floor: "chunk_recall_below_floor"
     reasons: tuple[str, ...]
     recall: float | None  # None only when the script has no tokens
     script_tokens: int
@@ -197,7 +199,10 @@ def project_chunks(
 
     Token ranges come from normalizing each chunk separately and concatenating,
     so chunk boundaries are exact in token space. The whole-episode status is
-    an omission if the whole analysis is one OR any chunk's projection is.
+    an omission if the whole analysis is one OR any chunk's projection is (then
+    with reason ``chunk_recall_below_floor``). A flagged span is
+    attributed to a chunk only if the chunk holds a substantial share of the
+    span's unmatched tokens; see ``_span_belongs_to_chunk``.
     """
     per_chunk = [normalize_tokens(c) for c in chunks]
     script = [t for toks in per_chunk for t in toks]
@@ -213,7 +218,7 @@ def project_chunks(
         flagged = sum(
             1
             for s in spans
-            if s.flagged and s.script_start < end and s.script_end > start
+            if s.flagged and _span_belongs_to_chunk(s, matched, start, end, thresholds)
         )
         recall = n / len(toks) if toks else None
         bad = flagged > 0 or (recall is not None and recall < thresholds.recall_floor)
@@ -229,6 +234,26 @@ def project_chunks(
             )
         )
         start = end
+    # A passing whole has no flagged span, so a failing chunk can only have
+    # failed on its own recall (flagged_spans is 0 for every chunk here).
     if whole.status == "pass" and any(p.status == "omission" for p in projections):
-        whole = replace(whole, status="omission", reasons=("recall_below_floor",))
+        whole = replace(whole, status="omission", reasons=("chunk_recall_below_floor",))
     return whole, projections
+
+
+def _span_belongs_to_chunk(
+    span: Span, matched: list[bool], start: int, end: int, th: VerifyThresholds
+) -> bool:
+    """Is a flagged span substantially *this chunk's* omission?
+
+    A span merely touching a chunk (one substituted word at its edge, next to a
+    wholly dropped neighbour) must not flag it. Attribute the span only when the
+    span's UNMATCHED script tokens inside the chunk reach
+    ``max(anchor_min, 0.25 * min(chunk_tokens, span_unmatched_total))``.
+    """
+    lo, hi = max(span.script_start, start), min(span.script_end, end)
+    if lo >= hi:
+        return False
+    inside = sum(1 for i in range(lo, hi) if not matched[i])
+    total = sum(1 for i in range(span.script_start, span.script_end) if not matched[i])
+    return inside >= max(th.anchor_min, 0.25 * min(end - start, total))

@@ -18,8 +18,17 @@ Supported, in the order applied:
   numbers          grouped (1,800,000) or plain integers, decimals (2.45);
                    a bare 4-digit 1100-2099 not followed by a magnitude word is
                    read as a year (2026 -> twenty twenty six)
-Anything else numeric (above 999 trillion, version strings like 3.5.1) is left
-as digits: visible noise, never a guess.
+Anything else numeric is left as digits: visible noise, never a guess. That
+means integers above 999 trillion, and the tail of a version string: "3.5.1"
+reads as "three point five 1" (the leading decimal converts, the ".1" does not).
+
+Also: glued magnitude abbreviations (11bn, 5M, 4k; bn tn mm m b k) convert only
+when attached directly to digits, so "5 mm" is left alone. Diacritics are
+folded (Zürich -> zurich).
+
+Every replacement is wrapped in "|" separators, not spaces. The tokenizer drops
+"|", and, unlike whitespace, it does not satisfy the signed-number lookbehind,
+so a range hyphen after a converted number ("$20-30") is never read as a minus.
 """
 
 from __future__ import annotations
@@ -50,6 +59,18 @@ _ORDINAL_IRREGULAR = {
     "twelve": "twelfth",
 }
 _MAGNITUDE = r"(?:thousand|million|billion|trillion)"
+_ABBREV = r"(?:bn|tn|mm|m|b|k)"
+_ABBREV_WORDS = {
+    "bn": "billion",
+    "tn": "trillion",
+    "mm": "million",
+    "m": "million",
+    "b": "billion",
+    "k": "thousand",
+}
+# Groups: (spelled magnitude, glued abbreviation). A spelled magnitude may follow
+# a space or hyphen ("$1.8-billion"); an abbreviation must be glued ("$11bn").
+_MAG_CAPTURE = rf"(?:[\s-]?({_MAGNITUDE})\b|({_ABBREV})\b)"
 _INT = r"(?:\d{1,3}(?:,\d{3})+|\d+)"
 
 
@@ -123,7 +144,7 @@ def _safe(fn):
 
     def sub(m: re.Match) -> str:
         try:
-            return " " + fn(m) + " "
+            return "|" + fn(m) + "|"
         except ValueError:
             return m.group(0)
 
@@ -139,11 +160,20 @@ def _time(m: re.Match) -> str:
     return cardinal(hour) + " " + cardinal(minute)
 
 
+def _magnitude_word(spelled: str | None, abbrev: str | None) -> str | None:
+    if spelled:
+        return spelled.lower()
+    if abbrev:
+        return _ABBREV_WORDS[abbrev.lower()]
+    return None
+
+
 def _currency(m: re.Match) -> str:
-    sign, int_part, frac, magnitude = m.group(1), m.group(2), m.group(3), m.group(4)
+    sign, int_part, frac = m.group(1), m.group(2), m.group(3)
+    magnitude = _magnitude_word(m.group(4), m.group(5))
     prefix = "minus " if sign else ""
     if magnitude:
-        return prefix + _number(int_part, frac) + " " + magnitude.lower() + " dollars"
+        return prefix + _number(int_part, frac) + " " + magnitude + " dollars"
     dollars = _int(int_part)
     unit = "dollar" if dollars == 1 else "dollars"
     if frac and len(frac) == 2:
@@ -175,8 +205,11 @@ def _decade(m: re.Match) -> str:
 
 
 def _plain(m: re.Match) -> str:
-    sign, int_part, frac, following = m.group(1), m.group(2), m.group(3), m.group(4)
+    sign, int_part, frac, abbrev = m.group(1), m.group(2), m.group(3), m.group(4)
+    following = m.group(5)
     prefix = "minus " if sign else ""
+    if abbrev:
+        return prefix + _number(int_part, frac) + " " + _ABBREV_WORDS[abbrev.lower()]
     is_year = (
         not sign
         and frac is None
@@ -193,16 +226,16 @@ def _plain(m: re.Match) -> str:
 _TIME_RE = re.compile(r"(?<![\d:])(\d{1,2}):(\d{2})(?![\d:])")
 _SIGN = r"(?:(?<=^)|(?<=[\s(]))"
 _CURRENCY_RE = re.compile(
-    rf"{_SIGN}(-)?\$\s?({_INT})(?:\.(\d+))?(?:\s?({_MAGNITUDE})\b)?", re.IGNORECASE
+    rf"{_SIGN}(-)?\$\s?({_INT})(?:\.(\d+))?{_MAG_CAPTURE}?", re.IGNORECASE
 )
 _CURRENCY_NOSIGN_RE = re.compile(
-    rf"()\$\s?({_INT})(?:\.(\d+))?(?:\s?({_MAGNITUDE})\b)?", re.IGNORECASE
+    rf"()\$\s?({_INT})(?:\.(\d+))?{_MAG_CAPTURE}?", re.IGNORECASE
 )
 _PERCENT_RE = re.compile(rf"(?:{_SIGN}(-))?(?<![\d.])({_INT})(?:\.(\d+))?\s?%")
 _ORDINAL_RE = re.compile(rf"(?<![\d.])({_INT})(?:st|nd|rd|th)\b", re.IGNORECASE)
 _DECADE_RE = re.compile(r"(?<![\d.])(\d0|\d{3}0)s\b")
 _PLAIN_RE = re.compile(
-    rf"(?:{_SIGN}(-))?(?<!\d)(?<!\d\.)({_INT})(?:\.(\d+))?(?!\d)(?=(\s+{_MAGNITUDE}\b)?)",
+    rf"(?:{_SIGN}(-))?(?<!\d)(?<!\d\.)({_INT})(?:\.(\d+))?(?!\d)(?:({_ABBREV})\b)?(?=(\s+{_MAGNITUDE}\b)?)",
     re.IGNORECASE,
 )
 _INITIALISM_RE = re.compile(r"\b(?:[A-Za-z]\.){2,}")
@@ -223,6 +256,10 @@ def normalize_text(text: str) -> str:
             0x2014: " ",
             0x2212: "-",
         }
+    )
+    # Fold diacritics: NFKD splits "é" into "e" + a combining mark, which we drop.
+    text = "".join(
+        c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)
     )
     text = _INITIALISM_RE.sub(lambda m: m.group(0).replace(".", ""), text)
     text = text.replace("&", " and ")
