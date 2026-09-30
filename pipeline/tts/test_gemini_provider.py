@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import pickle
+import random
 import struct
 import threading
 
@@ -608,3 +610,214 @@ def test_unguarded_session_is_a_plain_session_without_adapter_retries() -> None:
 def test_autouse_guard_blocks_real_gemini_session() -> None:
     with pytest.raises(AssertionError, match="real Gemini"):
         providers._make_gemini_session()
+
+
+# --- I1: malformed response shapes never escape as non-TTSProviderError -----------
+
+
+def _outcome(monkeypatch, response) -> TTSProviderError | bytes:
+    provider, _ = _provider(monkeypatch, response)
+    try:
+        return provider.synthesize("Hi.", CFG)
+    except TTSProviderError as exc:
+        assert KEY not in str(exc)
+        return exc
+
+
+def _with_candidate(**over) -> dict:
+    body = ok_body()
+    body["candidates"][0].update(over)
+    return body
+
+
+_MALFORMED_200 = [
+    {"candidates": {"a": 1}},
+    {"candidates": "x"},
+    {"candidates": ["x"]},
+    {"candidates": [5]},
+    {"candidates": [{}]},
+    {"promptFeedback": "x"},
+    {"promptFeedback": 5},
+    _with_candidate(content="x"),
+    _with_candidate(content=["x"]),
+    _with_candidate(content={"parts": {"inlineData": {}}}),
+    _with_candidate(content={"parts": "inlineData"}),
+    _with_candidate(content={"parts": [5, "x", None]}),
+    _with_candidate(content={"parts": [{"inlineData": "x"}]}),
+    _with_candidate(content={"parts": [{"inlineData": 5}]}),
+    _with_candidate(
+        content={"parts": [{"inlineData": {"mimeType": "audio/wav", "data": 5}}]}
+    ),
+    _with_candidate(
+        content={"parts": [{"inlineData": {"mimeType": 5, "data": "AAAA"}}]}
+    ),
+    {**ok_body(), "usageMetadata": "x"},
+    {
+        **ok_body(),
+        "usageMetadata": {"promptTokenCount": "5", "candidatesTokenCount": []},
+    },
+]
+
+_MALFORMED_ERRORS = [
+    {"error": "boom"},
+    {"error": ["boom"]},
+    {"error": 5},
+    {"error": {"details": 5}},
+    {"error": {"details": "x"}},
+    {"error": {"details": {"reason": "X"}}},
+    {"error": {"details": [5, "x", None]}},
+    {"error": {"details": [{"@type": _QUOTA, "violations": 5}]}},
+    {"error": {"details": [{"@type": _QUOTA, "violations": "x"}]}},
+    {"error": {"details": [{"@type": _QUOTA, "violations": {"quotaId": "PerDay"}}]}},
+    {"error": {"details": [{"@type": _QUOTA, "violations": [5, "x", None]}]}},
+    {"error": {"status": 5, "message": ["x"], "details": [{"reason": 5}]}},
+    [1, 2],
+    "string body",
+    5,
+]
+
+
+@pytest.mark.parametrize("body", _MALFORMED_200)
+def test_malformed_200_bodies_only_raise_provider_errors(monkeypatch, body) -> None:
+    out = _outcome(monkeypatch, FakeResponse(200, body))
+    assert isinstance(out, (TTSProviderError, bytes))
+
+
+@pytest.mark.parametrize("status", [400, 429, 500, 403])
+@pytest.mark.parametrize("body", _MALFORMED_ERRORS)
+def test_malformed_error_bodies_only_raise_provider_errors(
+    monkeypatch, status, body
+) -> None:
+    out = _outcome(monkeypatch, FakeResponse(status, body))
+    assert isinstance(out, TTSProviderError)
+    assert out.kind == {400: "fatal", 403: "fatal", 500: "infra", 429: "infra"}[status]
+
+
+# --- I2: corrupt WAV bytes ---------------------------------------------------------
+
+
+def test_corrupt_wav_fuzz_only_raises_provider_errors(monkeypatch) -> None:
+    rng = random.Random(20260930)
+    base = wav_bytes(PCM[:2_000], c2pa=64)
+    provider, session = _provider(monkeypatch, FakeResponse(200, ok_body(base)))
+    kinds: set[str] = set()
+    for _ in range(3_000):
+        raw = bytearray(base)
+        for _ in range(rng.randint(1, 4)):
+            # Bias toward the header, where wave's parser lives.
+            pos = rng.randrange(60 if rng.random() < 0.8 else len(raw))
+            raw[pos] = rng.randrange(256)
+        mode = rng.random()
+        if mode < 0.2:
+            raw = raw[: rng.randrange(len(raw))]
+        elif mode < 0.3:
+            raw[rng.randrange(len(raw)) : 0] = bytes(
+                rng.randrange(256) for _ in range(5)
+            )
+        session.responses = [FakeResponse(200, ok_body(bytes(raw)))]
+        try:
+            provider.synthesize("Hi.", CFG)
+        except TTSProviderError as exc:
+            kinds.add(exc.kind)
+    assert {"infra"} <= kinds  # the fuzz actually reached the WAV classifier
+
+
+def test_chunk_seek_runtime_error_is_infra(monkeypatch) -> None:
+    # wave.Chunk raises RuntimeError (not wave.Error) on some corrupt layouts.
+    def boom(*a, **k):
+        raise RuntimeError("seek on closed chunk")
+
+    monkeypatch.setattr(providers.wave, "open", boom)
+    assert _fail(monkeypatch, FakeResponse(200, ok_body())).kind == "infra"
+
+
+def test_struct_error_in_wave_is_infra(monkeypatch) -> None:
+    def boom(*a, **k):
+        raise struct.error("unpack requires a buffer")
+
+    monkeypatch.setattr(providers.wave, "open", boom)
+    assert _fail(monkeypatch, FakeResponse(200, ok_body())).kind == "infra"
+
+
+# --- I3: key handling ----------------------------------------------------------------
+
+
+def test_key_is_stripped_before_use(monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", f"  {KEY}\n")
+    provider, session = _provider(monkeypatch, FakeResponse(200, ok_body()))
+    provider.synthesize("Hi.", CFG)
+    value = session.calls[0][1]["headers"]["x-goog-api-key"]
+    assert value == KEY and "\n" not in value
+
+
+@pytest.mark.parametrize("value", [" ", "\n", " \t\n"])
+def test_whitespace_only_key_is_not_set(monkeypatch, value) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", value)
+    made: list[int] = []
+    monkeypatch.setattr(providers, "_make_gemini_session", lambda: made.append(1))
+    with pytest.raises(TTSProviderError, match="GEMINI_API_KEY is not set") as exc:
+        GeminiProvider().synthesize("Hi.", CFG)
+    assert exc.value.kind == "fatal" and made == []
+
+
+@pytest.mark.parametrize("bad", ["sécret-key", "ke\ny-inside", "k\u200bey"])
+def test_key_with_invalid_characters_is_fatal_and_never_echoed(
+    monkeypatch, bad
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", bad)
+    made: list[int] = []
+    monkeypatch.setattr(providers, "_make_gemini_session", lambda: made.append(1))
+    with pytest.raises(TTSProviderError) as exc:
+        GeminiProvider().synthesize("Hi.", CFG)
+    assert exc.value.kind == "fatal" and made == []
+    assert "GEMINI_API_KEY has invalid characters" in str(exc.value)
+    assert bad.strip() not in str(exc.value)
+
+
+def test_redirects_are_not_followed_and_3xx_is_infra(monkeypatch) -> None:
+    provider, session = _provider(monkeypatch, FakeResponse(302, None, text="moved"))
+    with pytest.raises(TTSProviderError) as exc:
+        provider.synthesize("Hi.", CFG)
+    assert exc.value.kind == "infra"
+    assert session.calls[0][1]["allow_redirects"] is False
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        requests.exceptions.InvalidHeader("bad header"),
+        requests.exceptions.InvalidURL("bad url"),
+        requests.exceptions.InvalidSchema("bad schema"),
+        requests.exceptions.MissingSchema("no schema"),
+    ],
+)
+def test_request_construction_errors_are_fatal(monkeypatch, exc) -> None:
+    assert _fail(monkeypatch, exc).kind == "fatal"
+
+
+def test_409_is_infra(monkeypatch) -> None:
+    body = error_body(409, "ABORTED", "conflict")
+    assert _fail(monkeypatch, FakeResponse(409, body)).kind == "infra"
+
+
+# --- S1/S2: no key-bearing cause chain; picklable errors ---------------------------
+
+
+def test_transport_errors_do_not_chain_the_original_exception(monkeypatch) -> None:
+    prepared = requests.Request(
+        "POST", "https://x.example/", headers={"x-goog-api-key": KEY}
+    ).prepare()
+    for exc in (
+        requests.ConnectionError("reset", request=prepared),
+        requests.exceptions.InvalidHeader("bad", request=prepared),
+    ):
+        err = _fail(monkeypatch, exc)
+        assert err.__cause__ is None and err.__context__ is None
+
+
+@pytest.mark.parametrize("kind", ["content", "infra", "fatal"])
+def test_provider_error_survives_pickle(kind) -> None:
+    err = pickle.loads(pickle.dumps(TTSProviderError("boom: détail", kind=kind)))
+    assert isinstance(err, TTSProviderError)
+    assert str(err) == "boom: détail" and err.kind == kind
+    assert err.retryable is (kind != "fatal")
