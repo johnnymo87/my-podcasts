@@ -236,13 +236,30 @@ _TOKEN_FIELDS = (
 )
 
 
+def _stage_completed(stage: str, part: dict) -> bool:
+    """Did this request finish and report usage, as opposed to being killed,
+    still in flight, or failed before any usage came back?"""
+    status = part.get("status")
+    if stage == "synth":
+        return status == "ok"
+    if status in ("pass", "omission"):
+        return True
+    # ASR "unavailable" is a verdict, not a failed call, when the transcript came
+    # back (``asr_empty``): the record then carries the request's elapsed time.
+    return status == "unavailable" and part.get("elapsed_s") is not None
+
+
 def _phase_totals(phase_chunk_records: list[dict]) -> tuple[dict, float]:
     """Token totals and generated audio seconds across every Gemini attempt.
 
-    A total is ``None`` when ANY contributing count is unknown -- a killed
-    request, an errored one, a chunk with no readable progress -- because a sum
-    that silently omits a cost is worse than no sum. An attempt that never
-    reached ASR contributes nothing to the ASR totals (nothing was requested).
+    A total is ``None`` when ANY contributing count is genuinely unknown -- a
+    request that was killed or is still in flight, one that errored without
+    usage, a chunk with no readable progress -- because a sum that silently
+    omits a cost is worse than no sum. An attempt that never reached ASR
+    contributes nothing to the ASR totals (nothing was requested). The one
+    absence that is NOT unknown: a *completed* call with no thinking count means
+    the model reported none, which totals as 0 (the raw per-attempt value stays
+    as reported, in ``gemini_phase.chunks``).
     """
     totals: dict[str, int | None] = {name: 0 for name, _, _ in _TOKEN_FIELDS}
     pcm_bytes = 0
@@ -259,6 +276,9 @@ def _phase_totals(phase_chunk_records: list[dict]) -> tuple[dict, float]:
                 if part is None:
                     continue  # the stage never ran: nothing to count
                 value = part.get(field)
+                if value is None and field == "thinking_tokens":
+                    if _stage_completed(stage, part):
+                        value = 0
                 if isinstance(value, int) and not isinstance(value, bool):
                     if totals[name] is not None:
                         totals[name] += value
@@ -270,7 +290,10 @@ def _phase_totals(phase_chunk_records: list[dict]) -> tuple[dict, float]:
 def _phase_record(outcome, *, budget_s: float, pcm_parts) -> dict:
     """The manifest's ``gemini_phase`` block. Kept apart from ``chunks``, which
     is only the audio that shipped."""
-    tokens, generated = _phase_totals(outcome.chunk_records)
+    if outcome.chunk_records:
+        tokens, generated = _phase_totals(outcome.chunk_records)
+    else:  # e.g. the runner itself failed: what the phase did or cost is unknown
+        tokens, generated = dict.fromkeys(name for name, _, _ in _TOKEN_FIELDS), None
     used = sum(len(p) for p in pcm_parts) / PCM_BYTES_PER_SECOND if pcm_parts else 0.0
     return {
         "outcome": "ok" if outcome.ok else "failed",
@@ -381,7 +404,21 @@ def _render_gemini_primary(
     assert isinstance(primary, GeminiConfig)
     gemini_chunks = chunk_text(text, ceiling=GeminiProvider.max_chars)
     budget_s = gemini_phase.GEMINI_BUDGET_SECONDS
-    outcome = gemini_phase.run_gemini_phase(gemini_chunks, primary, budget_s=budget_s)
+    runner_exc: Exception | None = None
+    started = time.monotonic()
+    try:
+        outcome = gemini_phase.run_gemini_phase(
+            gemini_chunks, primary, budget_s=budget_s
+        )
+    except Exception as exc:  # noqa: BLE001
+        # A bug in the runner must not cost the episode: a Gemini problem of any
+        # kind costs an OpenAI episode. (KeyboardInterrupt/SystemExit are not
+        # Exceptions and propagate; the runner has already cleaned up after them.)
+        log.exception("Gemini phase runner raised; falling back")
+        runner_exc = exc
+        outcome = gemini_phase.runner_error_outcome(
+            exc, elapsed_s=time.monotonic() - started
+        )
     record["gemini_phase"] = _phase_record(
         outcome, budget_s=budget_s, pcm_parts=outcome.pcm_parts
     )
@@ -394,7 +431,7 @@ def _render_gemini_primary(
 
     reason = outcome.reason or "unknown"
     if config.fallback is None:
-        raise TTSRenderError(f"Gemini phase failed: {reason}")
+        raise TTSRenderError(f"Gemini phase failed: {reason}") from runner_exc
 
     # All Gemini audio is discarded: the whole text is re-chunked for OpenAI and
     # rendered from scratch, so no episode ever mixes two voices.

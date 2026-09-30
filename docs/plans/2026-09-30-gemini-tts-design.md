@@ -159,8 +159,12 @@ The inline text above stays; where it disagrees with these, these win.
   attempt (also when that attempt fails), never on a cache hit, never when there is no fallback,
   and not at all with `notify_fallback=False` (local tools and `publish-script --dry-run`).
 - **The fallback-reason set is closed:** `fatal`, `exhausted`, `deadline`, `asr_unavailable`,
-  `second_omission`, `child_error`, `child_no_result`, `invalid_result`, `spawn_failed`. The
-  parent rejects any other value the child reports as `invalid_result`.
+  `second_omission`, `child_error`, `child_no_result`, `invalid_result`, `spawn_failed`,
+  `runner_error` (parent-side: an exception escaped `run_gemini_phase`; `render_episode` converts it
+  to a failed phase so the invariant holds that a Gemini problem costs an OpenAI episode, never the
+  episode; with no fallback it raises `TTSRenderError` from it). Token totals in the manifest treat a
+  completed call with no thinking count as 0, and a killed, in-flight or errored one as unknown
+  (`null`). The parent rejects any other value the child reports as `invalid_result`.
 - **The parent validates before it uses any audio.** The child's `result.json` is a claim. On
   `ok` the parent requires indices exactly `0..n-1` in order, the canonical file name for each,
   every file present, byte counts matching, non-empty and even (whole 16-bit samples), and the

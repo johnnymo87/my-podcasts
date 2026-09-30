@@ -594,6 +594,7 @@ def test_failure_reasons_are_the_closed_set():
             "child_no_result",
             "invalid_result",
             "spawn_failed",
+            "runner_error",
         }
     )
 
@@ -1440,3 +1441,16 @@ def test_sweeping_never_raises(tmp_path, monkeypatch):
     _old(tmp_path / "gemini-phase-x", gp.STALE_SCRATCH_SECONDS + 60)
     monkeypatch.setattr(gp.shutil, "rmtree", boom)
     gp._sweep_stale_scratch(tmp_path)  # the failing delete is swallowed
+
+
+def test_runner_error_outcome_carries_a_traceback_and_no_audio():
+    try:
+        raise RuntimeError("runner bug")
+    except RuntimeError as exc:
+        out = gp.runner_error_outcome(exc, elapsed_s=1.5)
+    assert (out.ok, out.reason, out.pcm_parts) == (False, "runner_error", None)
+    assert "Traceback" in out.detail and out.detail.rstrip().endswith(
+        "RuntimeError: runner bug"
+    )
+    assert len(out.detail) <= gp.ERROR_DETAIL_CHARS + 50
+    assert out.chunk_records == [] and out.elapsed_s == 1.5

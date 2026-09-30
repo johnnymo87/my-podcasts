@@ -424,6 +424,80 @@ def test_token_totals_are_null_when_any_count_is_unknown(env):
     assert tokens["asr_thinking"] == 10
 
 
+def test_a_completed_asr_call_with_no_thinking_count_totals_zero_not_null(env):
+    def outcome(chunks):
+        out = failed_outcome("deadline", chunks=2)
+        for rec in out.chunk_records:
+            rec["attempts"] = [attempt(asr_think=None)]  # model reported none
+        return out
+
+    env.outcome = outcome
+    env.render()
+    tokens = env.manifests()[0]["gemini_phase"]["tokens"]
+    assert tokens["asr_thinking"] == 0
+    assert tokens["asr_input"] == 66 and tokens["asr_output"] == 88
+    # The raw per-attempt evidence is left as reported.
+    raw = env.manifests()[0]["gemini_phase"]["chunks"][0]["attempts"][0]["asr"]
+    assert raw["thinking_tokens"] is None
+
+
+def test_an_omission_attempt_that_completed_also_counts_absent_thinking_as_zero(env):
+    def outcome(chunks):
+        out = failed_outcome("second_omission", chunks=1)
+        a = attempt(asr_think=None, outcome="omission")
+        a["asr"]["status"] = "omission"
+        out.chunk_records[0]["attempts"] = [a]
+        return out
+
+    env.outcome = outcome
+    env.render()
+    assert env.manifests()[0]["gemini_phase"]["tokens"]["asr_thinking"] == 0
+
+
+def test_a_killed_in_flight_asr_call_keeps_thinking_unknown(env):
+    in_flight = attempt(asr_in=None, asr_out=None, asr_think=None)
+    in_flight["asr"].update(status="started", elapsed_s=None)
+
+    def outcome(chunks):
+        out = failed_outcome("deadline", chunks=2)
+        out.chunk_records[1]["attempts"] = [in_flight]
+        return out
+
+    env.outcome = outcome
+    env.render()
+    tokens = env.manifests()[0]["gemini_phase"]["tokens"]
+    assert tokens["asr_thinking"] is None and tokens["asr_input"] is None
+    assert tokens["synth_prompt"] == 22  # the synth calls all completed
+
+
+def test_an_asr_call_that_errored_without_usage_keeps_thinking_unknown(env):
+    errored = attempt(asr_in=None, asr_out=None, asr_think=None)
+    errored["asr"].update(status="unavailable", elapsed_s=None)  # asr_error: no info
+
+    def outcome(chunks):
+        out = failed_outcome("asr_unavailable", chunks=1)
+        out.chunk_records[0]["attempts"] = [errored]
+        return out
+
+    env.outcome = outcome
+    env.render()
+    assert env.manifests()[0]["gemini_phase"]["tokens"]["asr_thinking"] is None
+
+
+def test_an_empty_transcript_unavailable_call_did_complete(env):
+    empty = attempt(asr_think=None)
+    empty["asr"].update(status="unavailable", reasons=["asr_empty"])  # info present
+
+    def outcome(chunks):
+        out = failed_outcome("asr_unavailable", chunks=1)
+        out.chunk_records[0]["attempts"] = [empty]
+        return out
+
+    env.outcome = outcome
+    env.render()
+    assert env.manifests()[0]["gemini_phase"]["tokens"]["asr_thinking"] == 0
+
+
 def test_a_chunk_with_no_progress_makes_every_total_unknown(env):
     def outcome(chunks):
         out = failed_outcome("child_no_result", chunks=2)
@@ -453,12 +527,42 @@ def test_renderer_version_is_unchanged():
     assert cache.RENDERER_VERSION == "2"
 
 
-def test_an_unexpected_phase_exception_is_loud_with_a_failed_manifest(env):
+def test_an_exception_escaping_the_phase_costs_an_openai_episode_not_the_episode(env):
     env.outcome = RuntimeError("runner bug")
-    with pytest.raises(RuntimeError, match="runner bug"):
-        env.render()
+    result = env.render()
+    assert result.provider == "openai" and result.rendered == FALLBACK
+    assert result.fallback_reason == "runner_error"
+    assert MARK not in env.encoded[0]
+    (alert,) = env.alerts
+    assert alert.endswith("runner_error -> OpenAI nova rendered")
+    [m] = env.manifests()
+    phase = m["gemini_phase"]
+    assert (phase["outcome"], phase["reason"]) == ("failed", "runner_error")
+    assert (
+        "RuntimeError: runner bug" in phase["detail"] and "Traceback" in phase["detail"]
+    )
+    assert m["fallback_reason"] == "runner_error" and m["alert_sent"] is True
+    assert env.cache_result()["fallback_reason"] == "runner_error"
+    # Nothing is known about what the phase cost: unknown, not zero.
+    assert set(phase["tokens"].values()) == {None}
+    assert phase["audio_seconds_generated"] is None
+
+
+def test_an_exception_escaping_the_phase_without_a_fallback_raises_from_it(env):
+    env.outcome = RuntimeError("runner bug")
+    with pytest.raises(render.TTSRenderError, match="runner_error") as info:
+        env.render(CFG_NO_FALLBACK)
+    assert isinstance(info.value.__cause__, RuntimeError)
     assert env.alerts == [] and env.openai.calls == []
-    assert env.manifests()[0]["status"] == "failed"
+    [m] = env.manifests()
+    assert m["status"] == "failed" and m["gemini_phase"]["reason"] == "runner_error"
+
+
+def test_system_exit_in_the_phase_propagates_too(env):
+    env.outcome = SystemExit(3)
+    with pytest.raises(SystemExit):
+        env.render()
+    assert env.openai.calls == [] and env.alerts == []
 
 
 def test_keyboard_interrupt_in_the_phase_is_not_turned_into_a_fallback(env):

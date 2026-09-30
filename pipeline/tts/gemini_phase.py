@@ -106,6 +106,10 @@ REASON_CHILD_ERROR = "child_error"
 REASON_CHILD_NO_RESULT = "child_no_result"
 REASON_INVALID_RESULT = "invalid_result"
 REASON_SPAWN_FAILED = "spawn_failed"
+# Parent-side only: an exception escaped ``run_gemini_phase`` itself (a bug in the
+# runner). ``render_episode`` converts it, so a Gemini problem of any kind costs
+# an OpenAI episode and never the episode.
+REASON_RUNNER_ERROR = "runner_error"
 FALLBACK_REASONS = frozenset(
     {
         REASON_FATAL,
@@ -117,6 +121,7 @@ FALLBACK_REASONS = frozenset(
         REASON_CHILD_NO_RESULT,
         REASON_INVALID_RESULT,
         REASON_SPAWN_FAILED,
+        REASON_RUNNER_ERROR,
     }
 )
 
@@ -1039,3 +1044,21 @@ def run_gemini_phase(
                     f"alive after kill; leaving {scratch} in place",
                     file=sys.stderr,
                 )
+
+
+def runner_error_outcome(exc: BaseException, *, elapsed_s: float) -> PhaseOutcome:
+    """The outcome for an exception that escaped ``run_gemini_phase``.
+
+    No chunk records: nothing is known about what the phase did or cost, and the
+    manifest reports that as unknown rather than zero. The detail is the
+    traceback, capped like a ``child_error``'s (and logged to stderr).
+    """
+    return PhaseOutcome(
+        ok=False,
+        reason=REASON_RUNNER_ERROR,
+        detail=_describe(exc),
+        pcm_parts=None,
+        chunk_records=[],
+        elapsed_s=elapsed_s,
+        spawn_s=0.0,
+    )
