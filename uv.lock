@@ -616,6 +616,7 @@ dependencies = [
     { name = "feedparser" },
     { name = "google-genai" },
     { name = "markdown" },
+    { name = "openai" },
     { name = "requests" },
     { name = "trafilatura" },
 ]
@@ -640,6 +641,7 @@ requires-dist = [
     { name = "feedparser", specifier = ">=6.0.12" },
     { name = "google-genai", specifier = ">=1.65.0" },
     { name = "markdown", specifier = ">=3.7" },
+    { name = "openai", specifier = ">=2.0.0" },
     { name = "requests", specifier = ">=2.32.0" },
     { name = "trafilatura", specifier = ">=2.0.0" },
 ]

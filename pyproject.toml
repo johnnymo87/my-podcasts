@@ -17,6 +17,7 @@ dependencies = [
     "trafilatura>=2.0.0",
     "google-genai>=1.65.0",
     "markdown>=3.7",
+    "openai>=2.0.0",
 ]
 
 
