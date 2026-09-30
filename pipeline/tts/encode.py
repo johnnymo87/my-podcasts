@@ -1,4 +1,6 @@
-"""Encode the joined PCM once, matching today's published format exactly:
+"""Changing output here requires bumping cache.RENDERER_VERSION.
+
+Encode the joined PCM once, matching today's published format exactly:
 mp3, 24 kHz, mono, 32 kbps (measured on published episodes 2026-09-30)."""
 
 from __future__ import annotations
@@ -6,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 from pipeline.tts.config import PCM_SAMPLE_RATE
@@ -23,7 +26,12 @@ def encode_mp3(pcm: bytes, out_mp3: Path) -> None:
     later reuse would otherwise ship it) and never clobbers a previous good one.
     """
     rate = str(PCM_SAMPLE_RATE)
-    tmp = out_mp3.with_name(out_mp3.name + ".tmp")
+    # Unique per call: two encodes targeting one out_mp3 must not share a temp.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=out_mp3.parent, prefix=out_mp3.name + ".", suffix=".tmp"
+    )
+    os.close(fd)  # ffmpeg -y overwrites the empty placeholder
+    tmp = Path(tmp_name)
     try:
         try:
             subprocess.run(

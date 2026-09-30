@@ -82,3 +82,44 @@ def test_prune_removes_old_entries_only(tmp_path) -> None:
     assert not (d / "old").exists()
     assert (d / "new").exists()
     json.loads((d / "new" / "result.json").read_text())
+
+
+def test_store_replaces_corrupt_existing_entry(tmp_path) -> None:
+    d = tmp_path / "c"
+    for name, files in {
+        "half": {"audio.mp3": b"x"},  # no result.json
+        "empty": {"audio.mp3": b"", "result.json": b"{}"},
+        "badjson": {"audio.mp3": b"x", "result.json": b"{nope"},
+    }.items():
+        (d / name).mkdir(parents=True)
+        for fname, data in files.items():
+            (d / name / fname).write_bytes(data)
+        assert cache.lookup(d, name) is None
+        assert cache.store(d, name, _mp3(tmp_path, b"fresh"), {"n": 1})
+        hit = cache.lookup(d, name)
+        assert hit is not None and hit.audio.read_bytes() == b"fresh"
+    assert not [p for p in d.iterdir() if p.name.startswith(".tmp-")]
+
+
+def test_prune_survives_one_entry_stat_failure(tmp_path, monkeypatch) -> None:
+    d = tmp_path / "c"
+    names = ["a", "b", "c", "d"]
+    old_time = time.time() - 20 * 86400
+    for n in names:
+        cache.store(d, n, _mp3(tmp_path), {})
+        os.utime(d / n, (old_time, old_time))
+    real_is_dir = type(d).is_dir
+    failed: list[str] = []
+
+    def flaky_once(self):
+        if self.parent == d and not failed:
+            failed.append(self.name)
+            raise FileNotFoundError("raced away")
+        return real_is_dir(self)
+
+    monkeypatch.setattr(type(d), "is_dir", flaky_once)
+    cache.prune(d, max_age_days=14)
+    monkeypatch.undo()
+    [raced] = failed
+    assert (d / raced).exists()  # skipped, not fatal
+    assert [n for n in names if n != raced and (d / n).exists()] == []

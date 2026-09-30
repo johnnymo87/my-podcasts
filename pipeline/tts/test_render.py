@@ -275,3 +275,96 @@ def test_malformed_cache_result_does_not_fail_hit(harness) -> None:
     (entry / "result.json").write_text('{"chunks": "many", "provider": "openai"}')
     hit = _run(tmp)
     assert hit.cached and hit.chunks == 0 and hit.provider == "openai"
+
+
+def test_cache_hit_copy_failure_is_atomic_and_falls_back(harness, monkeypatch) -> None:
+    provider, _, tmp = harness
+    _run(tmp)
+    first_calls = len(provider.calls)
+    out = tmp / "out.mp3"
+    out.write_bytes(b"previous good file")
+
+    real_copy = render.shutil.copyfile
+
+    def partial_then_fail(src, dst, *a, **kw):
+        if str(src).startswith(str(tmp / "c")):
+            with open(dst, "wb") as f:
+                f.write(b"PARTIAL")
+            raise OSError("disk full")
+        return real_copy(src, dst, *a, **kw)
+
+    monkeypatch.setattr(render.shutil, "copyfile", partial_then_fail)
+    # Re-render path must not be poisoned by the failed copy.
+    result = _run(tmp)
+    assert not result.cached and len(provider.calls) > first_calls
+    assert out.read_bytes().startswith(b"ID3")  # re-rendered, not PARTIAL
+    assert sorted(p.name for p in tmp.iterdir() if p.name.startswith("out.mp3")) == [
+        "out.mp3"
+    ]
+
+
+def test_cache_hit_copy_failure_never_exposes_partial_file(
+    harness, monkeypatch
+) -> None:
+    provider, encoded, tmp = harness
+    _run(tmp)
+    out = tmp / "out.mp3"
+    out.write_bytes(b"previous good file")
+    seen: list[bytes] = []
+
+    def partial_then_fail(src, dst, *a, **kw):
+        with open(dst, "wb") as f:
+            f.write(b"PARTIAL")
+        raise OSError("disk full")
+
+    def spy_encode(pcm, dest):
+        seen.append(out.read_bytes())  # state of out_mp3 when re-render begins
+        dest.write_bytes(b"ID3re")
+
+    monkeypatch.setattr(render.shutil, "copyfile", partial_then_fail)
+    monkeypatch.setattr(render, "encode_mp3", spy_encode)
+    result = _run(tmp)
+    assert not result.cached
+    assert seen == [b"previous good file"]
+
+
+def test_retry_logs_warning_with_chunk_attempt_error_and_delay(harness, caplog) -> None:
+    provider, _, tmp = harness
+    provider.script = [TTSProviderError("boom503", retryable=True), None]
+    with caplog.at_level("WARNING", logger="pipeline.tts.render"):
+        _run(tmp)
+    [rec] = [r for r in caplog.records if r.levelname == "WARNING"]
+    msg = rec.getMessage()
+    assert "chunk 1/" in msg and "attempt 1" in msg
+    assert "boom503" in msg and "2.0" in msg
+
+
+def test_backoff_schedule_must_match_attempts() -> None:
+    render._check_retry_schedule(3, (2.0, 8.0))
+    with pytest.raises(RuntimeError, match="BACKOFF_SECONDS"):
+        render._check_retry_schedule(4, (2.0, 8.0))
+
+
+def test_manifest_has_chunk_count_finished_at_and_out_bytes(harness) -> None:
+    _, _, tmp = harness
+    rendered = _run(tmp)
+    data = json.loads(rendered.manifest_path.read_text())
+    assert data["chunk_count"] == rendered.chunks == len(data["chunks"])
+    assert data["finished_at"] >= data["started_at"]
+    assert data["out_bytes"] == (tmp / "out.mp3").stat().st_size
+
+    hit = _run(tmp)
+    hdata = json.loads(hit.manifest_path.read_text())
+    assert hdata["chunk_count"] == hit.chunks
+    assert hdata["finished_at"] and hdata["out_bytes"] == data["out_bytes"]
+
+
+def test_failed_manifest_has_chunk_count_and_finished_at(harness) -> None:
+    provider, _, tmp = harness
+    provider.script = [TTSProviderError("401", retryable=False)]
+    with pytest.raises(render.TTSRenderError):
+        _run(tmp)
+    [manifest] = (tmp / "m" / "fp-digest").glob("*.json")
+    data = json.loads(manifest.read_text())
+    assert data["chunk_count"] >= 2 and data["finished_at"]
+    assert data["out_bytes"] is None

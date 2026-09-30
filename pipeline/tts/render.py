@@ -7,9 +7,12 @@ say what to render with via ``RenderConfig`` and which feed/episode it is for.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
+import os
 import shutil
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -34,6 +37,18 @@ log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = (2.0, 8.0)  # sleep before attempt 2, before attempt 3
+
+
+def _check_retry_schedule(max_attempts: int, backoff: tuple[float, ...]) -> None:
+    """One backoff delay sits between each pair of attempts."""
+    if len(backoff) != max_attempts - 1:
+        raise RuntimeError(
+            f"BACKOFF_SECONDS has {len(backoff)} delays but MAX_ATTEMPTS="
+            f"{max_attempts} needs {max_attempts - 1}"
+        )
+
+
+_check_retry_schedule(MAX_ATTEMPTS, BACKOFF_SECONDS)
 
 
 @dataclass(frozen=True)
@@ -66,6 +81,56 @@ def _close(provider) -> None:
         provider.close()
     except Exception:  # noqa: BLE001 -- never discard valid audio over a close
         log.warning("TTS provider close failed", exc_info=True)
+
+
+def _synthesize_chunk(provider, config: RenderConfig, chunk: str, rec: dict, n: int):
+    """One chunk to PCM, retrying retryable provider errors with backoff."""
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        rec["attempts"] = attempt
+        try:
+            return provider.synthesize(chunk, config)
+        except TTSProviderError as exc:
+            rec["errors"].append(str(exc))
+            if not exc.retryable or attempt == MAX_ATTEMPTS:
+                raise TTSRenderError(
+                    f"chunk {rec['index'] + 1}/{n} failed after "
+                    f"{attempt} attempt(s): {exc}"
+                ) from exc
+            delay = BACKOFF_SECONDS[attempt - 1]
+            log.warning(
+                "TTS chunk %d/%d attempt %d/%d failed (%s); retrying in %.1fs",
+                rec["index"] + 1,
+                n,
+                attempt,
+                MAX_ATTEMPTS,
+                exc,
+                delay,
+            )
+            _sleep(delay)
+    raise AssertionError("unreachable: the last attempt returns or raises")
+
+
+def _copy_atomic(src: Path, dst: Path) -> None:
+    """Copy ``src`` to ``dst`` so ``dst`` is never partial and never clobbered
+    on failure."""
+    fd, tmp_name = tempfile.mkstemp(
+        dir=dst.parent, prefix=dst.name + ".", suffix=".tmp"
+    )
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dst)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            tmp.unlink()
+
+
+def _size_or_none(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
 
 
 def _cached_stats(result: dict, config: RenderConfig) -> tuple[int, float, str]:
@@ -116,8 +181,10 @@ def render_episode(
         "config": asdict(config),
         "rendered_provider": None,
         "cached": False,
+        "chunk_count": None,
         "chunks": chunk_records,
         "total_audio_seconds": 0.0,
+        "out_bytes": None,
         "cache_stored": False,
         "status": "failed",
         "error": None,
@@ -125,6 +192,7 @@ def render_episode(
 
     def emit() -> Path | None:
         record["wall_seconds"] = round(time.monotonic() - started_mono, 3)
+        record["finished_at"] = datetime.now(UTC).isoformat()
         if chunk_records:  # a cache hit carries its stored total instead
             record["total_audio_seconds"] = sum(
                 c["audio_seconds"] for c in chunk_records
@@ -142,7 +210,7 @@ def render_episode(
         hit = lookup(cache_dir, key)
         if hit is not None:
             try:
-                shutil.copyfile(hit.audio, out_mp3)
+                _copy_atomic(hit.audio, out_mp3)
             except OSError as exc:
                 log.warning("TTS cache hit unusable (%s); re-rendering", exc)
             else:
@@ -152,6 +220,8 @@ def render_episode(
                     cached=True,
                     rendered_provider=provider_name,
                     total_audio_seconds=seconds,
+                    chunk_count=n_chunks,
+                    out_bytes=_size_or_none(out_mp3),
                 )
                 path = emit()
                 log.info(
@@ -171,9 +241,11 @@ def render_episode(
                 )
 
     provider = None
+    chunks: list[str] = []
     try:
         provider = _provider_for(config)
         chunks = chunk_text(text, ceiling=provider.max_chars)
+        record["chunk_count"] = len(chunks)
         pcm_parts: list[bytes] = []
         for i, chunk in enumerate(chunks):
             rec = {
@@ -184,20 +256,7 @@ def render_episode(
                 "audio_seconds": 0.0,
             }
             chunk_records.append(rec)
-            for attempt in range(MAX_ATTEMPTS):
-                rec["attempts"] = attempt + 1
-                try:
-                    pcm = provider.synthesize(chunk, config)
-                except TTSProviderError as exc:
-                    rec["errors"].append(str(exc))
-                    if not exc.retryable or attempt == MAX_ATTEMPTS - 1:
-                        raise TTSRenderError(
-                            f"chunk {i + 1}/{len(chunks)} failed after "
-                            f"{rec['attempts']} attempt(s): {exc}"
-                        ) from exc
-                    _sleep(BACKOFF_SECONDS[attempt])
-                else:
-                    break
+            pcm = _synthesize_chunk(provider, config, chunk, rec, len(chunks))
             rec["audio_seconds"] = len(pcm) / PCM_BYTES_PER_SECOND
             pcm_parts.append(pcm)
 
@@ -225,7 +284,11 @@ def render_episode(
                 "total_audio_seconds": total_seconds,
             },
         )
-    record.update(status="rendered", rendered_provider=config.provider)
+    record.update(
+        status="rendered",
+        rendered_provider=config.provider,
+        out_bytes=_size_or_none(out_mp3),
+    )
     path = emit()
     log.info(
         "TTS render: provider=%s chunks=%d audio=%.1fs wall=%.1fs cached=False",

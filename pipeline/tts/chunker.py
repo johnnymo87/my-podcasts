@@ -1,4 +1,6 @@
-"""Lossless, paragraph-aware text partition for TTS.
+"""Changing output here requires bumping cache.RENDERER_VERSION.
+
+Lossless, paragraph-aware text partition for TTS.
 
 Replaces tts-joinery's nltk sentence packing. No nltk: its tokenizer data is
 fetched from the network at runtime (bead my-podcasts-4ld).

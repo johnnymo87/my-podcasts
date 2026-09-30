@@ -7,6 +7,7 @@ discard valid audio (design doc, "Completed-render reuse").
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -76,12 +77,16 @@ def store(cache_dir: Path, key: str, mp3: Path, result: dict) -> bool:
         )
         target = cache_dir / key
         if target.exists():
-            return True
+            if lookup(cache_dir, key) is not None:
+                return True  # a valid entry already stands; keep the first
+            # Corrupt/empty/half entry: it would miss on every lookup and block
+            # the rename forever. Clear it so this fresh render can land.
+            shutil.rmtree(target, ignore_errors=True)
         try:
             os.rename(tmp, target)
             tmp = None
         except OSError:
-            if target.exists():  # lost a race; the first writer's entry stands
+            if lookup(cache_dir, key) is not None:  # lost a race to a valid entry
                 return True
             raise
         return True
@@ -99,7 +104,8 @@ def prune(
     try:
         cutoff = (now if now is not None else time.time()) - max_age_days * 86400
         for entry in cache_dir.iterdir():
-            if entry.is_dir() and entry.stat().st_mtime < cutoff:
-                shutil.rmtree(entry, ignore_errors=True)
+            with contextlib.suppress(OSError):  # one raced entry must not end the pass
+                if entry.is_dir() and entry.stat().st_mtime < cutoff:
+                    shutil.rmtree(entry, ignore_errors=True)
     except Exception:  # noqa: BLE001
         return

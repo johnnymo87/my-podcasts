@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -67,11 +68,41 @@ def test_encode_real_ffmpeg_produces_24k_mono_32kbps(tmp_path) -> None:
     assert 31_000 <= int(bit_rate) <= 33_000
 
 
-@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
-def test_encode_failure_raises_runtime_error_with_ffmpeg_text(tmp_path) -> None:
-    out = tmp_path / "no-such-dir" / "x.mp3"
-    with pytest.raises(RuntimeError, match=r"ffmpeg exited \d+: .*[Nn]o such file"):
-        encode.encode_mp3(b"\x00\x00" * 100, out)
+def test_real_subprocess_failure_raises_runtime_error_with_stderr(
+    monkeypatch, tmp_path
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "ffmpeg"
+    fake.write_text("#!/bin/sh\ncat >/dev/null\necho 'No such thing' >&2\nexit 3\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    with pytest.raises(RuntimeError, match=r"ffmpeg exited 3: No such thing"):
+        encode.encode_mp3(b"\x00\x00" * 100, out_dir / "x.mp3")
+    assert list(out_dir.iterdir()) == []
+
+
+def test_missing_output_dir_raises_oserror_not_runtime_error(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError):
+        encode.encode_mp3(b"\x00\x00", tmp_path / "no-such-dir" / "x.mp3")
+
+
+def test_concurrent_encodes_use_distinct_temp_files(monkeypatch, tmp_path) -> None:
+    temps = []
+
+    def fake_run(cmd, **kwargs):
+        temps.append(cmd[-1])
+        Path(cmd[-1]).write_bytes(b"mp3")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(encode.subprocess, "run", fake_run)
+    out = tmp_path / "x.mp3"
+    encode.encode_mp3(b"\x00\x00", out)
+    encode.encode_mp3(b"\x00\x00", out)
+    assert all(t.endswith(".tmp") and Path(t).name.startswith("x.mp3.") for t in temps)
+    assert list(tmp_path.iterdir()) == [out]
 
 
 def test_failed_encode_leaves_no_output_or_temp_file(monkeypatch, tmp_path) -> None:
