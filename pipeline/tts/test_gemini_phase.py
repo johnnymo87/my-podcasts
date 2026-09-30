@@ -123,6 +123,20 @@ def _far() -> float:
     return time.monotonic() + 1000.0
 
 
+def main_child(
+    scratch, *, parent_pid=1, fac=None, bootstrap=None, deadline=None, chunks=(TEXT,)
+):
+    """Write the child's input file, then call the spawn target in-process."""
+    gp._write_input(scratch, list(chunks), LEAF)
+    gp._child_main(
+        str(scratch),
+        deadline if deadline is not None else _far(),
+        parent_pid,
+        fac or factories("ok"),
+        bootstrap,
+    )
+
+
 def _run(provider, asr, scratch, *, deadline=None, sleeps=None, abort=None, chunk=TEXT):
     sleeps = sleeps if sleeps is not None else Sleeps()
     abort = abort if abort is not None else threading.Event()
@@ -631,14 +645,11 @@ def test_child_main_runs_watchdog_then_bootstrap_then_factories(
         return Provider([PCM])
 
     with pytest.raises(_Exited) as info:
-        gp._child_main(
-            [TEXT],
-            LEAF,
-            _far(),
-            str(scratch),
-            4242,
-            (make_provider, Asr([TEXT]).make),
-            lambda: order.append("bootstrap"),
+        main_child(
+            scratch,
+            parent_pid=4242,
+            fac=(make_provider, Asr([TEXT]).make),
+            bootstrap=lambda: order.append("bootstrap"),
         )
     assert info.value.code == 0
     # The bootstrap (network denial) must precede anything that could build a
@@ -649,7 +660,7 @@ def test_child_main_runs_watchdog_then_bootstrap_then_factories(
 
 def test_child_main_hands_the_parent_pid_to_the_watchdog(scratch, child_env):
     with pytest.raises(_Exited):
-        gp._child_main([TEXT], LEAF, _far(), str(scratch), 4242, factories("ok"), None)
+        main_child(scratch, parent_pid=4242)
     assert child_env[0][0] == 4242
 
 
@@ -658,9 +669,7 @@ def test_child_main_exits_even_on_a_base_exception(scratch, child_env):
         raise KeyboardInterrupt
 
     with pytest.raises(_Exited) as info:
-        gp._child_main(
-            [TEXT], LEAF, _far(), str(scratch), 1, factories("ok"), bootstrap
-        )
+        main_child(scratch, bootstrap=bootstrap)
     assert info.value.code == 1  # no result was written: the parent sees no_result
     assert not (scratch / gp.RESULT_NAME).exists()
 
@@ -688,7 +697,7 @@ def test_child_main_flushes_std_streams_before_exiting(scratch, child_env, monke
 
     monkeypatch.setattr(gp, "_hard_exit", recording_exit)
     with pytest.raises(_Exited):
-        gp._child_main([TEXT], LEAF, _far(), str(scratch), 1, factories("ok"), None)
+        main_child(scratch)
     assert events[-3:] == ["flush-out", "flush-err", "exit"]
 
 
@@ -697,9 +706,7 @@ def test_child_main_bootstrap_failure_is_child_error(scratch, child_env):
         raise RuntimeError("bootstrap broke")
 
     with pytest.raises(_Exited) as info:
-        gp._child_main(
-            [TEXT], LEAF, _far(), str(scratch), 1, factories("ok"), bootstrap
-        )
+        main_child(scratch, bootstrap=bootstrap)
     assert info.value.code == 0
     result = json.loads((scratch / gp.RESULT_NAME).read_text())
     assert result["reason"] == gp.REASON_CHILD_ERROR
@@ -712,17 +719,18 @@ def test_child_main_exits_nonzero_when_the_result_cannot_be_written(
     def boom(*a, **k):
         raise OSError("disk full")
 
+    gp._write_input(scratch, [TEXT], LEAF)  # before the disk "fills"
     monkeypatch.setattr(gp, "_atomic_write", boom)
     with pytest.raises(_Exited) as info:
-        gp._child_main([TEXT], LEAF, _far(), str(scratch), 1, factories("ok"), None)
+        gp._child_main(str(scratch), _far(), 1, factories("ok"), None)
     assert info.value.code == 1
 
 
 def test_child_main_arguments_are_picklable(scratch):
     import pickle
 
-    args = ([TEXT], LEAF, 123.0, str(scratch), 1, factories("ok"), None)
-    assert pickle.loads(pickle.dumps(args))[0] == [TEXT]
+    args = (str(scratch), 123.0, 1, factories("ok"), None)
+    assert pickle.loads(pickle.dumps(args))[0] == str(scratch)
 
 
 # --- watchdog ------------------------------------------------------------------
@@ -1074,7 +1082,7 @@ class FakeProc:
         self.args = args
         self._unkillable = unkillable  # kill() is sent but the process lives on
         self._kill_raises = kill_raises
-        self.scratch = Path(args[3])
+        self.scratch = Path(args[0])
         self._on_start = on_start
         self._on_kill = on_kill
         self._exits = exits  # exits right after start (having run on_start)
@@ -1118,7 +1126,8 @@ class FakeProc:
 
 
 def run_child_inline(proc, deadline=None):
-    chunks, leaf, own_deadline, scratch, _ppid, fac, _boot = proc.args
+    scratch, own_deadline, _ppid, fac, _boot = proc.args
+    chunks, leaf = gp._read_input(Path(scratch))
     gp._run_child(chunks, leaf, deadline or own_deadline, scratch, fac)
 
 
@@ -1128,7 +1137,7 @@ def phase(monkeypatch, tmp_path):
     roots = tmp_path / "roots"
     procs: list[FakeProc] = []
 
-    def run(make_proc, *, n=2, budget_s=5.0, fac=None):
+    def run(make_proc, *, n=2, budget_s=5.0, fac=None, chunks=None):
         def _make(args):
             proc = make_proc(args)
             procs.append(proc)
@@ -1136,7 +1145,7 @@ def phase(monkeypatch, tmp_path):
 
         monkeypatch.setattr(gp, "_make_process", _make)
         outcome = gp.run_gemini_phase(
-            make_chunks(n),
+            make_chunks(n) if chunks is None else chunks,
             LEAF,
             budget_s=budget_s,
             scratch_root=roots,
@@ -1282,7 +1291,7 @@ def test_the_child_gets_one_absolute_deadline_computed_before_start(phase):
     seen = {}
 
     def start(proc):
-        seen["deadline"] = proc.args[2]
+        seen["deadline"] = proc.args[1]
         seen["at_start"] = time.monotonic()
         run_child_inline(proc)
 
@@ -1305,7 +1314,7 @@ def test_the_child_receives_only_picklable_arguments(phase):
         fac=factories("ok"),
     )
     pickle.dumps(captured["args"])
-    assert captured["args"][4] == os.getpid()  # parent pid, for the watchdog
+    assert captured["args"][2] == os.getpid()  # parent pid, for the watchdog
 
 
 def test_child_reported_start_time_is_used_when_available(phase):
@@ -1335,7 +1344,7 @@ def test_child_reported_start_time_is_none_when_absent_or_bad(phase):
 def test_child_main_reports_when_it_started(scratch, child_env):
     before = time.monotonic()
     with pytest.raises(_Exited):
-        gp._child_main([TEXT], LEAF, _far(), str(scratch), 1, factories("ok"), None)
+        main_child(scratch)
     started = json.loads((scratch / gp.STARTED_NAME).read_text())
     assert started["pid"] == os.getpid()
     assert before <= started["monotonic"] <= time.monotonic()
@@ -1475,3 +1484,97 @@ def test_read_progress_flags_attempts_that_are_not_dicts(scratch):
     )
     (record,) = gp._read_progress(scratch, 1)
     assert record == {"index": 0, "attempts": [], "progress": "unreadable"}
+
+
+# --- the child reads its input from a file, not through the spawn pipe --------------
+
+
+def test_input_roundtrips_chunks_and_leaf(scratch):
+    chunks = ["Chunk 0 one", 'Chunk 1 \u00e9t\u00e9 "quoted" \n\n two']
+    gp._write_input(scratch, chunks, GeminiConfig("m", "Kore", style="calm"))
+    got_chunks, got_leaf = gp._read_input(scratch)
+    assert got_chunks == chunks
+    assert got_leaf == GeminiConfig("m", "Kore", style="calm")
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,  # no file at all
+        b"\xff\xfe not utf8",
+        b"{not json",
+        b"[]",
+        b'{"schema": 99, "chunks": ["a"], "leaf": {}}',
+        b'{"schema": 1, "chunks": "abc", "leaf": {}}',
+        b'{"schema": 1, "chunks": [], "leaf": {"provider": "gemini"}}',
+        b'{"schema": 1, "chunks": ["a", ""], "leaf": {"provider": "gemini",'
+        b' "model": "m", "voice": "Kore", "style": ""}}',
+        b'{"schema": 1, "chunks": ["a", 5], "leaf": {"provider": "gemini",'
+        b' "model": "m", "voice": "Kore", "style": ""}}',
+        b'{"schema": 1, "chunks": ["a"], "leaf": {"provider": "openai",'
+        b' "model": "m", "voice": "nova"}}',
+        b'{"schema": 1, "chunks": ["a"], "leaf": {"provider": "gemini",'
+        b' "model": "m", "voice": "nova", "style": ""}}',
+    ],
+)
+def test_unusable_input_is_refused(scratch, content):
+    if content is not None:
+        (scratch / gp.INPUT_NAME).write_bytes(content)
+    with pytest.raises(gp._InputError):
+        gp._read_input(scratch)
+
+
+@pytest.mark.parametrize("break_it", ["missing", "garbage", "wrong_leaf"])
+def test_child_main_with_bad_input_is_child_error(scratch, child_env, break_it):
+    gp._write_input(scratch, [TEXT], LEAF)
+    path = scratch / gp.INPUT_NAME
+    if break_it == "missing":
+        path.unlink()
+    elif break_it == "garbage":
+        path.write_text("{oops")
+    else:
+        data = json.loads(path.read_text())
+        data["leaf"] = {"provider": "openai", "model": "m", "voice": "nova"}
+        path.write_text(json.dumps(data))
+    with pytest.raises(_Exited) as info:
+        gp._child_main(str(scratch), _far(), 1, factories("ok"), None)
+    assert info.value.code == 0
+    result = json.loads((scratch / gp.RESULT_NAME).read_text())
+    assert result["reason"] == gp.REASON_CHILD_ERROR
+    assert "input" in result["detail"]
+
+
+def test_the_runner_writes_the_input_before_start_and_passes_only_small_args(phase):
+    import pickle
+
+    big = [f"Chunk {i} " + "x" * 3000 for i in range(60)]  # a 180 KB episode
+    seen = {}
+
+    def start(proc):
+        seen["args_bytes"] = len(pickle.dumps(proc.args))
+        seen["input"] = gp._read_input(proc.scratch)  # already on disk at start()
+
+    outcome, _, _ = phase(lambda a: FakeProc(a, on_start=start, exits=True), chunks=big)
+    assert seen["args_bytes"] < 5_000  # nothing of the episode rides the spawn pipe
+    assert seen["input"] == (big, LEAF)
+    assert outcome.reason == gp.REASON_CHILD_NO_RESULT  # the fake never ran a child
+
+
+def test_an_unwritable_input_is_spawn_failed_and_nothing_is_spawned(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        gp, "_make_process", lambda a: pytest.fail("must not spawn without input")
+    )
+
+    def boom(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(gp, "_write_input", boom)
+    roots = tmp_path / "roots"
+    outcome = gp.run_gemini_phase(
+        make_chunks(2), LEAF, budget_s=5.0, scratch_root=roots
+    )
+    assert (outcome.ok, outcome.reason) == (False, gp.REASON_SPAWN_FAILED)
+    assert "disk full" in outcome.detail
+    assert list(roots.iterdir()) == []  # the scratch dir was still cleaned up

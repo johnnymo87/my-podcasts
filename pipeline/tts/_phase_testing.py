@@ -25,7 +25,8 @@ Behaviors (``factories(behavior, chunk=...)``):
 ``omission_on_chunk``       the transcript of ``chunk`` covers only its first words
 ``exit_on_build``           building the provider calls ``os._exit(1)`` at once
 
-Also here: ``hang_bootstrap`` (a child bootstrap that never returns),
+Also here: ``hang_bootstrap`` / ``stall_bootstrap`` (child bootstraps that never
+return / freeze the process),
 ``wait_for_pid`` / ``pid_gone`` (test-side process checks) and ``parent_main``
 (a parent process for the parent-death test).
 """
@@ -38,6 +39,7 @@ import json
 import multiprocessing
 import os
 import re
+import signal
 import socket
 import time
 import wave
@@ -287,6 +289,16 @@ def hang_bootstrap() -> None:
     child's own watchdog) can end this child."""
     _require_child("hang_bootstrap")
     time.sleep(_BLOCK_SECONDS)
+
+
+def stall_bootstrap() -> None:
+    """Child bootstrap that freezes the whole process (SIGSTOP), watchdog included.
+
+    Models a child that stops making progress at startup. Only the parent's
+    ``kill()`` can end it (SIGKILL works on a stopped process).
+    """
+    _require_child("stall_bootstrap")
+    os.kill(os.getpid(), signal.SIGSTOP)
 
 
 def wait_for_pid(path: str | os.PathLike[str], timeout_s: float) -> int:

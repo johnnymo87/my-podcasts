@@ -39,6 +39,13 @@ Files, all in the parent-created scratch directory and all written atomically
     ``None`` tokens mean *unknown* (the request was killed, or failed before
     reporting usage), never zero. Synth and ASR tokens are separate, and a
     discarded omission attempt keeps its own.
+``input.json``
+    ``{"schema": 1, "chunks": [str, ...], "leaf": asdict(GeminiConfig)}``, written
+    by the PARENT, atomically, before the child starts. The episode text does not
+    travel through ``Process.start()``'s pipe: a child that stopped reading that
+    pipe would block the parent inside ``start()``, past any deadline. The spawn
+    arguments are a few hundred bytes (scratch path, deadline, parent pid, the
+    test seams); the child reads and validates this file itself.
 ``started.json``
     ``{"pid": int, "monotonic": float}``, written by the child as soon as its
     watchdog is up. ``time.monotonic()`` is system-wide on Linux, so the parent
@@ -65,19 +72,18 @@ import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pipeline.tts.asr import GeminiTranscriber, pcm_to_wav
+from pipeline.tts.config import GeminiConfig, leaf_from_dict
 from pipeline.tts.providers import GeminiProvider, TTSProviderError
 from pipeline.tts.verify import verify_audio
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from pipeline.tts.config import GeminiConfig
 
 
 # --- budgets -------------------------------------------------------------------
@@ -134,6 +140,7 @@ CHILD_REASONS = FALLBACK_REASONS - {REASON_RUNNER_ERROR}
 SCHEMA = 1
 RESULT_NAME = "result.json"
 STARTED_NAME = "started.json"
+INPUT_NAME = "input.json"
 POLL_SECONDS = 0.2  # parent: how often to look for result.json
 # Older gemini-phase-* dirs are swept. Must dwarf GEMINI_BUDGET_SECONDS, or the
 # sweep could delete a live phase's scratch dir (asserted just below).
@@ -420,6 +427,44 @@ def _render_chunk_inner(
             raise _ChunkFailure(REASON_SECOND_OMISSION, last_problem)
 
 
+# --- the child's input -----------------------------------------------------------
+
+
+class _InputError(ValueError):
+    """The input file the parent wrote is missing, unreadable or malformed."""
+
+
+def _write_input(scratch: Path | str, chunks: list[str], leaf: GeminiConfig) -> None:
+    _atomic_write_json(
+        Path(scratch) / INPUT_NAME,
+        {"schema": SCHEMA, "chunks": list(chunks), "leaf": asdict(leaf)},
+    )
+
+
+def _read_input(scratch: Path | str) -> tuple[list[str], GeminiConfig]:
+    """The chunks and Gemini leaf the parent asked for; ``_InputError`` if the
+    file cannot be trusted (the child then reports ``child_error``)."""
+    try:
+        data = json.loads((Path(scratch) / INPUT_NAME).read_bytes())
+    except (OSError, ValueError) as exc:
+        raise _InputError(f"input.json unreadable: {exc}") from exc
+    if not isinstance(data, dict) or data.get("schema") != SCHEMA:
+        raise _InputError("input.json has an unknown shape or schema")
+    chunks = data.get("chunks")
+    if not isinstance(chunks, list) or not chunks:
+        raise _InputError("input.json has no chunk list")
+    for i, chunk in enumerate(chunks):
+        if not isinstance(chunk, str) or not chunk:
+            raise _InputError(f"input chunk {i} is not a non-empty string")
+    try:
+        leaf = leaf_from_dict(data.get("leaf"))
+    except ValueError as exc:
+        raise _InputError(f"input leaf invalid: {exc}") from exc
+    if not isinstance(leaf, GeminiConfig):
+        raise _InputError(f"input leaf is {leaf.provider!r}, not gemini")
+    return chunks, leaf
+
+
 # --- the child process ---------------------------------------------------------
 
 
@@ -597,22 +642,22 @@ def _start_watchdog(parent_pid: int, deadline: float) -> threading.Thread:
 
 
 def _child_main(
-    chunks: list[str],
-    leaf: GeminiConfig,
-    deadline: float,
     scratch: str,
+    deadline: float,
     parent_pid: int,
     factories: tuple[Callable[[], Any], Callable[[float], Any]] | None = None,
     bootstrap: Callable[[], Any] | None = None,
 ) -> None:
-    """Spawn target. Module-level, with only picklable arguments.
+    """Spawn target. Module-level, with only small picklable arguments.
 
     Starts the watchdog (before the bootstrap, so a hung bootstrap is bounded
-    too), runs the bootstrap, then ``_run_child``, then exits with ``os._exit``
-    from a ``finally`` (so also after ``KeyboardInterrupt``/``SystemExit``):
-    exit code 0 once a result is on disk, 1 if not even a ``child_error`` result
-    could be written (the parent then reports ``child_no_result``). Code 3 is
-    the watchdog's. stdout/stderr are flushed first, since ``os._exit`` skips it.
+    too), runs the bootstrap, reads its input from ``input.json`` in ``scratch``
+    (unusable input is a ``child_error``), then ``_run_child``, then exits with
+    ``os._exit`` from a ``finally`` (so also after ``KeyboardInterrupt``/
+    ``SystemExit``): exit code 0 once a result is on disk, 1 if not even a
+    ``child_error`` result could be written (the parent then reports
+    ``child_no_result``). Code 3 is the watchdog's. stdout/stderr are flushed
+    first, since ``os._exit`` skips it.
     """
     entered = time.monotonic()
     code = 1  # until a result is on disk
@@ -628,6 +673,7 @@ def _child_main(
                 pass
             if bootstrap is not None:
                 bootstrap()
+            chunks, leaf = _read_input(scratch)
             _run_child(chunks, leaf, deadline, scratch, factories)
             code = 0
         except Exception as exc:  # noqa: BLE001
@@ -977,19 +1023,13 @@ def run_gemini_phase(
             Path(root).mkdir(parents=True, exist_ok=True)
             _sweep_stale_scratch(root)
             scratch = Path(tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=root))
+            # The episode goes to the child as a file, never through start()'s pipe.
+            _write_input(scratch, chunks, leaf)
         except Exception as exc:  # noqa: BLE001
             return outcome(
                 REASON_SPAWN_FAILED, f"scratch dir: {type(exc).__name__}: {exc}"
             )
-        args = (
-            chunks,
-            leaf,
-            deadline,
-            str(scratch),
-            os.getpid(),
-            _factories,
-            _child_bootstrap,
-        )
+        args = (str(scratch), deadline, os.getpid(), _factories, _child_bootstrap)
         try:
             proc = _make_process(args)
             before_start = time.monotonic()

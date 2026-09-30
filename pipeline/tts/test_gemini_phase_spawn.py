@@ -12,6 +12,7 @@ so a regression fails in seconds instead of hanging the suite.
 from __future__ import annotations
 
 import os
+import pickle
 import signal
 import subprocess
 import sys
@@ -28,6 +29,7 @@ from pipeline.tts._phase_testing import (
     hang_bootstrap,
     make_chunks,
     pid_gone,
+    stall_bootstrap,
     wait_for_pid,
 )
 from pipeline.tts.config import GeminiConfig
@@ -69,14 +71,23 @@ class Run:
         self.budget_s = 0.0
         self.blocked_budget_s = 0.0
 
-    def __call__(self, behavior, *, chunk=None, n=2, budget_s=None, bootstrap=None):
+    def __call__(
+        self,
+        behavior,
+        *,
+        chunk=None,
+        n=2,
+        budget_s=None,
+        bootstrap=None,
+        chunks=None,
+    ):
         if budget_s is None:
             budget_s = self.blocked_budget_s
         self.budget_s = budget_s
         started = time.monotonic()
         try:
             return gp.run_gemini_phase(
-                make_chunks(n),
+                make_chunks(n) if chunks is None else chunks,
                 LEAF,
                 budget_s=budget_s,
                 scratch_root=self.roots,
@@ -176,6 +187,33 @@ def test_a_hung_child_that_never_answers_is_killed_by_the_parent(run):
     out = run("ok", budget_s=3.0, bootstrap=hang_bootstrap)
     assert (out.ok, out.reason) == (False, gp.REASON_DEADLINE)
     assert run.wall <= 3.0 + gp.REAP_TIMEOUT_SECONDS + SLACK_S
+    assert_dead(out.child_pid)
+    run.assert_clean()
+
+
+def test_a_frozen_child_with_a_large_episode_cannot_hold_the_parent_past_the_deadline(
+    run, monkeypatch
+):
+    # 60 chunks x 3000 chars: the episode used to ride the spawn pipe, so a child
+    # that stopped reading could block the parent inside start(), past any
+    # deadline. Now it is a file, and the spawn payload is a few hundred bytes.
+    # The child SIGSTOPs itself (its watchdog freezes with it), so only the
+    # parent's kill can end it.
+    big = [f"Chunk {i} " + "x" * 3000 for i in range(60)]
+    budget = 3.0
+    sizes: list[int] = []
+    real_make = gp._make_process
+
+    def measuring_make(args):
+        sizes.append(len(pickle.dumps(args)))  # what start() pushes down the pipe
+        return real_make(args)
+
+    monkeypatch.setattr(gp, "_make_process", measuring_make)
+    out = run("ok", chunks=big, budget_s=budget, bootstrap=stall_bootstrap)
+    assert sizes and sizes[0] < 5_000 < sum(len(c) for c in big)
+    assert (out.ok, out.reason) == (False, gp.REASON_DEADLINE)
+    assert out.spawn_s < 1.0  # start() did not carry the episode
+    assert run.wall <= budget + gp.POLL_SECONDS + gp.REAP_TIMEOUT_SECONDS + SLACK_S
     assert_dead(out.child_pid)
     run.assert_clean()
 
