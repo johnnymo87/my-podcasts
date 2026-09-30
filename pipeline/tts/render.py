@@ -17,9 +17,11 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+from pipeline.tts import cache as _cache_mod
+from pipeline.tts import manifest as _manifest_mod
 from pipeline.tts.cache import (
-    DEFAULT_CACHE_DIR,
     RENDERER_VERSION,
     cache_key,
     lookup,
@@ -29,11 +31,16 @@ from pipeline.tts.cache import (
 from pipeline.tts.chunker import chunk_text
 from pipeline.tts.config import PCM_BYTES_PER_SECOND, RenderConfig
 from pipeline.tts.encode import encode_mp3
-from pipeline.tts.manifest import DEFAULT_MANIFEST_DIR, prune_manifests, write_manifest
+from pipeline.tts.manifest import prune_manifests, write_manifest
 from pipeline.tts.providers import OpenAIProvider, TTSProviderError
 
 
 log = logging.getLogger(__name__)
+
+# Sentinel for "use the module default, looked up at call time". ``None`` is
+# taken: it means "disabled". Resolving at call time (not at ``def`` time) lets a
+# test redirect the defaults by patching the module constants.
+_DEFAULT: Any = object()
 
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = (2.0, 8.0)  # sleep before attempt 2, before attempt 3
@@ -152,8 +159,8 @@ def render_episode(
     *,
     feed_slug: str,
     episode_id: str,
-    manifest_dir: Path | None = DEFAULT_MANIFEST_DIR,
-    cache_dir: Path | None = DEFAULT_CACHE_DIR,
+    manifest_dir: Path | None = _DEFAULT,
+    cache_dir: Path | None = _DEFAULT,
 ) -> RenderResult:
     """Render ``text`` to ``out_mp3``.
 
@@ -161,10 +168,16 @@ def render_episode(
     for good, and lets anything else (missing API key, encoder failure)
     propagate unwrapped -- those are not retryable and must be loud. Every
     failure after validation still writes a ``status="failed"`` manifest.
-    Cache and manifest problems never fail a render.
+    Cache and manifest problems never fail a render. ``manifest_dir`` /
+    ``cache_dir`` default to the module constants (resolved at call time);
+    ``None`` disables that side effect.
     """
     if not text.strip():
         raise ValueError("cannot render empty text")
+    if manifest_dir is _DEFAULT:
+        manifest_dir = _manifest_mod.DEFAULT_MANIFEST_DIR
+    if cache_dir is _DEFAULT:
+        cache_dir = _cache_mod.DEFAULT_CACHE_DIR
 
     started_mono = time.monotonic()
     started_at = datetime.now(UTC)

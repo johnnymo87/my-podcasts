@@ -168,23 +168,26 @@ def process_blog_post(
 
         # Parse duration
         duration_seconds = None
-        probe = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(output_mp3),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if probe.returncode == 0:
+        try:
+            probe = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    str(output_mp3),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            probe = None  # hung probe: duration unknown, not a failed publish
+        if probe is not None and probe.returncode == 0:
             try:
                 duration_seconds = int(round(float(probe.stdout.strip())))
             except ValueError:

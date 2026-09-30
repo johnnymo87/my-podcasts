@@ -43,3 +43,33 @@ def test_prune_manifests_never_raises(tmp_path) -> None:
     blocker = tmp_path / "f"
     blocker.write_text("x")
     manifest.prune_manifests(blocker)
+
+
+def test_write_manifest_sanitizes_path_components(tmp_path) -> None:
+    path = manifest.write_manifest(
+        tmp_path / "m", feed_slug="../evil/feed", episode_id="a/b/../c", record={}
+    )
+    assert path is not None
+    assert path.resolve().is_relative_to((tmp_path / "m").resolve())
+    assert path.parent.parent == tmp_path / "m"
+    assert "/" not in path.parent.name and not path.parent.name.startswith(".")
+    assert path.name.startswith("a-b-..-c-")
+
+
+def test_write_manifest_dotdot_ids_cannot_escape(tmp_path) -> None:
+    path = manifest.write_manifest(
+        tmp_path / "m", feed_slug="..", episode_id="..", record={}
+    )
+    assert path is not None
+    assert path.resolve().is_relative_to((tmp_path / "m").resolve())
+    assert not path.name.startswith(".")
+
+
+def test_write_manifest_long_episode_id_is_truncated(tmp_path) -> None:
+    path = manifest.write_manifest(
+        tmp_path, feed_slug="fp", episode_id="x" * 300, record={"a": 1}
+    )
+    assert path is not None
+    assert len(path.name) <= 200
+    assert path.name.endswith("Z.json")
+    assert json.loads(path.read_text()) == {"a": 1}

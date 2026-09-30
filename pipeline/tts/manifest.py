@@ -11,6 +11,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +21,13 @@ log = logging.getLogger(__name__)
 
 DEFAULT_MANIFEST_DIR = Path("/persist/my-podcasts/tts-renders")
 RETENTION_DAYS = 60
+_MAX_FILENAME = 200
+_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _safe_component(value: str) -> str:
+    """One path component: no separators, no leading dots, never empty."""
+    return _UNSAFE.sub("-", value).lstrip(".") or "unnamed"
 
 
 def write_manifest(
@@ -27,13 +35,18 @@ def write_manifest(
 ) -> Path | None:
     """Write ``record`` atomically to ``manifest_dir/feed_slug/<id>-<utc>.json``.
 
+    ``feed_slug`` and ``episode_id`` are sanitized to ``[A-Za-z0-9._-]`` (the
+    id is also truncated) so neither can escape ``manifest_dir``.
+
     The timestamp carries microseconds so two attempts in one second do not
     overwrite each other. Returns ``None`` (after a warning) on any failure.
     """
     tmp: Path | None = None
     try:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-        path = manifest_dir / feed_slug / f"{episode_id}-{stamp}.json"
+        suffix = f"-{stamp}.json"
+        safe_id = _safe_component(episode_id)[: _MAX_FILENAME - len(suffix)]
+        path = manifest_dir / _safe_component(feed_slug) / f"{safe_id}{suffix}"
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(

@@ -50,9 +50,12 @@ def _parse_duration_seconds(mp3_path: Path) -> int | None:
         "default=noprint_wrappers=1:nokey=1",
         str(mp3_path),
     ]
-    result = subprocess.run(
-        cmd, check=False, capture_output=True, text=True, timeout=60
-    )
+    try:
+        result = subprocess.run(
+            cmd, check=False, capture_output=True, text=True, timeout=60
+        )
+    except subprocess.TimeoutExpired:
+        return None  # a hung probe means "duration unknown", not a failed publish
     if result.returncode != 0:
         return None
     try:

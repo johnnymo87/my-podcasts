@@ -368,3 +368,24 @@ def test_failed_manifest_has_chunk_count_and_finished_at(harness) -> None:
     data = json.loads(manifest.read_text())
     assert data["chunk_count"] >= 2 and data["finished_at"]
     assert data["out_bytes"] is None
+
+
+def test_default_dirs_resolve_at_call_time(harness, monkeypatch) -> None:
+    from pipeline.tts import cache, manifest
+
+    _, _, tmp = harness
+    monkeypatch.setattr(manifest, "DEFAULT_MANIFEST_DIR", tmp / "dm")
+    monkeypatch.setattr(cache, "DEFAULT_CACHE_DIR", tmp / "dc")
+    result = render.render_episode(
+        TEXT, CFG, tmp / "out.mp3", feed_slug="fp-digest", episode_id="ep"
+    )
+    assert result.manifest_path is not None
+    assert result.manifest_path.is_relative_to(tmp / "dm")
+    assert any((tmp / "dc").iterdir())
+
+
+def test_default_dirs_are_isolated_from_persist_by_fixture(harness) -> None:
+    from pipeline.tts import cache, manifest
+
+    assert not str(manifest.DEFAULT_MANIFEST_DIR).startswith("/persist")
+    assert not str(cache.DEFAULT_CACHE_DIR).startswith("/persist")

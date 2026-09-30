@@ -57,6 +57,9 @@ class OpenAIProvider:
     Use as a context manager, or call ``close()``, to release the HTTP client.
     """
 
+    # Changing the request shape (model/voice/format/params sent to OpenAI) or
+    # ``max_chars`` (which moves chunk boundaries) changes the audio for the same
+    # text: bump ``cache.RENDERER_VERSION`` so stale cache entries are not replayed.
     max_chars = 4096
 
     def __init__(self, *, timeout: float = 120.0) -> None:

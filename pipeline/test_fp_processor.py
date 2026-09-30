@@ -330,3 +330,64 @@ def test_process_fp_digest_job_rejects_empty_script(tmp_path, monkeypatch) -> No
     assert len(store.list_due_fp_digest()) == 1
 
     store.close()
+
+
+def _render_failures():
+    import openai
+
+    from pipeline.tts import TTSRenderError
+
+    return [
+        TTSRenderError("chunk 1/3 failed after 3 attempt(s): OpenAI HTTP 503"),
+        RuntimeError("ffmpeg exited 1: Invalid data found"),
+        openai.OpenAIError("missing key"),
+    ]
+
+
+@pytest.mark.parametrize("failure", _render_failures(), ids=lambda e: type(e).__name__)
+def test_process_fp_digest_job_propagates_render_failure(
+    tmp_path, monkeypatch, failure
+) -> None:
+    """Every renderer failure mode escapes the processor untouched.
+
+    The consumer's ``except Exception`` turns that into the normal job
+    retry/backoff; the processor must neither swallow it nor publish a
+    half-episode (no upload, no episode row, job still pending).
+    """
+    from pipeline.db import StateStore
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+
+    past = (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()
+    store._conn.execute(
+        """INSERT INTO pending_fp_digest
+           (id, date_str, status, process_after)
+           VALUES (?, ?, ?, ?)""",
+        ("fp-job-fail", "2026-03-19", "pending", past),
+    )
+    store._conn.commit()
+
+    script_file = tmp_path / "fp_script.txt"
+    script_file.write_text(
+        "This is the Foreign Policy briefing." + _FILLER, encoding="utf-8"
+    )
+
+    def failing_render(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr("pipeline.tts.render_episode", failing_render)
+    monkeypatch.setattr(
+        "pipeline.fp_processor.regenerate_and_upload_feed",
+        lambda store, r2_client: pytest.fail("feed must not regenerate"),
+    )
+
+    job = store.list_due_fp_digest()[0]
+    with pytest.raises(type(failure)) as excinfo:
+        process_fp_digest_job(job, store, r2_client, script_path=script_file)
+    assert excinfo.value is failure
+
+    r2_client.upload_file.assert_not_called()
+    assert store.list_episodes(feed_slug="fp-digest") == []
+    assert len(store.list_due_fp_digest()) == 1  # still pending for the retry
+    store.close()

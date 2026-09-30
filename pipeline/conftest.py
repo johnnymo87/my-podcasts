@@ -154,3 +154,16 @@ def _block_real_openai_tts(request):
 
     with patch("pipeline.tts.providers._make_openai_client", _refuse):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tts_state_dirs(tmp_path, monkeypatch):
+    """No test may write TTS manifests or cache entries under /persist.
+
+    ``render_episode`` resolves its default dirs at call time, so patching the
+    module constants is enough to redirect every caller that omits the kwargs.
+    """
+    monkeypatch.setattr(
+        "pipeline.tts.manifest.DEFAULT_MANIFEST_DIR", tmp_path / "tts-renders"
+    )
+    monkeypatch.setattr("pipeline.tts.cache.DEFAULT_CACHE_DIR", tmp_path / "tts-cache")
