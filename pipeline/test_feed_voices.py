@@ -23,7 +23,24 @@ from pipeline.db import StateStore
 from pipeline.presets import DEFAULT_PRESET, PRESETS, NewsletterPreset
 from pipeline.processor import process_email_bytes
 from pipeline.script_processor import publish_script
-from pipeline.tts import FEED_VOICES, openai_config, resolve_render_config
+from pipeline.tts import FEED_VOICES, openai_config
+
+
+@pytest.fixture(autouse=True)
+def _stub_probe_and_feed(monkeypatch):
+    monkeypatch.setattr(
+        "pipeline.processor.regenerate_and_upload_feed", lambda store, r2_client: None
+    )
+    monkeypatch.setattr(
+        "pipeline.script_processor.regenerate_and_upload_feed", lambda s, r: None
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="60.0\n"),
+    )
+    monkeypatch.delenv("TTS_MODEL", raising=False)
+    monkeypatch.delenv("TTS_VOICE", raising=False)
 
 
 _EMAIL = b"""\
@@ -48,30 +65,13 @@ def _routable_slugs() -> set[str]:
 
 def test_every_routable_feed_slug_has_an_explicit_feed_voices_entry() -> None:
     """A configured feed must never silently fall through to the default."""
-    assert _routable_slugs() <= set(FEED_VOICES)
+    assert _routable_slugs() - set(FEED_VOICES) == set()
 
 
 def test_presets_and_blog_sources_no_longer_carry_voice_fields() -> None:
     for cls in (NewsletterPreset, BlogSource):
         names = {f.name for f in dataclasses.fields(cls)}
         assert not names & {"tts_voice", "tts_model"}, cls
-
-
-@pytest.fixture(autouse=True)
-def _stub_probe_and_feed(monkeypatch):
-    monkeypatch.setattr(
-        "pipeline.processor.regenerate_and_upload_feed", lambda store, r2_client: None
-    )
-    monkeypatch.setattr(
-        "pipeline.script_processor.regenerate_and_upload_feed", lambda s, r: None
-    )
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="60.0\n"),
-    )
-    monkeypatch.delenv("TTS_MODEL", raising=False)
-    monkeypatch.delenv("TTS_VOICE", raising=False)
 
 
 def _email(tmp_path: Path, route_tag: str | None) -> None:
@@ -112,6 +112,7 @@ def test_email_path_golden(tmp_path, fake_tts_render, route_tag, slug, voice) ->
 
 
 def test_email_env_overrides_still_win(tmp_path, fake_tts_render, monkeypatch) -> None:
+    """A voice-only override keeps the feed's model (tts-1-hd), not a default."""
     monkeypatch.setenv("TTS_VOICE", "shimmer")
     _email(tmp_path, "levine")
     [call] = fake_tts_render
@@ -122,26 +123,15 @@ def test_email_env_overrides_still_win(tmp_path, fake_tts_render, monkeypatch) -
 def test_email_path_empty_env_override_is_an_error(
     tmp_path, fake_tts_render, monkeypatch, var
 ) -> None:
+    # Config is resolved before any LLM work: a bad override must fail first.
+    def _must_not_run(**kwargs):
+        raise AssertionError("transcript rewrite ran before config resolution")
+
+    monkeypatch.setattr("pipeline.processor.maybe_rewrite_transcript", _must_not_run)
     monkeypatch.setenv(var, "")
     with pytest.raises(ValueError):
         _email(tmp_path, "levine")
     assert fake_tts_render == []
-
-
-# feed slug -> voice before this PR, for the paths that own a feed voice
-_FEED_GOLDEN = [
-    (things_happen_processor.FEED_SLUG, "nova"),  # The Rundown processor
-    (fp_processor.FEED_SLUG, "onyx"),  # FP Digest processor
-    (BLOG_SOURCES[0].feed_slug, "fable"),  # aaronson blog poller
-]
-
-
-@pytest.mark.parametrize("slug,voice", _FEED_GOLDEN)
-def test_daily_and_blog_feed_golden(slug: str, voice: str) -> None:
-    # The processors/poller call exactly ``resolve_render_config(<slug>)``; their
-    # own end-to-end tests (test_things_happen_processor, test_fp_processor,
-    # test_blog_poller) assert the same values through the real call paths.
-    assert resolve_render_config(slug) == openai_config(model="tts-1-hd", voice=voice)
 
 
 def test_pinned_slugs_are_what_we_think() -> None:
@@ -153,7 +143,11 @@ def test_pinned_slugs_are_what_we_think() -> None:
 def test_publish_script_default_voice_stays_nova_even_for_fp_digest(
     tmp_path, fake_tts_render
 ) -> None:
-    """Manual publish has always been nova for every feed (changes in T6)."""
+    """Manual publish has always been nova for every feed.
+
+    my-podcasts-9p3.7 (T6 prerequisite) changes the publish_script/CLI voice
+    default to None so it falls through to FEED_VOICES; update this then.
+    """
     script_file = tmp_path / "script.md"
     script_file.write_text("The episode body.", encoding="utf-8")
     store = StateStore(tmp_path / "test.sqlite3")
