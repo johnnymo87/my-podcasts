@@ -438,13 +438,15 @@ class _AlertJob:
 
 
 def _alert_worker_loop() -> None:
-    from pipeline import alerts
-
     while True:
         job = _alert_queue.get()
         if job is _STOP:
             return
         try:
+            # Imported inside the try: a failing import must cost this alert,
+            # not kill the worker and strand every queued job.
+            from pipeline import alerts
+
             # Looked up on the module at call time so a test can replace it.
             job.result = bool(alerts.send_alert(job.text))
         except Exception:  # noqa: BLE001 -- reporting must never disturb anything
@@ -505,6 +507,7 @@ def _deliver_alert(
     queue was full behind a stuck sender: NOT sent). Timed-out and dropped alerts
     are logged in full, so the text is never lost.
     """
+    text = None
     try:
         text = _fallback_alert_text(
             feed_slug, episode_id, primary, reason, fallback, error
@@ -522,7 +525,9 @@ def _deliver_alert(
             return "timeout"
         return job.result
     except Exception:  # noqa: BLE001
-        log.warning("TTS fallback alert could not be sent", exc_info=True)
+        log.warning(
+            "TTS fallback alert could not be sent; text was: %s", text, exc_info=True
+        )
         return False
 
 
