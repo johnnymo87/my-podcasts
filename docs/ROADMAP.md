@@ -96,6 +96,15 @@ on exactly the publisher that matters most**. Worth a look when trending.
 
 ---
 
+## Active project: Gemini TTS migration — epic `my-podcasts-9p3`
+
+Replacing `ttsjoin`/OpenAI `tts-1-hd` with an in-repo renderer, then moving feeds
+to Gemini 3.8 TTS behind whole-episode OpenAI fallback. This project is run on
+beads, not on this file: **`bd ready --parent=my-podcasts-9p3`** says what is
+next, and the epic's `design` field is the runbook. Spec:
+`docs/plans/2026-09-30-gemini-tts-design.md`. Its T1 closes `4ld` (the nltk
+hang). Only the owner closes its listening-gate child.
+
 ## The spine
 
 Ordered. The rationale for the order matters more than the order itself — if a
