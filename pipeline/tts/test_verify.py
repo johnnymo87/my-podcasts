@@ -7,6 +7,7 @@ import pytest
 from pipeline.tts.asr import Transcription, TranscriptionUnavailable
 from pipeline.tts.verify import (
     DEFAULT_THRESHOLDS,
+    VERIFIER_POLICY,
     VERIFIER_VERSION,
     VerifyThresholds,
     analyze,
@@ -208,6 +209,8 @@ def test_verify_audio_pass_records_asr_and_policy():
     assert v.status == "pass"
     assert v.recall is not None and v.recall >= 0.99
     assert v.verifier_version == VERIFIER_VERSION
+    assert v.verifier_policy == VERIFIER_POLICY
+    assert v.to_dict()["verifier_policy"] == VERIFIER_POLICY
     assert v.mode == "chunk"
     assert v.asr.model == "gemini-3.8-flash" and v.asr.finish_reason == "STOP"
     assert v.asr.thinking_tokens == 7
@@ -250,3 +253,18 @@ def test_verdict_serializes():
     d = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t).to_dict()
     assert d["status"] == "pass" and d["asr"]["model"] == "gemini-3.8-flash"
     assert d["analysis"]["recall"] >= 0.99
+
+
+def test_verifier_policy_covers_verifier_and_asr_policy():
+    from pipeline.tts import asr
+
+    assert f"verifier-v{VERIFIER_VERSION}" in VERIFIER_POLICY
+    assert asr.ASR_MODEL in VERIFIER_POLICY
+    assert f"prompt-v{asr.ASR_PROMPT_VERSION}" in VERIFIER_POLICY
+    assert asr.ASR_POLICY in VERIFIER_POLICY
+
+
+def test_unavailable_verdict_also_carries_policy():
+    t, _ = fake_transcriber(exc=TranscriptionUnavailable("asr_timeout", "slow"))
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.verifier_policy == VERIFIER_POLICY

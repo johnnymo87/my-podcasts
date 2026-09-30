@@ -164,6 +164,9 @@ def test_clean_external_transcript_passes(tmp_path, script_file, audio_file, no_
     assert report["script_sha256"] == sha(SCRIPT.encode())
     assert report["thresholds"]["anchor_min"] == 3
     assert report["verifier_version"]
+    assert report["verifier_policy"].startswith(
+        f"verifier-v{report['verifier_version']}|"
+    )
     assert report["analysis"]["status"] == "pass"
     # One-line human summary goes to stderr, JSON alone on stdout.
     assert "pass" in result.stderr.lower()
@@ -837,3 +840,25 @@ def test_timeout_must_be_at_least_one_second(value, script_file, audio_file, no_
     result = run(args_for(audio_file, script_file, "--timeout", value))
 
     assert result.exit_code == 2
+
+
+def test_token_empty_segment_makes_the_run_unavailable(
+    script_file, audio_file, monkeypatch
+):
+    # A reply like "..." is not a transcript. The real transcriber now refuses
+    # it; the CLI also guards per segment, so a transcriber that does not
+    # cannot turn a garbage segment into an "omission".
+    texts = thirds(as_asr(SCRIPT))
+    fake = install_fake(
+        monkeypatch,
+        [transcription(texts[0]), transcription("..."), transcription(texts[2])],
+    )
+
+    result = run(args_for(audio_file, script_file))
+
+    assert result.exit_code == 3, result.output
+    report = report_of(result)
+    assert report["status"] == "unavailable"
+    assert report["reasons"] == ["asr_empty"]
+    assert "segment 2 of 3" in report["detail"]
+    assert len(fake.mimes) == 2  # stopped at the bad segment

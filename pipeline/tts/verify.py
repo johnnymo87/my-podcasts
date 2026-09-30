@@ -1,7 +1,10 @@
 """Large-omission detector: align an ASR transcript against the script.
 
 Changing normalization, alignment, or DEFAULT_THRESHOLDS changes verifier
-policy: bump VERIFIER_VERSION (T3 folds it into the render cache key).
+policy: bump VERIFIER_VERSION. The ASR side (model, prompt, generation config)
+is covered by asr.ASR_POLICY; bump asr.ASR_PROMPT_VERSION on any prompt text
+change. T3 must fold VERIFIER_POLICY (both halves), not just VERIFIER_VERSION,
+into the render cache key.
 
 Claimed scope: catches LARGE omissions. It does not detect changed numbers,
 negations, repetitions or added speech. See the design doc, "Verification".
@@ -22,11 +25,12 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Literal
 
-from pipeline.tts.asr import Transcription, TranscriptionUnavailable
+from pipeline.tts.asr import ASR_POLICY, Transcription, TranscriptionUnavailable
 from pipeline.tts.normalize import normalize_tokens
 
 
 VERIFIER_VERSION = "1"
+VERIFIER_POLICY = f"verifier-v{VERIFIER_VERSION}|{ASR_POLICY}"
 _EXCERPT_TOKENS = 30
 
 
@@ -285,6 +289,7 @@ class Verdict:
     asr: AsrInfo | None
     thresholds: VerifyThresholds
     verifier_version: str
+    verifier_policy: str  # VERIFIER_POLICY: what T3's cache key must include
     mode: Literal["chunk"]
 
     @property
@@ -299,7 +304,15 @@ def _unavailable(
     reason: str, detail: str, th: VerifyThresholds, asr: AsrInfo | None
 ) -> Verdict:
     return Verdict(
-        "unavailable", (reason,), detail, None, asr, th, VERIFIER_VERSION, "chunk"
+        "unavailable",
+        (reason,),
+        detail,
+        None,
+        asr,
+        th,
+        VERIFIER_VERSION,
+        VERIFIER_POLICY,
+        "chunk",
     )
 
 
@@ -336,5 +349,13 @@ def verify_audio(
         )
     a = analyze(script_text, tr.text, thresholds)
     return Verdict(
-        a.status, a.reasons, "", a, info, thresholds, VERIFIER_VERSION, "chunk"
+        a.status,
+        a.reasons,
+        "",
+        a,
+        info,
+        thresholds,
+        VERIFIER_VERSION,
+        VERIFIER_POLICY,
+        "chunk",
     )

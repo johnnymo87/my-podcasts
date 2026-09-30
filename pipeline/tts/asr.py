@@ -25,6 +25,7 @@ from google import genai
 from google.genai import types
 
 from pipeline.tts.config import PCM_SAMPLE_RATE
+from pipeline.tts.normalize import normalize_tokens
 
 
 ASR_MODEL = "gemini-3.8-flash"
@@ -34,7 +35,24 @@ ASR_PROMPT = (
     "as plain text: no timestamps, no speaker labels, no headings, no commentary. "
     "Write numbers as digits."
 )
+ASR_TEMPERATURE = 0
 DEFAULT_ASR_TIMEOUT_SECONDS = 90.0
+
+# Everything that decides which audio passes, on the ASR side. No thinking
+# config is sent, so the model's default applies; say so, so a change to send
+# one is a visible edit here. Changing ASR_MODEL, ASR_PROMPT (bump
+# ASR_PROMPT_VERSION with it) or the generation config changes this string, and
+# with it verify.VERIFIER_POLICY, which T3 must fold into the render cache key.
+# (The string describes the DEFAULT model; a caller passing ``model=`` to
+# GeminiTranscriber is outside the policy and must say so in its own key.)
+ASR_POLICY = (
+    f"{ASR_MODEL}|prompt-v{ASR_PROMPT_VERSION}|temp{ASR_TEMPERATURE}|thinking-default"
+)
+
+
+def _generation_config() -> types.GenerateContentConfig:
+    """The one place the request's generation config is built (see ASR_POLICY)."""
+    return types.GenerateContentConfig(temperature=ASR_TEMPERATURE)
 
 
 class TranscriptionUnavailable(Exception):
@@ -126,7 +144,7 @@ class GeminiTranscriber:
                     types.Part.from_bytes(data=audio, mime_type=mime_type),
                     ASR_PROMPT,
                 ],
-                config=types.GenerateContentConfig(temperature=0),
+                config=_generation_config(),
             )
         except (httpx.TimeoutException, TimeoutError) as exc:
             raise TranscriptionUnavailable("asr_timeout", repr(exc)) from exc
@@ -148,8 +166,10 @@ class GeminiTranscriber:
                 "asr_incomplete", f"finish_reason={finish_name}"
             )
         text = resp.text or ""
-        if not text.strip():
-            raise TranscriptionUnavailable("asr_empty", "blank transcript")
+        if not normalize_tokens(text):
+            # Not just blank: "..." or a lone dash carries no words either, and
+            # must not become a segment that reads as "everything omitted".
+            raise TranscriptionUnavailable("asr_empty", "transcript has no word tokens")
         usage = resp.usage_metadata
         return Transcription(
             text=text,

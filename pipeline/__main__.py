@@ -1411,6 +1411,16 @@ def _tts_verify(
                             f"segment {i + 1} of {len(ranges)}: {exc}",
                         )
                         break
+                    if not normalize_tokens(tr.text):
+                        # The real transcriber refuses this itself; guard here
+                        # too so no transcriber can make a garbage segment read
+                        # as an omission (same second guard as verify_audio).
+                        unavailable = (
+                            "asr_empty",
+                            f"segment {i + 1} of {len(ranges)}: "
+                            "transcript has no word tokens",
+                        )
+                        break
                     asr_info["model"] = tr.model
                     asr_info["prompt_version"] = tr.prompt_version
                     record = {
@@ -1454,6 +1464,7 @@ def _tts_verify(
 
     report: dict = {
         "verifier_version": verify.VERIFIER_VERSION,
+        "verifier_policy": verify.VERIFIER_POLICY,
         "mode": "projected",
         "thresholds": dataclasses.asdict(thresholds),
         "audio_path": str(audio_path),

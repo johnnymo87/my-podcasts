@@ -92,6 +92,8 @@ def test_success_returns_text_and_metadata():
         (response(finish="OTHER", text=None), "asr_incomplete"),
         (response(finish=None), "asr_incomplete"),
         (response(text="   "), "asr_empty"),
+        (response(text="..."), "asr_empty"),  # punctuation only: no word tokens
+        (response(text="— … !!"), "asr_empty"),
         (response(candidates=False), "asr_empty"),
         (RuntimeError("boom"), "asr_error"),
         (httpx.ReadTimeout("slow"), "asr_timeout"),
@@ -346,3 +348,16 @@ def test_sdk_makes_exactly_one_attempt_on_503(monkeypatch):
         server.server_close()
     assert exc_info.value.reason == "asr_error"
     assert len(hits) == 1
+
+
+def test_policy_string_names_model_prompt_version_and_generation_config():
+    t, client, p = transcriber_with(response("hello world"))
+    with p:
+        t(b"x", "audio/wav")
+    config = client.models.calls[0]["config"]
+    # The request config and the policy string derive from the same values.
+    assert config == asr._generation_config()
+    assert config.temperature == asr.ASR_TEMPERATURE
+    assert asr.ASR_MODEL in asr.ASR_POLICY
+    assert f"prompt-v{asr.ASR_PROMPT_VERSION}" in asr.ASR_POLICY
+    assert f"temp{asr.ASR_TEMPERATURE}" in asr.ASR_POLICY
