@@ -162,12 +162,12 @@ class Env:
     def render(self, config=CFG, **kw):
         kw.setdefault("manifest_dir", self.tmp / "m")
         kw.setdefault("cache_dir", self.tmp / "c")
+        kw.setdefault("episode_id", "2026-09-30-fp")
         return render.render_episode(
             TEXT,
             config,
             self.tmp / "out.mp3",
             feed_slug="fp-digest",
-            episode_id="2026-09-30-fp",
             **kw,
         )
 
@@ -184,7 +184,11 @@ class Env:
 
 @pytest.fixture
 def env(monkeypatch, tmp_path) -> Env:
-    return Env(monkeypatch, tmp_path)
+    yield Env(monkeypatch, tmp_path)
+    # The alert worker is module-level and outlives a test: stop it (and drop any
+    # queued alerts) before the monkeypatched ``send_alert`` is undone, or it could
+    # drain the queue through the real one.
+    render._stop_alert_worker()
 
 
 # --- Gemini ok ---------------------------------------------------------------
@@ -814,3 +818,95 @@ def test_a_cache_store_failure_does_not_lose_the_audio(env, monkeypatch):
     assert result.provider == "gemini" and (env.tmp / "out.mp3").exists()
     [m] = env.manifests()
     assert m["cache_stored"] is False and m["status"] == "rendered"
+
+
+# --- the alert worker: one bounded, module-level thread ------------------------------
+
+
+def _workers():
+    return [
+        t
+        for t in threading.enumerate()
+        if t.name == "tts-alert-worker" and t.is_alive()
+    ]
+
+
+def test_a_stuck_sender_never_grows_the_thread_count_and_later_alerts_are_dropped(
+    env, monkeypatch, caplog
+):
+    release = threading.Event()
+    entered = threading.Event()
+
+    def stuck(text, severity="info"):
+        entered.set()
+        release.wait(30)
+        return True
+
+    monkeypatch.setattr("pipeline.alerts.send_alert", stuck)
+    monkeypatch.setattr(render, "ALERT_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(render, "ALERT_QUEUE_MAX", 2)
+    env.outcome = failed_outcome("deadline")
+    sent = []
+    try:
+        for i in range(5):
+            env.render(cache_dir=None, episode_id=f"ep-{i}")
+            if i == 0:
+                assert entered.wait(5)  # the worker now holds alert 0, stuck
+            sent.append(env.manifests()[-1]["alert_sent"])
+        # alert 0 is in the worker; 1 and 2 fill the queue (2); 3 and 4 are dropped.
+        assert sent == ["timeout", "timeout", "timeout", "dropped", "dropped"]
+        assert len(_workers()) == 1
+    finally:
+        release.set()
+    # The dropped alert's text is logged, not lost.
+    assert "TTS fallback: fp-digest ep-3" in caplog.text
+
+
+def test_the_worker_is_reused_across_alerts(env):
+    env.outcome = failed_outcome("deadline")
+    env.render(cache_dir=None, episode_id="a")
+    first = render._alert_worker
+    env.render(cache_dir=None, episode_id="b")
+    assert render._alert_worker is first and len(_workers()) == 1
+    assert (
+        env.alerts == [a for a in env.alerts if a.startswith("TTS fallback: fp-digest")]
+        and len(env.alerts) == 2
+    )
+
+
+def test_a_dead_worker_is_restarted(env):
+    env.outcome = failed_outcome("deadline")
+    env.render(cache_dir=None, episode_id="a")
+    old = render._alert_worker
+    render._alert_queue.put(render._STOP)  # make the worker exit, as if it died
+    old.join(5)
+    assert not old.is_alive()
+    env.render(cache_dir=None, episode_id="b")
+    assert render._alert_worker is not old and render._alert_worker.is_alive()
+    assert env.manifests()[-1]["alert_sent"] is True
+
+
+def test_a_slow_alert_that_completes_late_does_not_break_the_next(env, monkeypatch):
+    release = threading.Event()
+    calls = []
+
+    def sender(text, severity="info"):
+        calls.append(text)
+        if len(calls) == 1:
+            release.wait(30)
+        return True
+
+    monkeypatch.setattr("pipeline.alerts.send_alert", sender)
+    monkeypatch.setattr(render, "ALERT_WAIT_SECONDS", 0.05)
+    env.outcome = failed_outcome("deadline")
+    try:
+        env.render(cache_dir=None, episode_id="slow")
+        assert env.manifests()[-1]["alert_sent"] == "timeout"
+    finally:
+        release.set()
+    monkeypatch.setattr(render, "ALERT_WAIT_SECONDS", 5.0)
+    env.render(cache_dir=None, episode_id="next")
+    by_episode = {m["episode_id"]: m for m in env.manifests()}
+    assert by_episode["slow"]["alert_sent"] == "timeout"
+    assert by_episode["next"]["alert_sent"] is True
+    assert len(calls) == 2  # the slow one was still sent, late; then the next

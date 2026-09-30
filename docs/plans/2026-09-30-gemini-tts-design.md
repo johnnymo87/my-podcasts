@@ -131,7 +131,10 @@ The inline text above stays; where it disagrees with these, these win.
 - **The bound** is the 6-minute Gemini budget plus one poll interval (0.2 s) plus ONE bounded reap
   (5 s, shared by the deadline path and the cleanup, never paid twice). Child startup (about 1.4 s
   to import `google.genai`, several times that on a loaded host) is *inside* the budget, because
-  the deadline is one absolute `time.monotonic()` value taken before the child starts. A
+  the deadline is one absolute `time.monotonic()` value taken before the child starts. `start()`
+  itself is small and cannot stall on the episode: the parent writes the chunks to `input.json` in
+  the scratch dir first and passes the child only a few hundred bytes (a child that stopped reading
+  a large spawn payload would otherwise block the parent inside `start()`, past any deadline). A
   per-render worst case is therefore about 6 minutes 6 seconds of Gemini phase, then the OpenAI
   fallback (itself bounded by its per-chunk retries) and the alert wait below.
 - **Config shape** is the `primary`/`fallback` pair of typed leaves, not flat provider fields.
@@ -153,11 +156,14 @@ The inline text above stays; where it disagrees with these, these win.
 #### Amendments (T3b implementation, 2026-09-30)
 
 - **The alert is bounded.** `send_alert` has a 10 s timeout per read, not a wall-clock bound, so
-  the parent runs it in a daemon thread and `join`s for at most `ALERT_WAIT_SECONDS = 12.0`; after
-  that it moves on and the thread is abandoned. The manifest's `alert_sent` records `true`,
-  `false` or `"timeout"` (delivery unknown: still sending when the wait ended); `null` = no alert
-  attempted. Nothing in building or sending the alert can raise into the render. This replaces the earlier "synchronous,
-  counts against the caller" wording. The alert is sent by the parent only, after the fallback
+  alerts go to ONE lazily started module-level daemon worker through a queue of at most
+  `ALERT_QUEUE_MAX = 8`, and a render waits at most `ALERT_WAIT_SECONDS = 12.0` for its own alert.
+  A stuck sender therefore costs one thread in total (a per-alert thread would pile up across
+  repeated fallbacks); a dead worker is restarted, and a full queue drops the alert (logged in
+  full). The manifest's `alert_sent` records `true`, `false`, `"timeout"` (queued, not finished in
+  time: delivery unknown), `"dropped"` (queue full: not sent) or `null` (no alert attempted).
+  Nothing in building or sending the alert can raise into the render. This replaces the earlier
+  "synchronous, counts against the caller" wording. The alert is sent by the parent only, after the fallback
   attempt (also when that attempt fails), never on a cache hit, never when there is no fallback,
   and not at all with `notify_fallback=False` (local tools and `publish-script --dry-run`).
 - **The fallback-reason set is closed:** `fatal`, `exhausted`, `deadline`, `asr_unavailable`,

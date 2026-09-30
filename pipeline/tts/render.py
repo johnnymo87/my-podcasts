@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import shutil
 import tempfile
 import threading
@@ -59,10 +60,13 @@ _DEFAULT: Any = object()
 
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = (2.0, 8.0)  # sleep before attempt 2, before attempt 3
-# The fallback alert is best-effort and bounded: ``send_alert`` is per-read (10 s
-# timeout), not wall-clock, so it runs in a daemon thread and is abandoned after
-# this long rather than holding up an episode that has already been rendered.
+# The fallback alert is best-effort and bounded. ``send_alert`` has a per-read
+# (10 s), not wall-clock, timeout, so it runs on ONE module-level daemon worker
+# and a render waits at most this long for ITS alert; after that it moves on.
 ALERT_WAIT_SECONDS = 12.0
+# At most this many alerts may wait behind a stuck sender; beyond it they are
+# dropped (logged), so repeated fallbacks can never pile up threads or memory.
+ALERT_QUEUE_MAX = 8
 
 
 def _check_retry_schedule(max_attempts: int, backoff: tuple[float, ...]) -> None:
@@ -418,43 +422,105 @@ def _shipped_chunk_records(gemini_chunks: list[str], outcome) -> list[dict]:
     return records
 
 
+_STOP = object()  # tells the alert worker to exit
+_alert_lock = threading.Lock()
+_alert_queue: queue.Queue = queue.Queue()
+_alert_worker: threading.Thread | None = None
+
+
+class _AlertJob:
+    __slots__ = ("done", "result", "text")
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.done = threading.Event()
+        self.result = False
+
+
+def _alert_worker_loop() -> None:
+    from pipeline import alerts
+
+    while True:
+        job = _alert_queue.get()
+        if job is _STOP:
+            return
+        try:
+            # Looked up on the module at call time so a test can replace it.
+            job.result = bool(alerts.send_alert(job.text))
+        except Exception:  # noqa: BLE001 -- reporting must never disturb anything
+            job.result = False
+        finally:
+            job.done.set()
+
+
+def _enqueue_alert(text: str) -> _AlertJob | None:
+    """Queue ``text`` for the single worker; None if the queue is full.
+
+    Starts the worker on first use, and again if it has died -- never a second
+    one alongside a live (even stuck) worker. A full queue means the worker is
+    stuck behind earlier alerts: do not add a thread, drop this one.
+    """
+    global _alert_worker
+    with _alert_lock:
+        if _alert_worker is None or not _alert_worker.is_alive():
+            worker = threading.Thread(
+                target=_alert_worker_loop, name="tts-alert-worker", daemon=True
+            )
+            worker.start()  # may raise; the global is only set on success
+            _alert_worker = worker
+        if _alert_queue.qsize() >= ALERT_QUEUE_MAX:
+            return None
+        job = _AlertJob(text)
+        _alert_queue.put(job)
+        return job
+
+
+def _stop_alert_worker(timeout: float = 5.0) -> None:
+    """Drop queued alerts and stop the worker (tests; never needed in production)."""
+    global _alert_worker
+    with _alert_lock:
+        worker, _alert_worker = _alert_worker, None
+        while True:
+            try:
+                _alert_queue.get_nowait()
+            except queue.Empty:
+                break
+        if worker is not None and worker.is_alive():
+            _alert_queue.put(_STOP)
+    if worker is not None:
+        worker.join(timeout)
+
+
 def _deliver_alert(
     feed_slug, episode_id, primary, reason, fallback, error
 ) -> bool | str:
     """Alert that a render fell back, without letting anything about it reach the
     caller: an episode that has been rendered must not be lost to its own report.
 
-    Builds the text, starts a daemon thread for ``send_alert`` and waits at most
-    ``ALERT_WAIT_SECONDS``. Returns True/False (``send_alert``'s own answer; any
-    exception, including failing to build the text, import, or start the thread,
-    is False) or ``"timeout"``, which means delivery is UNKNOWN: the thread was
-    abandoned still sending. ``send_alert`` is looked up on ``pipeline.alerts`` at
-    call time so a test can replace it.
+    The alert goes to one module-level daemon worker through a bounded queue, and
+    this waits at most ``ALERT_WAIT_SECONDS`` for THIS alert. Returns True/False
+    (``send_alert``'s own answer; any exception, including failing to build the
+    text or start the worker, is False); ``"timeout"`` (queued, but not finished
+    in time: delivery UNKNOWN, it may still go out late); or ``"dropped"`` (the
+    queue was full behind a stuck sender: NOT sent). Timed-out and dropped alerts
+    are logged in full, so the text is never lost.
     """
     try:
-        from pipeline import alerts
-
         text = _fallback_alert_text(
             feed_slug, episode_id, primary, reason, fallback, error
         )
-        result: list[bool] = []
-
-        def run() -> None:
-            try:
-                result.append(bool(alerts.send_alert(text)))
-            except Exception:  # noqa: BLE001
-                result.append(False)
-
-        thread = threading.Thread(target=run, name="tts-fallback-alert", daemon=True)
-        thread.start()
-        thread.join(ALERT_WAIT_SECONDS)
-        if thread.is_alive():
+        job = _enqueue_alert(text)
+        if job is None:
+            log.warning("TTS fallback alert dropped (queue full); text was: %s", text)
+            return "dropped"
+        if not job.done.wait(ALERT_WAIT_SECONDS):
             log.warning(
-                "TTS fallback alert still sending after %.0fs; moving on",
+                "TTS fallback alert not delivered within %.0fs; text was: %s",
                 ALERT_WAIT_SECONDS,
+                text,
             )
             return "timeout"
-        return result[0] if result else False
+        return job.result
     except Exception:  # noqa: BLE001
         log.warning("TTS fallback alert could not be sent", exc_info=True)
         return False
