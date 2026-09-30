@@ -322,6 +322,12 @@ def test_sdk_makes_exactly_one_attempt_on_503(monkeypatch):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     monkeypatch.setenv("GEMINI_API_KEY", "k")
+    # httpx honours proxy env even for loopback; keep the test hermetic.
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.delenv(var, raising=False)
+        monkeypatch.delenv(var.lower(), raising=False)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.setenv("no_proxy", "127.0.0.1")
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
     t = GeminiTranscriber(timeout_s=10)
     try:
