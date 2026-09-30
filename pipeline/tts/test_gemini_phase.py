@@ -1014,6 +1014,13 @@ def test_not_a_dict_is_invalid(scratch):
         {"schema": 1, "status": "failed", "reason": "made_up", "detail": ""},
         {"schema": 1, "status": "failed", "reason": None, "detail": ""},
         {"schema": 1, "status": "failed", "reason": "fatal", "failed_chunk": "0"},
+        # An unhashable reason must be refused, not crash the membership test.
+        {"schema": 1, "status": "failed", "reason": ["fatal"], "detail": ""},
+        {"schema": 1, "status": "failed", "reason": {"a": 1}, "detail": ""},
+        # failed_chunk must name a real chunk (n is 2 here), and not be a bool.
+        {"schema": 1, "status": "failed", "reason": "fatal", "failed_chunk": -1},
+        {"schema": 1, "status": "failed", "reason": "fatal", "failed_chunk": 2},
+        {"schema": 1, "status": "failed", "reason": "fatal", "failed_chunk": True},
     ],
 )
 def test_failed_results_with_bad_reason_or_chunk_are_invalid(scratch, result):
@@ -1053,8 +1060,19 @@ class FakeProc:
 
     pid = 4242
 
-    def __init__(self, args, *, on_start=None, on_kill=None, exits=False):
+    def __init__(
+        self,
+        args,
+        *,
+        on_start=None,
+        on_kill=None,
+        exits=False,
+        unkillable=False,
+        kill_raises=None,
+    ):
         self.args = args
+        self._unkillable = unkillable  # kill() is sent but the process lives on
+        self._kill_raises = kill_raises
         self.scratch = Path(args[3])
         self._on_start = on_start
         self._on_kill = on_kill
@@ -1083,12 +1101,18 @@ class FakeProc:
 
     def kill(self):
         self.killed += 1
-        self.alive = False
-        self.exitcode = -9
+        if self._kill_raises:  # it died just before the signal: kill() raises
+            self.alive = False
+            raise self._kill_raises
+        if not self._unkillable:
+            self.alive = False
+            self.exitcode = -9
         if self._on_kill:
             self._on_kill(self)
 
     def close(self):
+        if self.alive:  # like multiprocessing.Process.close()
+            raise ValueError("Cannot close a process while it is still running")
         self.closed = True
 
 
@@ -1235,6 +1259,8 @@ def test_spawn_failure_is_spawn_failed_and_cleans_up(phase):
     assert (outcome.ok, outcome.reason) == (False, gp.REASON_SPAWN_FAILED)
     assert "cannot fork" in outcome.detail
     assert list(roots.iterdir()) == []
+    # A process that never started is not reaped: kill() on it would raise.
+    assert procs[0].killed == 0 and procs[0].joins == []
 
 
 def test_keyboard_interrupt_kills_the_child_cleans_up_and_propagates(
@@ -1312,3 +1338,107 @@ def test_child_main_reports_when_it_started(scratch, child_env):
     started = json.loads((scratch / gp.STARTED_NAME).read_text())
     assert started["pid"] == os.getpid()
     assert before <= started["monotonic"] <= time.monotonic()
+
+
+# --- review round: runner cleanup, scratch, budget ------------------------------
+
+
+def test_an_unkillable_child_costs_one_reap_keeps_the_dir_and_logs(phase, capsys):
+    outcome, procs, roots = phase(lambda a: FakeProc(a, unkillable=True), budget_s=0.2)
+    assert (outcome.ok, outcome.reason) == (False, gp.REASON_DEADLINE)
+    # One kill and one bounded wait, not two of each.
+    assert procs[0].killed == 1
+    assert procs[0].joins.count(gp.REAP_TIMEOUT_SECONDS) == 1
+    (kept,) = roots.iterdir()  # not deleted under a live child
+    assert kept.name.startswith("gemini-phase-")
+    assert "still alive" in capsys.readouterr().err
+    assert not procs[0].closed
+
+
+def test_a_kill_that_raises_on_an_already_dead_child_is_absorbed(phase, capsys):
+    outcome, procs, roots = phase(
+        lambda a: FakeProc(a, kill_raises=ProcessLookupError("gone")), budget_s=0.2
+    )
+    assert (outcome.ok, outcome.reason) == (False, gp.REASON_DEADLINE)
+    assert procs[0].killed == 1  # tried once, not again from the cleanup
+    assert procs[0].closed
+    assert list(roots.iterdir()) == []
+    assert "kill() raised" in capsys.readouterr().err
+
+
+def test_scratch_root_that_cannot_be_used_is_spawn_failed_not_a_raise(
+    monkeypatch, tmp_path
+):
+    not_a_dir = tmp_path / "file"
+    not_a_dir.write_text("x")
+    monkeypatch.setattr(
+        gp, "_make_process", lambda a: pytest.fail("must not spawn without scratch")
+    )
+    outcome = gp.run_gemini_phase(
+        make_chunks(2), LEAF, budget_s=5.0, scratch_root=not_a_dir / "sub"
+    )
+    assert (outcome.ok, outcome.reason) == (False, gp.REASON_SPAWN_FAILED)
+    assert outcome.chunk_records == []
+    assert outcome.pcm_parts is None
+
+
+@pytest.mark.parametrize("budget", [0.0, -1.0])
+def test_no_budget_means_deadline_without_spawning(monkeypatch, tmp_path, budget):
+    monkeypatch.setattr(
+        gp, "_make_process", lambda a: pytest.fail("must not spawn with no budget")
+    )
+    roots = tmp_path / "roots"
+    outcome = gp.run_gemini_phase(
+        make_chunks(2), LEAF, budget_s=budget, scratch_root=roots
+    )
+    assert (outcome.ok, outcome.reason) == (False, gp.REASON_DEADLINE)
+    assert outcome.spawn_s == 0.0 and outcome.child_pid is None
+    assert not roots.exists()
+
+
+def _old(path: Path, age_s: float) -> None:
+    t = time.time() - age_s
+    os.utime(path, (t, t))
+
+
+def test_stale_scratch_dirs_are_swept_but_fresh_and_foreign_ones_are_not(phase):
+    roots_holder = {}
+
+    def make(a):
+        return FakeProc(a, on_start=run_child_inline, exits=True)
+
+    # Pre-create the root with stale/fresh/foreign entries, via a first phase.
+    outcome, _, roots = phase(make)
+    roots.mkdir(exist_ok=True)
+    stale = roots / "gemini-phase-stale"
+    fresh = roots / "gemini-phase-fresh"
+    foreign = roots / "someone-elses-dir"
+    foreign_old_file = roots / "gemini-phase-but-a-file"
+    for d in (stale, fresh, foreign):
+        d.mkdir()
+        (d / "chunk-0000.pcm").write_bytes(b"\x00\x00")
+    foreign_old_file.write_text("x")
+    _old(stale, gp.STALE_SCRATCH_SECONDS + 60)
+    _old(foreign, gp.STALE_SCRATCH_SECONDS + 60)
+    _old(foreign_old_file, gp.STALE_SCRATCH_SECONDS + 60)
+    roots_holder["roots"] = roots
+
+    outcome, _, _ = phase(make)
+    assert outcome.ok
+    assert not stale.exists()
+    assert fresh.exists() and foreign.exists() and foreign_old_file.exists()
+
+
+def test_sweeping_never_raises(tmp_path, monkeypatch):
+    gp._sweep_stale_scratch(tmp_path / "does-not-exist")  # no such root
+    f = tmp_path / "f"
+    f.write_text("x")
+    gp._sweep_stale_scratch(f)  # not a directory
+
+    def boom(*a, **k):
+        raise OSError("perm")
+
+    (tmp_path / "gemini-phase-x").mkdir()
+    _old(tmp_path / "gemini-phase-x", gp.STALE_SCRATCH_SECONDS + 60)
+    monkeypatch.setattr(gp.shutil, "rmtree", boom)
+    gp._sweep_stale_scratch(tmp_path)  # the failing delete is swallowed

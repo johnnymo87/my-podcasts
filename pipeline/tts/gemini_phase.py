@@ -126,6 +126,8 @@ SCHEMA = 1
 RESULT_NAME = "result.json"
 STARTED_NAME = "started.json"
 POLL_SECONDS = 0.2  # parent: how often to look for result.json
+STALE_SCRATCH_SECONDS = 6 * 3600  # older gemini-phase-* dirs are swept
+SCRATCH_PREFIX = "gemini-phase-"
 
 
 def chunk_name(i: int) -> str:
@@ -708,11 +710,19 @@ def _validate_result(result: Any, scratch: Path, n_chunks: int) -> list[bytes] |
         raise _InvalidResult(f"unknown result schema {result.get('schema')!r}")
     status = result.get("status")
     if status == "failed":
-        if result.get("reason") not in FALLBACK_REASONS:
-            raise _InvalidResult(f"unknown failure reason {result.get('reason')!r}")
+        reason = result.get("reason")
+        # isinstance first: membership in a frozenset hashes, and an unhashable
+        # value (a list) would raise TypeError instead of being refused.
+        if not isinstance(reason, str) or reason not in FALLBACK_REASONS:
+            raise _InvalidResult(f"unknown failure reason {reason!r}")
         failed_chunk = result.get("failed_chunk")
-        if failed_chunk is not None and not _is_int(failed_chunk):
-            raise _InvalidResult(f"bad failed_chunk {failed_chunk!r}")
+        if failed_chunk is not None and not (
+            _is_int(failed_chunk) and 0 <= failed_chunk < n_chunks
+        ):
+            raise _InvalidResult(
+                f"failed_chunk {failed_chunk!r} is not a chunk index"
+                f" (0..{n_chunks - 1})"
+            )
         return None
     if status != "ok":
         raise _InvalidResult(f"unknown result status {status!r}")
@@ -751,9 +761,11 @@ def _validate_result(result: Any, scratch: Path, n_chunks: int) -> list[bytes] |
     return parts
 
 
-def _read_progress(scratch: Path, n_chunks: int) -> list[dict[str, Any]]:
+def _read_progress(scratch: Path | None, n_chunks: int) -> list[dict[str, Any]]:
     """Per-chunk progress records. Telemetry: this never raises."""
     records: list[dict[str, Any]] = []
+    if scratch is None:
+        return records
     for i in range(n_chunks):
         try:
             raw = (scratch / progress_name(i)).read_bytes()
@@ -774,7 +786,9 @@ def _read_progress(scratch: Path, n_chunks: int) -> list[dict[str, Any]]:
     return records
 
 
-def _read_started(scratch: Path) -> float | None:
+def _read_started(scratch: Path | None) -> float | None:
+    if scratch is None:
+        return None
     try:
         started = json.loads((scratch / STARTED_NAME).read_bytes())
         value = started["monotonic"]
@@ -795,15 +809,33 @@ def _join_child(proc: Any, timeout: float) -> None:
     proc.join(timeout)
 
 
-def _reap(proc: Any) -> None:
-    """Kill ``proc`` if it is running and wait (bounded) for it to die."""
-    if proc.is_alive():
-        proc.kill()
-    proc.join(REAP_TIMEOUT_SECONDS)
+class _Reaper:
+    """Kill-and-wait for one process, at most once.
+
+    The deadline path reaps before it re-reads ``result.json``, and the runner's
+    ``finally`` reaps again; without this, a child that cannot be killed would
+    cost two ``REAP_TIMEOUT_SECONDS`` waits instead of one.
+    """
+
+    def __init__(self, proc: Any) -> None:
+        self.proc = proc
+        self._done = False
+
+    def reap(self) -> bool:
+        """Kill if running, wait (bounded) for it to die; True if it is dead."""
+        if not self._done:
+            self._done = True
+            if self.proc.is_alive():
+                try:
+                    self.proc.kill()
+                except Exception as exc:  # noqa: BLE001 -- it may have just died
+                    print(f"gemini-phase: kill() raised {exc!r}", file=sys.stderr)
+            self.proc.join(REAP_TIMEOUT_SECONDS)
+        return not self.proc.is_alive()
 
 
 def _await_child(
-    proc: Any, scratch: Path, deadline: float
+    reaper: _Reaper, scratch: Path, deadline: float
 ) -> tuple[Any, str | None, str]:
     """Wait for a terminal ``result.json``: ``(result, None, "")``, or
     ``(None, reason, detail)`` if there will not be one.
@@ -813,6 +845,7 @@ def _await_child(
     more, so an ``ok`` that landed as the clock ran out is not thrown away (it
     is still validated by the caller).
     """
+    proc = reaper.proc
     try:
         while True:
             remaining = deadline - time.monotonic()
@@ -830,13 +863,38 @@ def _await_child(
                     f"child exited (exit code {proc.exitcode}) without a result",
                 )
             if remaining <= 0:
-                _reap(proc)
+                reaper.reap()
                 result = _read_result(scratch)
                 if result is not None:
                     return result, None, ""
                 return None, REASON_DEADLINE, "the Gemini phase budget ran out"
     except _InvalidResult as exc:
         return None, REASON_INVALID_RESULT, str(exc)
+
+
+def _sweep_stale_scratch(root: str | os.PathLike[str]) -> None:
+    """Delete ``gemini-phase-*`` dirs under ``root`` untouched for 6 hours.
+
+    A phase removes its own scratch dir, but a parent that was SIGKILLed, or a
+    child that could not be killed, leaves one behind. Best effort, and it never
+    raises: housekeeping must not fail a render. Only real directories (not
+    symlinks) with our prefix are touched.
+    """
+    try:
+        cutoff = time.time() - STALE_SCRATCH_SECONDS
+        with os.scandir(root) as entries:
+            for entry in entries:
+                try:
+                    if (
+                        entry.name.startswith(SCRATCH_PREFIX)
+                        and entry.is_dir(follow_symlinks=False)
+                        and entry.stat(follow_symlinks=False).st_mtime < cutoff
+                    ):
+                        shutil.rmtree(entry.path, ignore_errors=True)
+                except Exception:  # noqa: BLE001
+                    continue
+    except Exception:  # noqa: BLE001
+        return
 
 
 def run_gemini_phase(
@@ -850,12 +908,18 @@ def run_gemini_phase(
 ) -> PhaseOutcome:
     """Synthesize and verify ``chunks`` in a spawned child, within ``budget_s``.
 
-    Returns within the budget plus the child's spawn time and ``REAP_TIMEOUT_SECONDS``:
-    the deadline is one absolute ``time.monotonic()`` value computed before the
-    child starts; the child honours it cooperatively and this function enforces
-    it with ``kill()``. The child is always dead, and the scratch dir gone, by
-    the time this returns or raises. ``KeyboardInterrupt``/``SystemExit`` are
-    cleaned up after and propagate; they are never turned into a fallback.
+    The deadline is one absolute ``time.monotonic()`` value computed before
+    anything else; the child honours it cooperatively and this function enforces
+    it with ``kill()``. So it returns within ``budget_s`` + one poll interval
+    (``POLL_SECONDS``) + ONE bounded reap (``REAP_TIMEOUT_SECONDS``) -- the reap
+    is shared by the deadline path and the cleanup, never paid twice. A
+    ``budget_s`` of zero or less returns ``deadline`` without spawning.
+
+    On return or raise the child is dead and its scratch dir is gone, except
+    that a child which could not be killed is logged and its scratch dir left in
+    place (deleting it under a live process helps nobody); the next phase's
+    stale sweep collects it. ``KeyboardInterrupt``/``SystemExit`` are cleaned up
+    after and propagate; they are never turned into a fallback.
 
     ``_factories`` and ``_child_bootstrap`` are test seams (module-level
     callables, so they pickle): see ``_phase_testing``.
@@ -863,10 +927,10 @@ def run_gemini_phase(
     t0 = time.monotonic()
     deadline = t0 + budget_s
     chunks = list(chunks)
-    if scratch_root is not None:
-        Path(scratch_root).mkdir(parents=True, exist_ok=True)
-    scratch = Path(tempfile.mkdtemp(prefix="gemini-phase-", dir=scratch_root))
+    scratch: Path | None = None
     proc: Any = None
+    reaper: _Reaper | None = None
+    started = False
     spawn_s = 0.0
 
     def outcome(
@@ -876,7 +940,7 @@ def run_gemini_phase(
         pcm: list[bytes] | None = None,
         failed_chunk: int | None = None,
     ) -> PhaseOutcome:
-        started = _read_started(scratch)
+        child_started = _read_started(scratch)
         return PhaseOutcome(
             ok=reason is None,
             reason=reason,
@@ -886,11 +950,23 @@ def run_gemini_phase(
             elapsed_s=time.monotonic() - t0,
             spawn_s=spawn_s,
             failed_chunk=failed_chunk,
-            child_pid=getattr(proc, "pid", None),
-            child_started_s=None if started is None else started - t0,
+            child_pid=getattr(proc, "pid", None) if started else None,
+            child_started_s=None if child_started is None else child_started - t0,
         )
 
+    if budget_s <= 0:
+        return outcome(REASON_DEADLINE, "no budget left for the Gemini phase")
+
     try:
+        try:
+            root = scratch_root if scratch_root is not None else tempfile.gettempdir()
+            Path(root).mkdir(parents=True, exist_ok=True)
+            _sweep_stale_scratch(root)
+            scratch = Path(tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=root))
+        except Exception as exc:  # noqa: BLE001
+            return outcome(
+                REASON_SPAWN_FAILED, f"scratch dir: {type(exc).__name__}: {exc}"
+            )
         args = (
             chunks,
             leaf,
@@ -905,12 +981,14 @@ def run_gemini_phase(
             before_start = time.monotonic()
             try:
                 proc.start()
+                started = True
             finally:
                 spawn_s = time.monotonic() - before_start
         except Exception as exc:  # noqa: BLE001
             return outcome(REASON_SPAWN_FAILED, f"{type(exc).__name__}: {exc}")
 
-        result, reason, detail = _await_child(proc, scratch, deadline)
+        reaper = _Reaper(proc)
+        result, reason, detail = _await_child(reaper, scratch, deadline)
         if reason is not None:
             return outcome(reason, detail)
         try:
@@ -927,10 +1005,26 @@ def run_gemini_phase(
     finally:
         # The child is dead before the scratch dir goes: a live child writing
         # into a deleted directory is how a stray file would outlive a phase.
-        if proc is not None:
+        child_dead = True
+        if started:  # a process whose start() never returned is not reaped
             try:
-                _reap(proc)
-                proc.close()
-            except Exception:  # noqa: BLE001 -- never mask the real outcome
-                pass
-        shutil.rmtree(scratch, ignore_errors=True)
+                child_dead = (reaper or _Reaper(proc)).reap()
+            except Exception as exc:  # noqa: BLE001 -- never mask the real outcome
+                print(
+                    f"gemini-phase: reaping the child failed: {exc!r}", file=sys.stderr
+                )
+                child_dead = False
+            if child_dead:
+                try:
+                    proc.close()  # releases the sentinel fd
+                except Exception:  # noqa: BLE001
+                    pass
+        if scratch is not None:
+            if child_dead:
+                shutil.rmtree(scratch, ignore_errors=True)
+            else:
+                print(
+                    f"gemini-phase: child pid {getattr(proc, 'pid', '?')} is still "
+                    f"alive after kill; leaving {scratch} in place",
+                    file=sys.stderr,
+                )

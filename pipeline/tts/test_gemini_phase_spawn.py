@@ -34,11 +34,30 @@ from pipeline.tts.config import GeminiConfig
 
 
 LEAF = GeminiConfig(model="fake-model", voice="Kore")
-# A child needs ~1-2 s to start and import; the blocked-child budgets must leave
-# room for it to actually reach the blocking call, or the test proves nothing.
-BLOCKED_BUDGET_S = 4.0
 SLACK_S = 2.0
 PID_WAIT_S = 60.0
+
+
+@pytest.fixture(scope="module")
+def blocked_budget_s(tmp_path_factory) -> float:
+    """A budget a blocked-child test can trust to outlast the child's startup.
+
+    The budget clock starts before ``Process.start()``, and a child needs
+    1.4 s on an idle host (and several times that on a loaded or cold-cache CI
+    runner) to import ``google.genai`` and reach its blocking call. A test whose
+    budget ends first proves nothing -- it would see ``deadline`` without the
+    child ever blocking. So measure this host's startup once and scale to it.
+    """
+    out = gp.run_gemini_phase(
+        make_chunks(1),
+        LEAF,
+        budget_s=120.0,
+        scratch_root=tmp_path_factory.mktemp("startup"),
+        _factories=factories("ok"),
+        _child_bootstrap=deny_network,
+    )
+    startup = out.child_started_s if out.child_started_s is not None else 10.0
+    return max(4.0, 3 * startup + 2.0)
 
 
 class Run:
@@ -47,10 +66,13 @@ class Run:
         self.markers = tmp_path / "markers"
         self.markers.mkdir()
         self.wall = 0.0
+        self.budget_s = 0.0
+        self.blocked_budget_s = 0.0
 
-    def __call__(
-        self, behavior, *, chunk=None, n=2, budget_s=BLOCKED_BUDGET_S, bootstrap=None
-    ):
+    def __call__(self, behavior, *, chunk=None, n=2, budget_s=None, bootstrap=None):
+        if budget_s is None:
+            budget_s = self.blocked_budget_s
+        self.budget_s = budget_s
         started = time.monotonic()
         try:
             return gp.run_gemini_phase(
@@ -70,8 +92,10 @@ class Run:
 
 
 @pytest.fixture
-def run(tmp_path) -> Run:
-    return Run(tmp_path)
+def run(tmp_path, blocked_budget_s) -> Run:
+    r = Run(tmp_path)
+    r.blocked_budget_s = blocked_budget_s
+    return r
 
 
 def assert_dead(pid: int) -> None:
@@ -102,7 +126,7 @@ def test_synth_blocked_forever_hits_the_deadline_and_the_child_is_dead(run):
     out = run("block_synth_forever", chunk=0)
     assert (out.ok, out.reason) == (False, gp.REASON_DEADLINE)
     assert out.pcm_parts is None
-    assert run.wall <= BLOCKED_BUDGET_S + gp.REAP_TIMEOUT_SECONDS + SLACK_S
+    assert run.wall <= run.budget_s + gp.REAP_TIMEOUT_SECONDS + SLACK_S
     pid = wait_for_pid(run.markers / "entered-synth-0", 5.0)  # it really blocked
     assert pid == out.child_pid
     assert_dead(pid)
@@ -112,7 +136,7 @@ def test_synth_blocked_forever_hits_the_deadline_and_the_child_is_dead(run):
 def test_asr_blocked_forever_hits_the_deadline_and_the_child_is_dead(run):
     out = run("block_asr_forever", chunk=0)
     assert (out.ok, out.reason) == (False, gp.REASON_DEADLINE)
-    assert run.wall <= BLOCKED_BUDGET_S + gp.REAP_TIMEOUT_SECONDS + SLACK_S
+    assert run.wall <= run.budget_s + gp.REAP_TIMEOUT_SECONDS + SLACK_S
     pid = wait_for_pid(run.markers / "entered-asr-0", 5.0)
     assert pid == out.child_pid
     # The synth of the verified-in-flight attempt was recorded before the kill.
@@ -179,7 +203,12 @@ HELPER = (
 def test_child_exits_on_its_own_when_the_parent_is_sigkilled(tmp_path):
     markers = tmp_path / "markers"
     markers.mkdir()
-    err = (tmp_path / "helper.err").open("wb")
+    err_path = tmp_path / "helper.err"
+
+    def helper_err() -> str:
+        return err_path.read_text(errors="replace") or "(empty)"
+
+    err = err_path.open("wb")
     helper = subprocess.Popen(
         [sys.executable, "-c", HELPER, str(markers), str(tmp_path / "roots"), "300"],
         stdout=subprocess.DEVNULL,
@@ -187,16 +216,27 @@ def test_child_exits_on_its_own_when_the_parent_is_sigkilled(tmp_path):
     )
     pid = None
     try:
-        pid = wait_for_pid(markers / "entered-synth-0", PID_WAIT_S)
-        assert not pid_gone(pid) and pid != helper.pid
+        try:
+            pid = wait_for_pid(markers / "entered-synth-0", PID_WAIT_S)
+        except TimeoutError:
+            pytest.fail(
+                f"child never blocked in synth (helper exit {helper.poll()}); "
+                f"helper stderr:\n{helper_err()}"
+            )
+        assert not pid_gone(pid) and pid != helper.pid, helper_err()
         helper.send_signal(signal.SIGKILL)
         helper.wait(timeout=10)
         killed_at = time.monotonic()
+        # The watchdog polls every 0.25 s, so this takes about a second on an
+        # idle host. The bound is a generous ceiling, not a speed claim: a
+        # loaded 1-CPU runner may take several seconds to schedule the thread.
         while not pid_gone(pid):
-            assert time.monotonic() - killed_at < 10.0, "orphaned child still alive"
+            if time.monotonic() - killed_at >= 10.0:
+                pytest.fail(
+                    f"orphaned child {pid} alive 10 s after its parent was "
+                    f"killed; helper stderr:\n{helper_err()}"
+                )
             time.sleep(0.05)
-        # The watchdog polls every 0.25 s, so "about a second", with host slack.
-        assert time.monotonic() - killed_at < 3.0
     finally:
         if helper.poll() is None:
             helper.kill()
