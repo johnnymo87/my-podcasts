@@ -19,9 +19,16 @@ DECODE_TIMEOUT_SECONDS = 300
 _WINDOW_S = 0.1
 
 
-def decode_to_pcm(path: Path) -> bytes:
+def decode_to_pcm_with_log(path: Path) -> tuple[bytes, str]:
+    """Decode to 24 kHz mono s16le; returns ``(pcm, ffmpeg_stderr)``.
+
+    ffmpeg's stderr on a *successful* decode (``-v error``: e.g. a damaged
+    frame it skipped) is evidence about the audio, so it is kept, stripped and
+    truncated.
+    """
     cmd = [
         "ffmpeg",
+        "-nostdin",
         "-v",
         "error",
         "-i",
@@ -43,7 +50,14 @@ def decode_to_pcm(path: Path) -> bytes:
         raise RuntimeError(f"ffmpeg decode of {path} failed: {tail}") from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"ffmpeg decode of {path} timed out") from exc
-    return proc.stdout
+    except OSError as exc:  # FileNotFoundError (no ffmpeg), PermissionError, ...
+        raise RuntimeError(f"ffmpeg not runnable: {exc!r}") from exc
+    warnings = (proc.stderr or b"").decode(errors="replace").strip()[-2000:]
+    return proc.stdout, warnings
+
+
+def decode_to_pcm(path: Path) -> bytes:
+    return decode_to_pcm_with_log(path)[0]
 
 
 def _quietest_cut(pcm: bytes, lo_s: float, hi_s: float) -> int:
@@ -69,7 +83,9 @@ def split_pcm(
     total_s = len(pcm) / PCM_BYTES_PER_SECOND
     segments: list[tuple[int, int]] = []
     start = 0
-    while (total_s - start / PCM_BYTES_PER_SECOND) > target_s + search_s:
+    # 2 * search_s, not 1: a cut may land up to search_s past the target, and
+    # the tail left behind must still be at least search_s long.
+    while (total_s - start / PCM_BYTES_PER_SECOND) > target_s + 2 * search_s:
         base = start / PCM_BYTES_PER_SECOND + target_s
         cut = _quietest_cut(pcm, base - search_s, base + search_s)
         segments.append((start, cut))
