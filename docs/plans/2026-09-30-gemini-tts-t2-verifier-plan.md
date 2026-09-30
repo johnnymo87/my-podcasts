@@ -1635,8 +1635,9 @@ Paid, a few cents. Keep every artifact under `/persist/my-podcasts/tts-eval/t2/`
    Expect `pass`. Record the recall, the longest span, and the minimum chunk recall. Do the same
    for `pub-rundown` and `pub-fp`.
 2. **Audio-level cut:** remove about 15 s of speech from the middle of `pub-rundown.mp3` with
-   ffmpeg (`-af "aselect='not(between(t,300,315))',asetpts=N/SR/TB"`), then run `tts-verify` on
-   the cut file. Expect `omission`, with the flagged span in the chunk covering 300 s.
+   ffmpeg (`-filter_complex "[0]atrim=0:300,asetpts=PTS-STARTPTS[a];[0]atrim=start=315,asetpts=PTS-STARTPTS[b];[a][b]concat=n=2:v=0:a=1"`;
+   the `aselect` form silently produced an uncut file, so always confirm the duration dropped with
+   ffprobe), then run `tts-verify` on the cut file. Expect `omission`, with the flagged span in the chunk covering 300 s.
 3. If a clean control fails, **do not tune thresholds to pass it.** Inspect the flagged span,
    decide whether it is a normalization gap or a real ASR miss, fix normalization only when it is
    a genuine systematic mismatch, and record the finding for T5.
