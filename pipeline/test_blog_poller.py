@@ -1,5 +1,4 @@
 import subprocess
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from pipeline.blog_poller import (
@@ -11,6 +10,7 @@ from pipeline.blog_poller import (
 )
 from pipeline.blog_sources import BLOG_SOURCES
 from pipeline.db import StateStore
+from pipeline.tts import openai_config
 
 
 SAMPLE_RSS = """<?xml version="1.0" encoding="UTF-8"?>
@@ -115,7 +115,9 @@ def test_adapt_for_audio_returns_none_without_api_key(monkeypatch) -> None:
     assert result is None
 
 
-def test_process_blog_post_publishes_episode(tmp_path, monkeypatch) -> None:
+def test_process_blog_post_publishes_episode(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("PODCAST_BASE_URL", "https://test.example.com")
 
@@ -137,13 +139,9 @@ def test_process_blog_post_publishes_episode(tmp_path, monkeypatch) -> None:
     mock_response.text = "Hello world. This is a test post."
     mock_gemini_client.models.generate_content.return_value = mock_response
 
-    # Mock subprocess.run for both ttsjoin and ffprobe
+    # Mock subprocess.run for ffprobe (rendering is stubbed by fake_tts_render)
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_idx = cmd.index("--output-file") + 1
-            Path(cmd[output_idx]).write_bytes(b"\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
-        elif cmd[0] == "ffprobe":
+        if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="10.0", stderr="")
         return subprocess.CompletedProcess(cmd, 0)
 
@@ -167,6 +165,12 @@ def test_process_blog_post_publishes_episode(tmp_path, monkeypatch) -> None:
 
     # Post should be marked as processed
     assert store.is_blog_post_processed("https://example.com/post1") is True
+
+    # Rendered with the source's own voice under the blog's feed identity.
+    [call] = fake_tts_render
+    assert call["config"] == openai_config(model="tts-1-hd", voice="fable")
+    assert call["feed_slug"] == "aaronson"
+    assert call["episode_id"].endswith("-test-post-title")
 
     store.close()
 
@@ -240,7 +244,9 @@ def test_blog_tts_input_opens_with_post_title_not_the_dated_title(
     store.close()
 
 
-def test_poll_all_blogs_fetches_and_processes(tmp_path, monkeypatch) -> None:
+def test_poll_all_blogs_fetches_and_processes(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     monkeypatch.setenv("PODCAST_BASE_URL", "https://test.example.com")
 
@@ -259,11 +265,7 @@ def test_poll_all_blogs_fetches_and_processes(tmp_path, monkeypatch) -> None:
     mock_gemini_client.models.generate_content.return_value = mock_response
 
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_idx = cmd.index("--output-file") + 1
-            Path(cmd[output_idx]).write_bytes(b"\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
-        elif cmd[0] == "ffprobe":
+        if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="10.0", stderr="")
         return subprocess.CompletedProcess(cmd, 0)
 

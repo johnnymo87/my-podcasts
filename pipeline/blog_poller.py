@@ -17,6 +17,7 @@ import requests
 from google import genai
 from google.genai import types
 
+from pipeline import tts
 from pipeline.blog_sources import BLOG_SOURCES
 from pipeline.feed import regenerate_and_upload_feed
 from pipeline.script_processor import TTS_MODEL
@@ -147,27 +148,20 @@ def process_blog_post(
 
     with tempfile.TemporaryDirectory(prefix="blog-post-") as tmp_dir:
         tmp = Path(tmp_dir)
-        input_txt = tmp / f"{episode_slug}.txt"
         output_mp3 = tmp / f"{episode_slug}.mp3"
         # post.title, not episode_title: the date prefix on episode_title
         # ("Aug 22 - <title>") is RSS-ordering bookkeeping, never spoken
         # content. (Today it also happens to not match spoken_title's ISO
         # date strip, but that's incidental -- don't rely on it.)
         adapted_text = prepend_title(post.title, adapted_text)
-        input_txt.write_text(adapted_text, encoding="utf-8")
 
-        cmd = [
-            "ttsjoin",
-            "--input-file",
-            str(input_txt),
-            "--output-file",
-            str(output_mp3),
-            "--model",
-            TTS_MODEL,
-            "--voice",
-            source.tts_voice,
-        ]
-        subprocess.run(cmd, check=True)
+        tts.render_episode(
+            adapted_text,
+            tts.openai_config(model=TTS_MODEL, voice=source.tts_voice),
+            output_mp3,
+            feed_slug=source.feed_slug,
+            episode_id=episode_slug,
+        )
 
         r2_client.upload_file(output_mp3, episode_r2_key, content_type="audio/mpeg")
         size_bytes = output_mp3.stat().st_size
@@ -188,6 +182,7 @@ def process_blog_post(
             check=False,
             capture_output=True,
             text=True,
+            timeout=60,
         )
         if probe.returncode == 0:
             try:
