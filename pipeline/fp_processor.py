@@ -9,6 +9,7 @@ from email.utils import format_datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from pipeline import tts
 from pipeline.db import Episode
 from pipeline.feed import regenerate_and_upload_feed
 from pipeline.rundown_writer import _validate_script_length
@@ -42,7 +43,9 @@ def _parse_duration_seconds(mp3_path: Path) -> int | None:
         "default=noprint_wrappers=1:nokey=1",
         str(mp3_path),
     ]
-    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    result = subprocess.run(
+        cmd, check=False, capture_output=True, text=True, timeout=60
+    )
     if result.returncode != 0:
         return None
     try:
@@ -69,28 +72,21 @@ def process_fp_digest_job(
         raise RuntimeError(f"FP digest job {job_id} has empty script")
     _validate_script_length(script, f"FP digest job {job_id}")
 
-    # Step 2: TTS via ttsjoin.
+    # Step 2: TTS via pipeline.tts.
     episode_slug = f"{date_str}-fp-digest"
     episode_r2_key = f"episodes/{FEED_SLUG}/{episode_slug}.mp3"
 
     with tempfile.TemporaryDirectory(prefix="fp-digest-") as tmp_dir:
         tmp = Path(tmp_dir)
-        input_txt = tmp / f"{episode_slug}.txt"
         output_mp3 = tmp / f"{episode_slug}.mp3"
-        input_txt.write_text(script, encoding="utf-8")
 
-        cmd = [
-            "ttsjoin",
-            "--model",
-            TTS_MODEL,
-            "--voice",
-            TTS_VOICE,
-            "--input-file",
-            str(input_txt),
-            "--output-file",
-            str(output_mp3),
-        ]
-        subprocess.run(cmd, check=True)
+        tts.render_episode(
+            script,
+            tts.openai_config(model=TTS_MODEL, voice=TTS_VOICE),
+            output_mp3,
+            feed_slug=FEED_SLUG,
+            episode_id=episode_slug,
+        )
 
         # Step 3: Upload MP3 to R2.
         r2_client.upload_file(output_mp3, episode_r2_key, content_type="audio/mpeg")

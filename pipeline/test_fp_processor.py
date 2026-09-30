@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import subprocess
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from pipeline.fp_processor import process_fp_digest_job
+from pipeline.tts import openai_config
 
 
 # Processors reject scripts too short to be a real episode
@@ -18,7 +18,7 @@ from pipeline.fp_processor import process_fp_digest_job
 _FILLER = " The briefing continues with further detail." * 15
 
 
-def test_process_fp_digest_job(tmp_path, monkeypatch) -> None:
+def test_process_fp_digest_job(tmp_path, monkeypatch, fake_tts_render) -> None:
     """Verify TTS, R2 upload, episode insert, and feed regeneration are called."""
     from pipeline.db import StateStore
 
@@ -41,12 +41,8 @@ def test_process_fp_digest_job(tmp_path, monkeypatch) -> None:
         "This is the Foreign Policy briefing." + _FILLER, encoding="utf-8"
     )
 
-    # Mock ttsjoin and ffprobe subprocess
+    # Mock ffprobe subprocess (rendering is stubbed by fake_tts_render)
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="120.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -68,6 +64,13 @@ def test_process_fp_digest_job(tmp_path, monkeypatch) -> None:
     # Episode should be inserted with correct feed_slug
     episodes = store.list_episodes(feed_slug="fp-digest")
     assert len(episodes) == 1
+
+    # Rendered with onyx under the FP Digest's feed identity.
+    [call] = fake_tts_render
+    assert call["config"] == openai_config(model="tts-1-hd", voice="onyx")
+    assert call["feed_slug"] == "fp-digest"
+    assert call["episode_id"] == "2026-03-06-fp-digest"
+    assert call["text"].startswith("This is the Foreign Policy briefing.")
     episode = episodes[0]
     assert "Foreign Policy Digest" in episode.title
     assert "2026-03-06" in episode.title
@@ -86,7 +89,9 @@ def test_process_fp_digest_job(tmp_path, monkeypatch) -> None:
     store.close()
 
 
-def test_process_fp_digest_with_show_notes(tmp_path, monkeypatch) -> None:
+def test_process_fp_digest_with_show_notes(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
     """When work_dir has plan.json and articles, show notes are stored."""
     from pipeline.db import StateStore
 
@@ -132,10 +137,6 @@ def test_process_fp_digest_with_show_notes(tmp_path, monkeypatch) -> None:
 
     # Mock subprocess and feed regen
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="120.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -166,7 +167,9 @@ def test_process_fp_digest_with_show_notes(tmp_path, monkeypatch) -> None:
     store.close()
 
 
-def test_process_fp_filters_by_covered_headlines(tmp_path, monkeypatch) -> None:
+def test_process_fp_filters_by_covered_headlines(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
     """When covered.json exists, FP show notes only include covered stories."""
     from pipeline.db import StateStore
 
@@ -226,10 +229,6 @@ def test_process_fp_filters_by_covered_headlines(tmp_path, monkeypatch) -> None:
     script_file.write_text("The FP briefing." + _FILLER, encoding="utf-8")
 
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="120.0\n")
         return subprocess.CompletedProcess(cmd, 0)
