@@ -89,3 +89,4 @@ def test_dry_run_renders_with_voice_and_touches_no_state(
     assert call["episode_id"] == "dry-run"
     assert call["manifest_dir"] is None
     assert call["cache_dir"] is None
+    assert call["notify_fallback"] is False  # a dry run pages nobody

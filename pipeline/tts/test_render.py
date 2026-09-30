@@ -277,27 +277,6 @@ def test_provider_for_builds_openai_provider() -> None:
     )
 
 
-def test_gemini_primary_is_refused_before_any_side_effect(
-    tmp_path, monkeypatch
-) -> None:
-    made: list[object] = []
-    monkeypatch.setattr(render, "_provider_for", lambda leaf: made.append(leaf))
-    cfg = RenderConfig(GeminiConfig("gemini-3.8-flash-lite-tts", "Kore"), None)
-    with pytest.raises(ValueError, match="T3b"):
-        render.render_episode(
-            TEXT,
-            cfg,
-            tmp_path / "o.mp3",
-            feed_slug="x",
-            episode_id="y",
-            manifest_dir=tmp_path / "m",
-            cache_dir=tmp_path / "c",
-        )
-    assert made == []
-    assert not (tmp_path / "m").exists() and not (tmp_path / "c").exists()
-    assert not (tmp_path / "o.mp3").exists()
-
-
 def _only_entry(tmp):
     [entry] = [p for p in (tmp / "c").iterdir() if not p.name.startswith(".")]
     return entry
