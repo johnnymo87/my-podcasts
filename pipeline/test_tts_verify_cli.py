@@ -157,6 +157,7 @@ def test_clean_external_transcript_passes(tmp_path, script_file, audio_file, no_
     assert report["status"] == "pass"
     assert report["mode"] == "projected"
     assert report["asr"]["source"] == "external"
+    assert report["decode_warnings"] is None
     assert report["chunks"]
     assert all(c["recall"] >= 0.99 for c in report["chunks"])
     assert report["audio_sha256"] == sha(audio_file.read_bytes())
@@ -789,7 +790,7 @@ def test_external_transcript_has_no_audio_seconds_or_estimates(
     report = report_of(result)
     assert report["audio_seconds"] is None
     assert all(c["est_start_s"] is None for c in report["chunks"])
-    assert report["decode_warnings"] == ""
+    assert report["decode_warnings"] is None
     assert report["transcript_sha256"] == sha(as_asr(SCRIPT).encode())
 
 
@@ -803,6 +804,7 @@ def test_replay_reports_audio_seconds_from_saved_segments(
     report = report_of(result)
     assert report["audio_seconds"] == pytest.approx(700.0)
     assert report["chunks"][0]["est_start_s"] == 0.0
+    assert report["decode_warnings"] is None  # replay decoded nothing
 
 
 # --- encoding and option validation -----------------------------------------

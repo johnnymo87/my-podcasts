@@ -1376,7 +1376,7 @@ def _tts_verify(
     transcript_text = ""
     transcript_sha: str | None = None
     audio_seconds: float | None = None
-    decode_warnings = ""
+    decode_warnings: str | None = None  # set only when a decode actually ran
 
     if transcript_path is not None:
         transcript_text, asr_info, audio_seconds = _load_transcript_file(
