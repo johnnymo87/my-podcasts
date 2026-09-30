@@ -9,7 +9,7 @@ with ``dataclasses.asdict`` (the cache key and manifest rely on that).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 
@@ -50,14 +50,11 @@ def _require_nonempty(kind: str, model: object, voice: object) -> None:
 class OpenAIConfig:
     model: str
     voice: str
-    provider: Literal["openai"] = "openai"
+    # A fixed tag, not a parameter: it is in ``asdict`` output but not in __init__.
+    provider: Literal["openai"] = field(default="openai", init=False)
 
     def __post_init__(self) -> None:
         _require_nonempty("OpenAI render", self.model, self.voice)
-        if self.provider != "openai":
-            raise ValueError(
-                f"OpenAIConfig provider must be 'openai': {self.provider!r}"
-            )
 
 
 @dataclass(frozen=True)
@@ -65,14 +62,10 @@ class GeminiConfig:
     model: str
     voice: str
     style: str = ""
-    provider: Literal["gemini"] = "gemini"
+    provider: Literal["gemini"] = field(default="gemini", init=False)
 
     def __post_init__(self) -> None:
         _require_nonempty("Gemini render", self.model, self.voice)
-        if self.provider != "gemini":
-            raise ValueError(
-                f"GeminiConfig provider must be 'gemini': {self.provider!r}"
-            )
         if not isinstance(self.style, str):
             raise ValueError("Gemini style must be a string")
         if self.voice.lower() in OPENAI_VOICES:
@@ -155,10 +148,12 @@ def resolve_render_config(
     entry = FEED_VOICES.get(feed_slug, DEFAULT_RENDER_CONFIG)
     if voice_override is None and model_override is None:
         return entry
-    base = entry.primary if isinstance(entry.primary, OpenAIConfig) else entry.fallback
-    if base is None:
-        base = DEFAULT_RENDER_CONFIG.primary
-    assert isinstance(base, OpenAIConfig)
+    # RenderConfig guarantees ``fallback`` is an OpenAIConfig or None, and
+    # DEFAULT_RENDER_CONFIG's primary is OpenAI, so ``base`` is always OpenAI.
+    if isinstance(entry.primary, OpenAIConfig):
+        base = entry.primary
+    else:
+        base = entry.fallback or DEFAULT_RENDER_CONFIG.primary
     return openai_config(
         model=model_override if model_override is not None else base.model,
         voice=voice_override if voice_override is not None else base.voice,

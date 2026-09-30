@@ -340,29 +340,61 @@ def test_rendered_leaf_on_render_and_cache_hit(harness) -> None:
     assert hit.provider == "openai"
 
 
-def test_cache_hit_reports_entry_provenance_not_request(harness) -> None:
-    _, _, tmp = harness
-    other = OpenAIConfig("tts-1", "echo")
+def _store_entry(tmp, rendered: OpenAIConfig, *, chunks: int = 3) -> None:
     (tmp / "out.mp3").write_bytes(b"ID3x")
     res = {
         "schema": 2,
         "provider": "openai",
-        "requested": dataclasses.asdict(RenderConfig(other)),
-        "rendered": dataclasses.asdict(other),
+        "requested": dataclasses.asdict(RenderConfig(rendered)),
+        "rendered": dataclasses.asdict(rendered),
         "verification": "not_run_openai",
         "fallback_reason": None,
         "renderer_version": "2",
-        "chunks": 3,
+        "chunks": chunks,
         "total_audio_seconds": 7.5,
     }
     assert cache.store(tmp / "c", cache.cache_key(TEXT, CFG), tmp / "out.mp3", res)
+
+
+def test_cache_hit_reports_provenance_from_the_entry(harness) -> None:
+    provider, _, tmp = harness
+    _store_entry(tmp, CFG.primary)
     hit = _run(tmp)
-    assert hit.cached and hit.chunks == 3
-    assert hit.provider == "openai" and hit.rendered == other
-    assert hit.config == CFG  # the request is still reported as the request
+    assert hit.cached and hit.chunks == 3 and not provider.calls
+    assert hit.provider == "openai" and hit.rendered == CFG.primary
     data = json.loads(hit.manifest_path.read_text())
-    assert data["config"]["primary"]["voice"] == "onyx"
-    assert data["rendered_config"] == dataclasses.asdict(other)
+    assert data["rendered_config"] == dataclasses.asdict(CFG.primary)
+
+
+def test_entry_rendered_by_a_different_leaf_is_a_miss(harness, caplog) -> None:
+    provider, _, tmp = harness
+    _store_entry(tmp, OpenAIConfig("tts-1-hd", "echo"))  # request asks for onyx
+    with caplog.at_level("WARNING", logger="pipeline.tts.render"):
+        result = _run(tmp)
+    assert not result.cached and provider.calls
+    assert result.rendered == CFG.primary
+    assert "re-rendering" in caplog.text
+    # The re-render replaced the mismatched entry with a matching one.
+    assert _run(tmp).cached
+
+
+@pytest.mark.parametrize(
+    "rendered,expected",
+    [
+        (OpenAIConfig("tts-1-hd", "echo"), True),  # the fallback
+        (GeminiConfig("g", "Kore"), True),  # the primary
+        (OpenAIConfig("tts-1-hd", "onyx"), False),
+        (GeminiConfig("g", "Puck"), False),
+    ],
+)
+def test_hit_matches_request_primary_or_fallback(rendered, expected) -> None:
+    cfg = RenderConfig(GeminiConfig("g", "Kore"), OpenAIConfig("tts-1-hd", "echo"))
+    assert render._hit_matches_request(rendered, cfg) is expected
+
+
+def test_hit_matches_request_without_fallback() -> None:
+    assert render._hit_matches_request(CFG.primary, CFG)
+    assert not render._hit_matches_request(OpenAIConfig("tts-1", "onyx"), CFG)
 
 
 def test_entry_without_provenance_is_a_miss_and_is_overwritten(harness) -> None:

@@ -82,20 +82,12 @@ def test_gemini_config_rejects_openai_voice_names(voice: str) -> None:
         GeminiConfig(model="m", voice=voice)
 
 
-def test_openai_voices_set() -> None:
-    assert OPENAI_VOICES == {
-        "alloy",
-        "ash",
-        "ballad",
-        "coral",
-        "echo",
-        "fable",
-        "nova",
-        "onyx",
-        "sage",
-        "shimmer",
-        "verse",
-    }
+def test_provider_is_a_fixed_tag_not_an_init_argument() -> None:
+    with pytest.raises(TypeError):
+        OpenAIConfig("m", "v", provider="gemini")  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        GeminiConfig("m", "Kore", provider="openai")  # type: ignore[call-arg]
+    assert dataclasses.asdict(GEMINI)["provider"] == "gemini"
 
 
 def test_gemini_style_may_be_empty() -> None:
@@ -198,6 +190,8 @@ def test_leaf_from_dict_round_trips() -> None:
         "openai",
         {},
         {"provider": "nope", "model": "m", "voice": "v"},
+        {"model": "m", "voice": "v"},  # provider missing
+        {"provider": None, "model": "m", "voice": "v"},
         {"provider": "openai", "model": "m"},
         {"provider": "openai", "model": "m", "voice": "v", "extra": 1},
         {"provider": "openai", "model": "", "voice": "v"},

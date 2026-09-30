@@ -163,6 +163,19 @@ def _cached_stats(result: dict) -> tuple[int, float]:
         return 0, 0.0
 
 
+def _hit_matches_request(
+    rendered: OpenAIConfig | GeminiConfig, config: RenderConfig
+) -> bool:
+    """A cache entry may only serve a request whose primary or fallback rendered it.
+
+    The key already hashes both, so a mismatch means a corrupt or hand-placed
+    entry; serving it would hand back audio in a voice nobody asked for.
+    """
+    return rendered == config.primary or (
+        config.fallback is not None and rendered == config.fallback
+    )
+
+
 def render_episode(
     text: str,
     config: RenderConfig,
@@ -237,6 +250,17 @@ def render_episode(
     if cache_dir is not None:
         prune(cache_dir)
         hit = lookup(cache_dir, key)
+        if hit is not None and not _hit_matches_request(hit.rendered, config):
+            log.warning(
+                "TTS cache entry %s was rendered by %r, not the request's "
+                "primary/fallback; re-rendering",
+                key,
+                hit.rendered,
+            )
+            # store() keeps an existing structurally-valid entry, so without
+            # this the bad one would shadow every fresh render of this key.
+            shutil.rmtree(cache_dir / key, ignore_errors=True)
+            hit = None
         if hit is not None:
             try:
                 _copy_atomic(hit.audio, out_mp3)
