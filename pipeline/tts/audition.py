@@ -37,8 +37,17 @@ SUMMARY_SCHEMA = 1
 DEFAULT_MODELS = ("gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts")
 DEFAULT_STYLE = "calm, measured news anchor"
 MAX_ERROR_CHARS = 500
+MAX_DETAIL_CHARS = 200
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+class AuditionRefused(ValueError):
+    """A preflight refusal (existing files, colliding names): nothing was written.
+
+    Dedicated so a caller can tell "the user must change the command" from a bug
+    that merely happens to raise ``ValueError``.
+    """
 
 
 @dataclass(frozen=True)
@@ -194,6 +203,12 @@ def _tokens_summary(manifest: dict | None) -> dict | None:
     return tokens if isinstance(tokens, dict) else None
 
 
+def _detail_summary(manifest: dict | None) -> str | None:
+    phase = manifest.get("gemini_phase") if manifest else None
+    detail = phase.get("detail") if isinstance(phase, dict) else None
+    return detail if isinstance(detail, str) and detail.strip() else None
+
+
 def _manifest_files(manifest_dir: Path) -> set[Path]:
     try:
         return set(manifest_dir.rglob("*.json"))
@@ -214,14 +229,18 @@ def _newest(paths) -> Path | None:
 # --- running ---------------------------------------------------------------
 
 
-def _write_summary(path: Path, summary: dict) -> None:
+def _write_atomic(path: Path, text: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     try:
-        tmp.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, path)
     finally:
         with contextlib.suppress(OSError):
             tmp.unlink()
+
+
+def _write_summary(path: Path, summary: dict) -> None:
+    _write_atomic(path, json.dumps(summary, indent=2))
 
 
 def _error_text(exc: BaseException) -> str:
@@ -246,7 +265,9 @@ def format_result_line(entry: dict) -> str:
     if entry["status"] == "ok":
         verify = entry["verify"]
         if verify is None:
-            verdicts = "n/a"
+            # OpenAI is never verified; a Gemini variant without verdicts is a
+            # manifest we could not read, which must not look like "not applicable".
+            verdicts = "n/a" if entry["requested"]["provider"] == "openai" else "?"
         else:
             verdicts = ",".join(v["verdict"] for v in verify) or "-"
         return (
@@ -255,7 +276,11 @@ def format_result_line(entry: dict) -> str:
         )
     req = entry["requested"]
     error = " ".join(str(entry["error"]).split())
-    return f"FAILED  {req['provider']}/{req['model']}/{req['voice']}  {error}"
+    line = f"FAILED  {req['provider']}/{req['model']}/{req['voice']}  {error}"
+    detail = entry.get("detail")
+    if detail:
+        line += f"  (detail: {' '.join(detail.split())[:MAX_DETAIL_CHARS]})"
+    return line
 
 
 def run_audition(
@@ -271,8 +296,10 @@ def run_audition(
 ) -> dict:
     """Render ``text`` once per variant into ``out_dir``; return the summary dict.
 
-    ``ValueError`` (before anything is rendered) when two variants would write the
-    same file, or when a target or ``summary.json`` exists and ``force`` is false.
+    ``AuditionRefused`` (before anything is written) when two variants would write
+    the same file, when ``out_dir`` holds an mp3 this run will not produce (even
+    with ``force``), or when a target, ``script.txt`` or ``summary.json`` exists
+    and ``force`` is false.
     A variant that fails is recorded and the run continues; a failed variant never
     leaves an mp3 behind. ``KeyboardInterrupt``/``SystemExit`` propagate.
     """
@@ -285,24 +312,44 @@ def run_audition(
     requested_names = [variant_filename(feed_slug, v.requested) for v in variants]
     if len(set(requested_names)) != len(requested_names):
         dupes = sorted({n for n in requested_names if requested_names.count(n) > 1})
-        raise ValueError(f"two variants would write the same file: {', '.join(dupes)}")
+        raise AuditionRefused(
+            f"two variants would write the same file: {', '.join(dupes)}"
+        )
     summary_path = out_dir / "summary.json"
+    script_path = out_dir / "script.txt"
+    # An mp3 this run will not produce would sit beside a new script.txt and
+    # summary.json that do not describe it, so even --force does not cover it.
+    # (.partial-* files are ours and are cleaned up below.)
+    if out_dir.is_dir():
+        foreign = sorted(
+            p.name
+            for p in out_dir.glob("*.mp3")
+            if not p.name.startswith(".partial-") and p.name not in requested_names
+        )
+        if foreign:
+            raise AuditionRefused(
+                f"{out_dir} already holds mp3 file(s) this run will not produce: "
+                f"{', '.join(foreign)}. Pick a fresh --out-dir or delete them."
+            )
     if not force:
         existing = [
             name
-            for name in (*requested_names, summary_path.name)
+            for name in (*requested_names, script_path.name, summary_path.name)
             if (out_dir / name).exists()
         ]
         if existing:
-            raise ValueError(
+            raise AuditionRefused(
                 f"refusing to overwrite existing file(s) in {out_dir}: "
                 f"{', '.join(existing)} (use --force)"
             )
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    for stale in out_dir.glob(".partial-*.mp3"):  # crashed earlier run; only ever ours
+        with contextlib.suppress(OSError):
+            stale.unlink()
     manifest_dir = out_dir / "manifests"
     manifest_dir.mkdir(exist_ok=True)
-    (out_dir / "script.txt").write_text(text, encoding="utf-8")
+    _write_atomic(script_path, text)
 
     started = datetime.now(UTC)
     episode_id = f"audition-{started:%Y%m%dT%H%M%S}"
@@ -314,6 +361,8 @@ def run_audition(
         "script_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         "script_chars": len(text),
         "started_at": started.isoformat(),
+        "complete": False,  # flipped only by the last write; a crash leaves it False
+        "planned": [asdict(v.requested) for v in variants],
         "variants": [],
     }
     _write_summary(summary_path, summary)
@@ -336,6 +385,9 @@ def run_audition(
         summary["variants"].append(entry)
         _write_summary(summary_path, summary)
         echo(format_result_line(entry))
+    summary["complete"] = True
+    summary["finished_at"] = datetime.now(UTC).isoformat()
+    _write_summary(summary_path, summary)
     return summary
 
 
@@ -361,6 +413,7 @@ def _render_variant(
         "rendered": None,
         "status": "failed",
         "error": None,
+        "detail": None,
         "file": None,
         "audio_seconds": None,
         "wall_seconds": 0.0,
@@ -427,6 +480,7 @@ def _render_variant(
             entry["manifest"] = manifest_path.relative_to(out_dir).as_posix()
     entry["verify"] = _verify_summary(manifest)
     entry["tokens"] = _tokens_summary(manifest)
+    entry["detail"] = _detail_summary(manifest)
     if entry["status"] == "ok":
         entry["audio_seconds"] = _number((manifest or {}).get("total_audio_seconds"))
     return entry

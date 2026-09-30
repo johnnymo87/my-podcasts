@@ -246,3 +246,39 @@ def test_help_documents_the_defaults():
     flat = "".join(result.output.split())
     assert "".join(DEFAULT_STYLE.split()) in flat
     assert ",".join(DEFAULT_MODELS) in flat
+
+
+def test_empty_models_is_usage_error(fake_render, script_file, tmp_path):
+    result = run(script_file, tmp_path / "out", "--voices", "Kore", "--models", " , ")
+    assert result.exit_code == 2
+    assert "--models" in result.output
+    assert fake_render.calls == []
+
+
+def test_foreign_mp3_in_out_dir_is_usage_error(fake_render, script_file, tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "leftover.mp3").write_bytes(b"x")
+    result = run(script_file, out, "--voices", "Kore", "--force")
+    assert result.exit_code == 2
+    assert "leftover.mp3" in result.output
+    assert fake_render.calls == []
+
+
+def test_unexpected_crash_exits_4_with_traceback(
+    fake_render, script_file, tmp_path, monkeypatch
+):
+    def boom(*args, **kwargs):
+        raise ValueError("disk on fire")  # a ValueError that is NOT a refusal
+
+    monkeypatch.setattr("pipeline.tts.audition.run_audition", boom)
+    result = run(script_file, tmp_path / "out", "--voices", "Kore")
+    assert result.exit_code == 4
+    assert "Traceback" in result.output
+    assert "disk on fire" in result.output
+    assert "unexpected error" in result.output
+
+
+def test_docstring_documents_exit_codes():
+    doc = cli.commands["tts-audition"].help
+    assert "4" in doc and "unexpected" in doc

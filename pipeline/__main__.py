@@ -1594,14 +1594,49 @@ def tts_audition_command(
     A Gemini variant that fails is reported FAILED and never replaced by an OpenAI
     render. Gemini variants also run per-chunk ASR verification and cost money.
 
-    Exit status: 0 all variants rendered, 1 at least one FAILED.
+    Exit status: 0 all variants rendered, 1 at least one variant FAILED, 2 usage
+    error or refusal (nothing rendered), 4 unexpected error (a crash is never
+    reported as a FAILED variant).
     """
+    try:
+        _tts_audition(
+            feed_slug,
+            script_path,
+            voices,
+            models,
+            style,
+            max_chars,
+            out_dir,
+            no_openai,
+            force,
+        )
+    except (click.ClickException, click.exceptions.Exit, click.Abort):
+        raise
+    except Exception:
+        click.echo(traceback.format_exc(), err=True)
+        click.echo("tts-audition: unexpected error", err=True)
+        raise SystemExit(4) from None
+
+
+def _tts_audition(
+    feed_slug: str,
+    script_path: Path,
+    voices: str,
+    models: str | None,
+    style: str | None,
+    max_chars: int | None,
+    out_dir: Path,
+    no_openai: bool,
+    force: bool,
+) -> None:
     from pipeline.tts import audition
 
     voice_list = _csv(voices)
     if not voice_list:
         raise click.BadParameter("give at least one voice", param_hint="--voices")
     model_list = _csv(models) if models is not None else list(audition.DEFAULT_MODELS)
+    if not model_list:
+        raise click.BadParameter("give at least one model", param_hint="--models")
     style_text = audition.DEFAULT_STYLE if style is None else style.strip()
 
     try:
@@ -1644,7 +1679,7 @@ def tts_audition_command(
             force=force,
             echo=click.echo,
         )
-    except ValueError as exc:
+    except audition.AuditionRefused as exc:
         raise click.UsageError(str(exc)) from None
 
     results = summary["variants"]

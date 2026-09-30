@@ -14,6 +14,7 @@ import pytest
 
 from pipeline.tts import audition
 from pipeline.tts.audition import (
+    AuditionRefused,
     Variant,
     baseline_leaf,
     build_variants,
@@ -413,7 +414,7 @@ def test_existing_target_refused_without_force(tmp_path):
     target = out / variant_filename("the-rundown", openai_variant().requested)
     target.write_bytes(b"old")
     fake = FakeRender()
-    with pytest.raises(ValueError, match=target.name):
+    with pytest.raises(AuditionRefused, match=target.name):
         audition_run(tmp_path, [openai_variant(), gemini_variant()], fake)
     assert fake.calls == []
     assert target.read_bytes() == b"old"
@@ -425,7 +426,7 @@ def test_existing_summary_refused_without_force(tmp_path):
     out.mkdir()
     (out / "summary.json").write_text("{}")
     fake = FakeRender()
-    with pytest.raises(ValueError, match="summary.json"):
+    with pytest.raises(AuditionRefused, match="summary.json"):
         audition_run(tmp_path, [openai_variant()], fake)
     assert fake.calls == []
 
@@ -466,7 +467,7 @@ def test_force_keeps_stale_target_until_its_variant_finishes(tmp_path):
 
 def test_colliding_target_names_are_refused(tmp_path):
     fake = FakeRender()
-    with pytest.raises(ValueError, match="same file"):
+    with pytest.raises(AuditionRefused, match="same file"):
         audition_run(tmp_path, [gemini_variant("a b"), gemini_variant("a_b")], fake)
     assert fake.calls == []
 
@@ -562,3 +563,113 @@ def test_default_render_is_looked_up_at_call_time(tmp_path, monkeypatch):
     )
     assert len(fake.calls) == 1
     assert audition.__name__ == "pipeline.tts.audition"
+
+
+# --- review findings -------------------------------------------------------
+
+
+def test_refusal_is_a_value_error_subclass():
+    assert issubclass(AuditionRefused, ValueError)
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_foreign_mp3_in_out_dir_refused_even_with_force(tmp_path, force):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "earlier-run.mp3").write_bytes(b"old")
+    fake = FakeRender()
+    with pytest.raises(AuditionRefused, match=r"earlier-run\.mp3.*fresh --out-dir"):
+        audition_run(tmp_path, [openai_variant()], fake, force=force)
+    assert fake.calls == []
+    assert (out / "earlier-run.mp3").read_bytes() == b"old"
+    assert not (out / "script.txt").exists()
+    assert not (out / "summary.json").exists()
+
+
+def test_force_still_replaces_this_runs_own_targets(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    own = out / variant_filename("the-rundown", openai_variant().requested)
+    own.write_bytes(b"old")
+    summary, _ = audition_run(tmp_path, [openai_variant()], FakeRender(), force=True)
+    assert summary["variants"][0]["status"] == "ok"
+    assert own.read_bytes() == b"partial-audio"
+
+
+def test_stale_partial_files_are_removed_not_refused(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / ".partial-7.mp3").write_bytes(b"crashed")
+    audition_run(tmp_path, [openai_variant()], FakeRender())
+    assert not list(out.glob(".partial-*"))
+
+
+def test_existing_script_txt_refused_without_force_and_written_atomically(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "script.txt").write_text("old script")
+    fake = FakeRender()
+    with pytest.raises(AuditionRefused, match=r"script\.txt"):
+        audition_run(tmp_path, [openai_variant()], fake)
+    assert fake.calls == []
+    assert (out / "script.txt").read_text() == "old script"
+    audition_run(tmp_path, [openai_variant()], fake, force=True, text="new script")
+    assert (out / "script.txt").read_text() == "new script"
+    assert not list(out.glob("*.tmp"))
+
+
+def test_summary_complete_flag_and_planned(tmp_path):
+    out = tmp_path / "out"
+    seen: list[dict] = []
+
+    class Spy(FakeRender):
+        def __call__(self, *a, **kw):
+            seen.append(json.loads((out / "summary.json").read_text()))
+            return super().__call__(*a, **kw)
+
+    variants = [openai_variant(), gemini_variant()]
+    summary = audition_run(tmp_path, variants, Spy())[0]
+    planned = [asdict(v.requested) for v in variants]
+    assert seen[0]["complete"] is False and "finished_at" not in seen[0]
+    assert seen[0]["planned"] == planned
+    assert summary["complete"] is True
+    assert summary["finished_at"]
+    assert summary["planned"] == planned
+    assert json.loads((out / "summary.json").read_text()) == summary
+
+
+def test_interrupted_run_leaves_complete_false(tmp_path):
+    fake = FakeRender(actions={"Puck": "interrupt"})
+    with pytest.raises(KeyboardInterrupt):
+        audition_run(tmp_path, [gemini_variant("Kore"), gemini_variant("Puck")], fake)
+    on_disk = json.loads((tmp_path / "out" / "summary.json").read_text())
+    assert on_disk["complete"] is False
+    assert len(on_disk["planned"]) == 2
+    assert "finished_at" not in on_disk
+
+
+def test_gemini_without_verify_prints_question_mark_openai_prints_na(tmp_path):
+    fake = FakeRender(phase={"chunks": "garbage", "tokens": None})
+    _, lines = audition_run(tmp_path, [openai_variant(), gemini_variant()], fake)
+    assert lines[0].endswith("verify: n/a")
+    assert lines[1].endswith("verify: ?")
+
+
+def test_failed_line_and_entry_carry_phase_detail(tmp_path):
+    detail = "child exited 1\n" + "x" * 400
+    phase = {"chunks": [], "tokens": None, "detail": detail}
+    fake = FakeRender(actions={"Kore": "render_error"}, phase=phase)
+    summary, lines = audition_run(tmp_path, [gemini_variant("Kore")], fake)
+    entry = summary["variants"][0]
+    assert entry["detail"] == detail
+    line = lines[0]
+    assert line.startswith(f"FAILED  gemini/{FLASH}/Kore  Gemini phase failed: fatal")
+    assert "child exited 1 xxx" in line  # whitespace collapsed
+    tail = line.split("detail: ", 1)[1]
+    assert len(tail.rstrip(")")) <= 200
+
+
+def test_detail_is_null_without_one(tmp_path):
+    summary, lines = audition_run(tmp_path, [openai_variant()], FakeRender())
+    assert summary["variants"][0]["detail"] is None
+    assert "detail" not in lines[0]
