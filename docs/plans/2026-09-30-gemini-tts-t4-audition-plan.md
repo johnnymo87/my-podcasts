@@ -48,11 +48,16 @@ variant and calls the production `render_episode` with `cache_dir=None`,
    Preflight before any render: Gemini variants need `GEMINI_API_KEY`, the baseline needs
    `OPENAI_API_KEY` (non-empty after strip) -> otherwise `click.UsageError` naming the variable,
    never printing its value.
-5. **Overwrite.** Before rendering, compute every requested target filename; if any exists in the
-   out dir (or `summary.json` exists) and `--force` is not given -> `click.UsageError` listing
-   them. With `--force`, existing targets are replaced only when that variant succeeds (atomic
-   `os.replace`); a variant that fails with `--force` deletes the stale target so no old mp3 can
-   be mistaken for the new variant.
+5. **Fresh out-dir, no in-place reruns.** *(Amended after adversarial review; the original
+   `--force` overwrite/replace design is gone.)* `--out-dir` must not exist. The run creates the
+   parent with `parents=True, exist_ok=True`, then `out_dir.mkdir(exist_ok=False)`; `FileExistsError`
+   -> `AuditionRefused` ("already exists; audition runs always write to a fresh directory"), including
+   an empty existing directory. That atomic `mkdir` is the per-directory lock (a concurrent second run
+   is refused) and guarantees every mp3 in the directory came from this run's script and style.
+   Why: a `--force` rerun that was interrupted left earlier variants' mp3s under normal filenames
+   beside the new `script.txt`, and two concurrent runs shared `.partial-<index>.mp3`. There is no
+   `--force` option or `force` parameter. Refusals that need no directory (filename collisions, no
+   variants) happen before the `mkdir`.
 6. **Excerpt.** `--max-chars N` (optional, >= 200): cut the script at the last paragraph boundary
    (`"\n\n"`) at or before N characters, strip trailing whitespace. If there is no boundary at or
    before N -> usage error (never cut mid-paragraph). The exact text rendered is written to
@@ -101,7 +106,7 @@ def baseline_leaf(feed_slug: str) -> OpenAIConfig: ...
 def build_variants(feed_slug, *, models, voices, style, include_openai) -> list[Variant]: ...
 def excerpt(text: str, max_chars: int | None) -> str: ...   # ValueError when no boundary
 def variant_filename(feed_slug: str, leaf) -> str: ...
-def run_audition(text, variants, out_dir: Path, *, feed_slug, style, force=False,
+def run_audition(text, variants, out_dir: Path, *, feed_slug, style,
                  render=None, echo=print) -> dict: ...      # returns the summary dict
 ```
 `render` defaults to `pipeline.tts.render.render_episode` looked up at call time (tests inject a
@@ -115,8 +120,7 @@ manifest dict into `manifest_dir` for the Gemini case) must cover, TDD:
 - filename from `rendered` and sanitization; `rendered_mismatch` -> FAILED, no mp3 left;
 - `TTSRenderError` and a generic exception -> FAILED, next variant still runs, no mp3 left;
   `KeyboardInterrupt` propagates and leaves no partial;
-- overwrite refusal (target exists, and summary.json exists) and `--force` semantics incl.
-  stale-target deletion on failure;
+- existing out-dir refused (empty or populated), a second run to the same path refused;
 - excerpt boundary rules (exact N, no boundary -> ValueError, None -> unchanged);
 - `script.txt` content and `summary.json` rewritten after each variant (assert after a variant
   crash-through that the earlier variant is in the file);
@@ -139,7 +143,7 @@ Run: `uv run pytest pipeline/tts/test_audition.py -q`. Commit.
 
 Options: `--feed` (required, `click.Choice(sorted(FEED_VOICES))`), `--script` (required, existing
 file), `--voices` (required), `--models` (default above), `--style` (default above),
-`--max-chars` (int >= 200, optional), `--out-dir` (required), `--no-openai` flag, `--force` flag.
+`--max-chars` (int >= 200, optional), `--out-dir` (required, must not exist), `--no-openai` flag.
 Import `pipeline.tts.audition` lazily inside the command (keeps `python -m pipeline --help`
 cheap). Preflight keys (decision 4). Map `ValueError` from `build_variants`/`excerpt` to
 `click.BadParameter`/`UsageError`. Exit code via `SystemExit(1)` when any variant failed.
@@ -148,7 +152,7 @@ Tests in `pipeline/test_tts_audition_cli.py` with `CliRunner`, monkeypatching th
 (and setting dummy keys via `monkeypatch.setenv` — the suite deletes real keys): happy path
 exit 0 and output lines; one failure -> exit 1 and `FAILED` line; missing key -> usage error
 without the value; unknown feed; OpenAI voice in `--voices`; `--max-chars` without a boundary;
-existing target without `--force`. Run the full suite: `uv run pytest -q` (~1 min) and
+existing out-dir. Run the full suite: `uv run pytest -q` (~1 min) and
 `uv run ruff check . && uv run ruff format --check .`. Commit.
 
 ## Task 3: docs

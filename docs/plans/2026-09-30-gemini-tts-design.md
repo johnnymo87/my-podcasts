@@ -200,6 +200,8 @@ The inline text above stays; where it disagrees with these, these win.
   requested. The default style is `calm, measured news anchor` (the style the owner liked; bead `my-podcasts-9p3.6`).
   `--style ""` means none. `--max-chars` only ever cuts at a paragraph boundary
   (a script with none that early is refused), and the exact rendered text is saved as `script.txt`.
+  `--out-dir` must not exist: the run creates it with one atomic `mkdir` (there is no `--force`), so
+  files in a directory always come from a single run and concurrent runs into one path are refused.
   Plan: `docs/plans/2026-09-30-gemini-tts-t4-audition-plan.md`.
 
 ### Completed-render reuse

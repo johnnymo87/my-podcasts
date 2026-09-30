@@ -408,63 +408,6 @@ def test_summary_is_rewritten_after_each_variant(tmp_path):
     assert seen == [1]
 
 
-def test_existing_target_refused_without_force(tmp_path):
-    out = tmp_path / "out"
-    out.mkdir()
-    target = out / variant_filename("the-rundown", openai_variant().requested)
-    target.write_bytes(b"old")
-    fake = FakeRender()
-    with pytest.raises(AuditionRefused, match=target.name):
-        audition_run(tmp_path, [openai_variant(), gemini_variant()], fake)
-    assert fake.calls == []
-    assert target.read_bytes() == b"old"
-    assert not (out / "summary.json").exists()
-
-
-def test_existing_summary_refused_without_force(tmp_path):
-    out = tmp_path / "out"
-    out.mkdir()
-    (out / "summary.json").write_text("{}")
-    fake = FakeRender()
-    with pytest.raises(AuditionRefused, match="summary.json"):
-        audition_run(tmp_path, [openai_variant()], fake)
-    assert fake.calls == []
-
-
-def test_force_replaces_on_success_and_deletes_stale_on_failure(tmp_path):
-    out = tmp_path / "out"
-    out.mkdir()
-    (out / "summary.json").write_text("{}")
-    ok_target = out / variant_filename("the-rundown", openai_variant().requested)
-    bad_target = out / variant_filename("the-rundown", gemini_variant("Kore").requested)
-    ok_target.write_bytes(b"old-ok")
-    bad_target.write_bytes(b"old-bad")
-    fake = FakeRender(actions={"Kore": "render_error"})
-    summary, _ = audition_run(
-        tmp_path, [openai_variant(), gemini_variant("Kore")], fake, force=True
-    )
-    assert ok_target.read_bytes() == b"partial-audio"
-    assert not bad_target.exists()
-    assert json.loads((out / "summary.json").read_text()) == summary
-
-
-def test_force_keeps_stale_target_until_its_variant_finishes(tmp_path):
-    out = tmp_path / "out"
-    out.mkdir()
-    target = out / variant_filename("the-rundown", gemini_variant("Kore").requested)
-    target.write_bytes(b"old")
-    observed: list[bytes] = []
-
-    class Spy(FakeRender):
-        def __call__(self, *a, **kw):
-            observed.append(target.read_bytes())
-            return super().__call__(*a, **kw)
-
-    audition_run(tmp_path, [gemini_variant("Kore")], Spy(), force=True)
-    assert observed == [b"old"]  # replaced only by the atomic rename afterwards
-    assert target.read_bytes() == b"partial-audio"
-
-
 def test_colliding_target_names_are_refused(tmp_path):
     fake = FakeRender()
     with pytest.raises(AuditionRefused, match="same file"):
@@ -572,52 +515,6 @@ def test_refusal_is_a_value_error_subclass():
     assert issubclass(AuditionRefused, ValueError)
 
 
-@pytest.mark.parametrize("force", [False, True])
-def test_foreign_mp3_in_out_dir_refused_even_with_force(tmp_path, force):
-    out = tmp_path / "out"
-    out.mkdir()
-    (out / "earlier-run.mp3").write_bytes(b"old")
-    fake = FakeRender()
-    with pytest.raises(AuditionRefused, match=r"earlier-run\.mp3.*fresh --out-dir"):
-        audition_run(tmp_path, [openai_variant()], fake, force=force)
-    assert fake.calls == []
-    assert (out / "earlier-run.mp3").read_bytes() == b"old"
-    assert not (out / "script.txt").exists()
-    assert not (out / "summary.json").exists()
-
-
-def test_force_still_replaces_this_runs_own_targets(tmp_path):
-    out = tmp_path / "out"
-    out.mkdir()
-    own = out / variant_filename("the-rundown", openai_variant().requested)
-    own.write_bytes(b"old")
-    summary, _ = audition_run(tmp_path, [openai_variant()], FakeRender(), force=True)
-    assert summary["variants"][0]["status"] == "ok"
-    assert own.read_bytes() == b"partial-audio"
-
-
-def test_stale_partial_files_are_removed_not_refused(tmp_path):
-    out = tmp_path / "out"
-    out.mkdir()
-    (out / ".partial-7.mp3").write_bytes(b"crashed")
-    audition_run(tmp_path, [openai_variant()], FakeRender())
-    assert not list(out.glob(".partial-*"))
-
-
-def test_existing_script_txt_refused_without_force_and_written_atomically(tmp_path):
-    out = tmp_path / "out"
-    out.mkdir()
-    (out / "script.txt").write_text("old script")
-    fake = FakeRender()
-    with pytest.raises(AuditionRefused, match=r"script\.txt"):
-        audition_run(tmp_path, [openai_variant()], fake)
-    assert fake.calls == []
-    assert (out / "script.txt").read_text() == "old script"
-    audition_run(tmp_path, [openai_variant()], fake, force=True, text="new script")
-    assert (out / "script.txt").read_text() == "new script"
-    assert not list(out.glob("*.tmp"))
-
-
 def test_summary_complete_flag_and_planned(tmp_path):
     out = tmp_path / "out"
     seen: list[dict] = []
@@ -673,3 +570,66 @@ def test_detail_is_null_without_one(tmp_path):
     summary, lines = audition_run(tmp_path, [openai_variant()], FakeRender())
     assert summary["variants"][0]["detail"] is None
     assert "detail" not in lines[0]
+
+
+# --- fresh out-dir (no in-place reruns) --------------------------------------
+
+
+@pytest.mark.parametrize("populated", [False, True])
+def test_existing_out_dir_is_refused_and_left_untouched(tmp_path, populated):
+    out = tmp_path / "out"
+    out.mkdir()
+    if populated:
+        (out / "earlier.mp3").write_bytes(b"old")
+        (out / "script.txt").write_text("old script")
+        (out / "summary.json").write_text("{}")
+    before = sorted(p.name for p in out.iterdir())
+    fake = FakeRender()
+    with pytest.raises(AuditionRefused, match="already exists.*fresh directory"):
+        audition_run(tmp_path, [openai_variant()], fake)
+    assert fake.calls == []
+    assert sorted(p.name for p in out.iterdir()) == before
+    if populated:
+        assert (out / "earlier.mp3").read_bytes() == b"old"
+        assert (out / "script.txt").read_text() == "old script"
+
+
+def test_second_run_into_the_same_path_is_refused(tmp_path):
+    first, _ = audition_run(tmp_path, [openai_variant()], FakeRender())
+    out = tmp_path / "out"
+    snapshot = {p.name: p.read_bytes() for p in out.iterdir() if p.is_file()}
+    fake = FakeRender()
+    with pytest.raises(AuditionRefused, match="already exists"):
+        audition_run(tmp_path, [gemini_variant()], fake, text="a different script")
+    assert fake.calls == []
+    assert {p.name: p.read_bytes() for p in out.iterdir() if p.is_file()} == snapshot
+    assert json.loads((out / "summary.json").read_text()) == first
+
+
+def test_parent_directories_are_created(tmp_path):
+    out = tmp_path / "a" / "b" / "out"
+    run_audition(
+        "Hello there.",
+        [openai_variant()],
+        out,
+        feed_slug="the-rundown",
+        style="",
+        render=FakeRender(),
+        echo=lambda _l: None,
+    )
+    assert (out / "summary.json").is_file()
+
+
+def test_refusals_that_need_no_directory_happen_before_the_mkdir(tmp_path):
+    out = tmp_path / "never"
+    with pytest.raises(AuditionRefused, match="same file"):
+        run_audition(
+            "x y.",
+            [gemini_variant("a b"), gemini_variant("a_b")],
+            out,
+            feed_slug="the-rundown",
+            style="",
+            render=FakeRender(),
+            echo=lambda _l: None,
+        )
+    assert not out.exists()

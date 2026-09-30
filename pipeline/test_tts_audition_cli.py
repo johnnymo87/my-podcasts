@@ -216,17 +216,34 @@ def test_max_chars_minimum(fake_render, script_file, tmp_path):
     assert "--max-chars" in result.output
 
 
-def test_existing_target_without_force(fake_render, script_file, tmp_path):
+def test_existing_out_dir_is_usage_error(fake_render, script_file, tmp_path):
     out = tmp_path / "out"
     first = run(script_file, out, "--voices", "Kore", "--no-openai")
     assert first.exit_code == 0, first.output
     n_calls = len(fake_render.calls)
+    snapshot = sorted(p.name for p in out.iterdir())
     second = run(script_file, out, "--voices", "Kore", "--no-openai")
     assert second.exit_code == 2
-    assert "--force" in second.output
+    assert "already exists" in second.output
     assert len(fake_render.calls) == n_calls
-    third = run(script_file, out, "--voices", "Kore", "--no-openai", "--force")
-    assert third.exit_code == 0, third.output
+    assert sorted(p.name for p in out.iterdir()) == snapshot
+
+
+def test_empty_existing_out_dir_is_usage_error(fake_render, script_file, tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    result = run(script_file, out, "--voices", "Kore")
+    assert result.exit_code == 2
+    assert "already exists" in result.output
+    assert fake_render.calls == []
+    assert list(out.iterdir()) == []
+
+
+def test_force_option_is_gone(fake_render, script_file, tmp_path):
+    result = run(script_file, tmp_path / "out", "--voices", "Kore", "--force")
+    assert result.exit_code == 2
+    assert "--force" in result.output
+    assert fake_render.calls == []
 
 
 def test_blank_script_is_usage_error(fake_render, tmp_path):
@@ -252,16 +269,6 @@ def test_empty_models_is_usage_error(fake_render, script_file, tmp_path):
     result = run(script_file, tmp_path / "out", "--voices", "Kore", "--models", " , ")
     assert result.exit_code == 2
     assert "--models" in result.output
-    assert fake_render.calls == []
-
-
-def test_foreign_mp3_in_out_dir_is_usage_error(fake_render, script_file, tmp_path):
-    out = tmp_path / "out"
-    out.mkdir()
-    (out / "leftover.mp3").write_bytes(b"x")
-    result = run(script_file, out, "--voices", "Kore", "--force")
-    assert result.exit_code == 2
-    assert "leftover.mp3" in result.output
     assert fake_render.calls == []
 
 

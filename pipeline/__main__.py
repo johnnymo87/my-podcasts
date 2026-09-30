@@ -1572,10 +1572,10 @@ def _csv(value: str) -> list[str]:
     "--out-dir",
     required=True,
     type=click.Path(file_okay=False, path_type=Path),
-    help="Where the mp3s, script.txt, manifests/ and summary.json go.",
+    help="A directory that does NOT exist yet (the run creates it): where the "
+    "mp3s, script.txt, manifests/ and summary.json go.",
 )
 @click.option("--no-openai", is_flag=True, help="Skip the OpenAI baseline variant.")
-@click.option("--force", is_flag=True, help="Overwrite existing audition files.")
 def tts_audition_command(
     feed_slug: str,
     script_path: Path,
@@ -1585,7 +1585,6 @@ def tts_audition_command(
     max_chars: int | None,
     out_dir: Path,
     no_openai: bool,
-    force: bool,
 ) -> None:
     """Render one script through the feed's OpenAI voice and Gemini model x voice
     variants into local mp3s, to compare by ear. Local only: nothing is published,
@@ -1608,7 +1607,6 @@ def tts_audition_command(
             max_chars,
             out_dir,
             no_openai,
-            force,
         )
     except (click.ClickException, click.exceptions.Exit, click.Abort):
         raise
@@ -1627,7 +1625,6 @@ def _tts_audition(
     max_chars: int | None,
     out_dir: Path,
     no_openai: bool,
-    force: bool,
 ) -> None:
     from pipeline.tts import audition
 
@@ -1676,7 +1673,6 @@ def _tts_audition(
             out_dir,
             feed_slug=feed_slug,
             style=style_text,
-            force=force,
             echo=click.echo,
         )
     except audition.AuditionRefused as exc:

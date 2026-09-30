@@ -290,16 +290,14 @@ def run_audition(
     *,
     feed_slug: str,
     style: str,
-    force: bool = False,
     render: Callable | None = None,
     echo: Callable[[str], Any] = print,
 ) -> dict:
     """Render ``text`` once per variant into ``out_dir``; return the summary dict.
 
-    ``AuditionRefused`` (before anything is written) when two variants would write
-    the same file, when ``out_dir`` holds an mp3 this run will not produce (even
-    with ``force``), or when a target, ``script.txt`` or ``summary.json`` exists
-    and ``force`` is false.
+    ``AuditionRefused`` when two variants would write the same file (before any
+    directory is touched) or when ``out_dir`` already exists: the run claims it
+    with one atomic ``mkdir``, so every file in it comes from this run.
     A variant that fails is recorded and the run continues; a failed variant never
     leaves an mp3 behind. ``KeyboardInterrupt``/``SystemExit`` propagate.
     """
@@ -315,41 +313,20 @@ def run_audition(
         raise AuditionRefused(
             f"two variants would write the same file: {', '.join(dupes)}"
         )
+    # The one atomic step that claims the directory. Every run writes to a
+    # directory it created, so nothing in it can come from another run's script,
+    # style or voices, and a concurrent run into the same path is refused here.
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        out_dir.mkdir(exist_ok=False)
+    except FileExistsError:
+        raise AuditionRefused(
+            f"{out_dir} already exists; audition runs always write to a fresh directory"
+        ) from None
     summary_path = out_dir / "summary.json"
-    script_path = out_dir / "script.txt"
-    # An mp3 this run will not produce would sit beside a new script.txt and
-    # summary.json that do not describe it, so even --force does not cover it.
-    # (.partial-* files are ours and are cleaned up below.)
-    if out_dir.is_dir():
-        foreign = sorted(
-            p.name
-            for p in out_dir.glob("*.mp3")
-            if not p.name.startswith(".partial-") and p.name not in requested_names
-        )
-        if foreign:
-            raise AuditionRefused(
-                f"{out_dir} already holds mp3 file(s) this run will not produce: "
-                f"{', '.join(foreign)}. Pick a fresh --out-dir or delete them."
-            )
-    if not force:
-        existing = [
-            name
-            for name in (*requested_names, script_path.name, summary_path.name)
-            if (out_dir / name).exists()
-        ]
-        if existing:
-            raise AuditionRefused(
-                f"refusing to overwrite existing file(s) in {out_dir}: "
-                f"{', '.join(existing)} (use --force)"
-            )
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for stale in out_dir.glob(".partial-*.mp3"):  # crashed earlier run; only ever ours
-        with contextlib.suppress(OSError):
-            stale.unlink()
     manifest_dir = out_dir / "manifests"
-    manifest_dir.mkdir(exist_ok=True)
-    _write_atomic(script_path, text)
+    manifest_dir.mkdir()
+    _write_atomic(out_dir / "script.txt", text)
 
     started = datetime.now(UTC)
     episode_id = f"audition-{started:%Y%m%dT%H%M%S}"
@@ -367,19 +344,15 @@ def run_audition(
     }
     _write_summary(summary_path, summary)
 
-    for index, (variant, name) in enumerate(
-        zip(variants, requested_names, strict=True)
-    ):
+    for index, variant in enumerate(variants):
         entry = _render_variant(
             text,
             variant,
-            name,
             index,
             out_dir=out_dir,
             manifest_dir=manifest_dir,
             feed_slug=feed_slug,
             episode_id=episode_id,
-            force=force,
             render=render,
         )
         summary["variants"].append(entry)
@@ -394,19 +367,16 @@ def run_audition(
 def _render_variant(
     text: str,
     variant: Variant,
-    name: str,
     index: int,
     *,
     out_dir: Path,
     manifest_dir: Path,
     feed_slug: str,
     episode_id: str,
-    force: bool,
     render: Callable,
 ) -> dict:
     requested = variant.requested
     partial = out_dir / f".partial-{index}.mp3"
-    target = out_dir / name
     entry: dict = {
         "label": None,
         "requested": asdict(requested),
@@ -426,8 +396,6 @@ def _render_variant(
     before = _manifest_files(manifest_dir)
     result = None
     started = time.monotonic()
-    with contextlib.suppress(FileNotFoundError):
-        partial.unlink()
     try:
         try:
             result = render(
@@ -466,10 +434,6 @@ def _render_variant(
         entry["wall_seconds"] = round(time.monotonic() - started, 3)
         with contextlib.suppress(OSError):
             partial.unlink()
-        if entry["status"] != "ok" and force:
-            # Never let an old file stand in for a variant that just failed.
-            with contextlib.suppress(OSError):
-                target.unlink()
 
     manifest_path = result.manifest_path if result is not None else None
     if manifest_path is None:
