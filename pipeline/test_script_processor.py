@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 from unittest.mock import MagicMock
 from xml.etree import ElementTree as ET
 
@@ -15,6 +14,7 @@ from pipeline.script_processor import (
     render_show_notes_html,
     strip_markdown_for_tts,
 )
+from pipeline.tts import openai_config
 
 
 def test_episode_show_notes_html_stored_and_retrieved(tmp_path) -> None:
@@ -175,7 +175,7 @@ def test_render_show_notes_handles_tables() -> None:
     assert "Vioxx" in html
 
 
-def test_publish_script_end_to_end(tmp_path, monkeypatch) -> None:
+def test_publish_script_end_to_end(tmp_path, monkeypatch, fake_tts_render) -> None:
     """Full publish flow: read script, TTS, upload, insert episode, regen feed."""
     store = StateStore(tmp_path / "test.sqlite3")
     r2_client = MagicMock()
@@ -193,12 +193,8 @@ def test_publish_script_end_to_end(tmp_path, monkeypatch) -> None:
         encoding="utf-8",
     )
 
-    # Mock ttsjoin and ffprobe
+    # Mock ffprobe (rendering is stubbed by fake_tts_render)
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="180.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -255,7 +251,9 @@ def test_publish_script_end_to_end(tmp_path, monkeypatch) -> None:
     store.close()
 
 
-def test_publish_script_without_show_notes(tmp_path, monkeypatch) -> None:
+def test_publish_script_without_show_notes(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
     """Publish works without show notes file."""
     store = StateStore(tmp_path / "test.sqlite3")
     r2_client = MagicMock()
@@ -264,10 +262,6 @@ def test_publish_script_without_show_notes(tmp_path, monkeypatch) -> None:
     script_file.write_text("Just a plain script.", encoding="utf-8")
 
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="60.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -300,7 +294,9 @@ def test_publish_script_without_show_notes(tmp_path, monkeypatch) -> None:
     store.close()
 
 
-def test_publish_script_tts_receives_stripped_text(tmp_path, monkeypatch) -> None:
+def test_publish_script_tts_receives_stripped_text(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
     """Verify TTS input file contains stripped text, not raw markdown."""
     store = StateStore(tmp_path / "test.sqlite3")
     r2_client = MagicMock()
@@ -311,15 +307,7 @@ def test_publish_script_tts_receives_stripped_text(tmp_path, monkeypatch) -> Non
         encoding="utf-8",
     )
 
-    tts_input_text = []
-
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            input_file = cmd[cmd.index("--input-file") + 1]
-            tts_input_text.append(Path(input_file).read_text(encoding="utf-8"))
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="30.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -342,6 +330,7 @@ def test_publish_script_tts_receives_stripped_text(tmp_path, monkeypatch) -> Non
         date_str="2026-03-13",
     )
 
+    tts_input_text = [c["text"] for c in fake_tts_render]
     assert len(tts_input_text) == 1
     assert "##" not in tts_input_text[0]
     assert "**" not in tts_input_text[0]
@@ -352,7 +341,9 @@ def test_publish_script_tts_receives_stripped_text(tmp_path, monkeypatch) -> Non
     store.close()
 
 
-def test_publish_script_archives_source_files(tmp_path, monkeypatch) -> None:
+def test_publish_script_archives_source_files(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
     """Successful publish with show notes archives both script and show-notes
     markdown."""
     store = StateStore(tmp_path / "test.sqlite3")
@@ -366,10 +357,6 @@ def test_publish_script_archives_source_files(tmp_path, monkeypatch) -> None:
     show_notes_file.write_text("## Episode Summary\n\nSummary.\n", encoding="utf-8")
 
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="120.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -401,7 +388,7 @@ def test_publish_script_archives_source_files(tmp_path, monkeypatch) -> None:
 
 
 def test_publish_script_archives_script_without_show_notes(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fake_tts_render
 ) -> None:
     """Successful publish without show notes archives only the script; no
     show-notes file is created."""
@@ -413,10 +400,6 @@ def test_publish_script_archives_script_without_show_notes(
     script_file.write_text("# Solo Script\n\nJust the script.", encoding="utf-8")
 
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="60.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -446,7 +429,7 @@ def test_publish_script_archives_script_without_show_notes(
     store.close()
 
 
-def test_publish_script_sets_source_url(tmp_path, monkeypatch) -> None:
+def test_publish_script_sets_source_url(tmp_path, monkeypatch, fake_tts_render) -> None:
     """When source_url is passed, it is stored on the episode (feed <link>)."""
     store = StateStore(tmp_path / "test.sqlite3")
     r2_client = MagicMock()
@@ -455,10 +438,6 @@ def test_publish_script_sets_source_url(tmp_path, monkeypatch) -> None:
     script_file.write_text("Plain script.", encoding="utf-8")
 
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="60.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -488,7 +467,9 @@ def test_publish_script_sets_source_url(tmp_path, monkeypatch) -> None:
     store.close()
 
 
-def test_publish_script_tts_input_opens_with_title(tmp_path, monkeypatch) -> None:
+def test_publish_script_tts_input_opens_with_title(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
     """TTS hears the spoken title first; the archived script is untouched."""
     store = StateStore(tmp_path / "test.sqlite3")
     r2_client = MagicMock()
@@ -500,15 +481,7 @@ def test_publish_script_tts_input_opens_with_title(tmp_path, monkeypatch) -> Non
         encoding="utf-8",
     )
 
-    tts_input_text = []
-
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            input_file = cmd[cmd.index("--input-file") + 1]
-            tts_input_text.append(Path(input_file).read_text(encoding="utf-8"))
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="30.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -529,6 +502,7 @@ def test_publish_script_tts_input_opens_with_title(tmp_path, monkeypatch) -> Non
         date_str="2026-03-13",
     )
 
+    tts_input_text = [c["text"] for c in fake_tts_render]
     assert len(tts_input_text) == 1
     assert tts_input_text[0] == (
         "Great Interview.\n\nThis is the episode body, unrelated to the title."
@@ -545,7 +519,7 @@ def test_publish_script_tts_input_opens_with_title(tmp_path, monkeypatch) -> Non
 
 @pytest.mark.parametrize("feed_slug", ["the-rundown", "fp-digest"])
 def test_publish_script_skips_prelude_for_daily_digests(
-    feed_slug, tmp_path, monkeypatch
+    feed_slug, tmp_path, monkeypatch, fake_tts_render
 ) -> None:
     """The daily digests already self-announce; no prelude is added."""
     store = StateStore(tmp_path / "test.sqlite3")
@@ -555,15 +529,7 @@ def test_publish_script_skips_prelude_for_daily_digests(
     body = "Good morning. It is Friday, and this is your daily briefing."
     script_file.write_text(body, encoding="utf-8")
 
-    tts_input_text = []
-
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            input_file = cmd[cmd.index("--input-file") + 1]
-            tts_input_text.append(Path(input_file).read_text(encoding="utf-8"))
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="30.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -586,7 +552,57 @@ def test_publish_script_skips_prelude_for_daily_digests(
         date_str="2026-08-21",
     )
 
+    tts_input_text = [c["text"] for c in fake_tts_render]
     assert len(tts_input_text) == 1
     assert tts_input_text[0] == body
 
     store.close()
+
+
+def _publish_with_fake_render(tmp_path, monkeypatch, **kwargs) -> None:
+    script_file = tmp_path / "script.md"
+    script_file.write_text("The episode body.", encoding="utf-8")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="60.0\n"),
+    )
+    monkeypatch.setattr(
+        "pipeline.script_processor.regenerate_and_upload_feed", lambda s, r: None
+    )
+    monkeypatch.setattr(
+        "pipeline.script_processor.SCRIPT_ARCHIVE_ROOT", tmp_path / "arch"
+    )
+    store = StateStore(tmp_path / "test.sqlite3")
+    try:
+        publish_script(
+            script_file=script_file,
+            title="Some Title",
+            feed_slug="deep-dives",
+            store=store,
+            r2_client=MagicMock(),
+            date_str="2026-03-13",
+            **kwargs,
+        )
+    finally:
+        store.close()
+
+
+def test_publish_script_default_voice_is_nova(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
+    _publish_with_fake_render(tmp_path, monkeypatch)
+
+    [call] = fake_tts_render
+    assert call["config"] == openai_config(model="tts-1-hd", voice="nova")
+    assert call["feed_slug"] == "deep-dives"
+    assert call["episode_id"] == "2026-03-13-some-title"
+
+
+def test_publish_script_explicit_voice_is_used(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
+    _publish_with_fake_render(tmp_path, monkeypatch, voice="ash")
+
+    [call] = fake_tts_render
+    assert call["config"] == openai_config(model="tts-1-hd", voice="ash")

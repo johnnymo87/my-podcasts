@@ -61,9 +61,9 @@ def prepend_title(episode_title: str, body: str) -> str:
     """Return ``body`` with its spoken title prepended, or unchanged.
 
     Unchanged when the title is empty or the body already opens by stating it.
-    The terminating period is required, not cosmetic: ``ttsjoin`` tokenizes
-    with ``nltk.sent_tokenize`` and treats blank lines as nothing, so an
-    unterminated title merges into the body's first sentence.
+    The terminating period is required, not cosmetic: blank lines carry no
+    prosody for the TTS model, so an unterminated title runs into the body's
+    first sentence.
     """
     spoken = spoken_title(episode_title)
     if not spoken or _already_states(spoken, body):

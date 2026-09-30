@@ -40,6 +40,15 @@ Quick start and incident-response guide for the two daily podcasts: The Rundown 
   - bounded retry backoff: 1m, 2m, 4m, 8m, then 15m cap
   - after about 12 hours of retry budget, daily jobs become `status='errored'`
 
+## TTS Renderer
+
+`pipeline/tts/` (`render_episode`) replaced `ttsjoin`: chunk the text, fetch OpenAI PCM per chunk, one mp3 encode. Used by every processor, `publish-script`, and the blog poller.
+
+- **Completed renders are cached 14 days** under `/persist/my-podcasts/tts-cache/<key>/`, keyed by exact TTS text + voice/model + `RENDERER_VERSION`. So `jobs reset` on an unchanged script **replays the cached audio**. To force a fresh render of a bad episode, delete that cache entry — its key is the manifest's `cache_key` field.
+- **Per-attempt manifests** at `/persist/my-podcasts/tts-renders/<feed>/<episode_id>-<timestamp>.json` (feed and id sanitized to `[A-Za-z0-9._-]` in the filename; the raw id is in the manifest's `episode_id` field): `status` is `rendered`/`cache_hit`/`failed`, with per-chunk attempts and errors. 60-day retention. Manifest/cache failures never fail a render.
+- **Retries:** up to 3 attempts per chunk (sleeping 2s, then 8s between them) on retryable OpenAI errors; SDK retries are off. A failed render raises into the existing job retry/backoff path unchanged.
+- **Known gap:** a render that fails partway re-buys the earlier chunks on retry (only completed renders are cached) — bead `my-podcasts-9p3.10`.
+
 ## How To Read Job State
 
 - `status='pending'`

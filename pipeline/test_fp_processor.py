@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import subprocess
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from pipeline.fp_processor import process_fp_digest_job
+from pipeline.tts import openai_config
 
 
 # Processors reject scripts too short to be a real episode
@@ -18,7 +18,7 @@ from pipeline.fp_processor import process_fp_digest_job
 _FILLER = " The briefing continues with further detail." * 15
 
 
-def test_process_fp_digest_job(tmp_path, monkeypatch) -> None:
+def test_process_fp_digest_job(tmp_path, monkeypatch, fake_tts_render) -> None:
     """Verify TTS, R2 upload, episode insert, and feed regeneration are called."""
     from pipeline.db import StateStore
 
@@ -41,12 +41,8 @@ def test_process_fp_digest_job(tmp_path, monkeypatch) -> None:
         "This is the Foreign Policy briefing." + _FILLER, encoding="utf-8"
     )
 
-    # Mock ttsjoin and ffprobe subprocess
+    # Mock ffprobe subprocess (rendering is stubbed by fake_tts_render)
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="120.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -68,6 +64,13 @@ def test_process_fp_digest_job(tmp_path, monkeypatch) -> None:
     # Episode should be inserted with correct feed_slug
     episodes = store.list_episodes(feed_slug="fp-digest")
     assert len(episodes) == 1
+
+    # Rendered with onyx under the FP Digest's feed identity.
+    [call] = fake_tts_render
+    assert call["config"] == openai_config(model="tts-1-hd", voice="onyx")
+    assert call["feed_slug"] == "fp-digest"
+    assert call["episode_id"] == "2026-03-06-fp-digest"
+    assert call["text"].startswith("This is the Foreign Policy briefing.")
     episode = episodes[0]
     assert "Foreign Policy Digest" in episode.title
     assert "2026-03-06" in episode.title
@@ -86,7 +89,9 @@ def test_process_fp_digest_job(tmp_path, monkeypatch) -> None:
     store.close()
 
 
-def test_process_fp_digest_with_show_notes(tmp_path, monkeypatch) -> None:
+def test_process_fp_digest_with_show_notes(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
     """When work_dir has plan.json and articles, show notes are stored."""
     from pipeline.db import StateStore
 
@@ -132,10 +137,6 @@ def test_process_fp_digest_with_show_notes(tmp_path, monkeypatch) -> None:
 
     # Mock subprocess and feed regen
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="120.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -166,7 +167,9 @@ def test_process_fp_digest_with_show_notes(tmp_path, monkeypatch) -> None:
     store.close()
 
 
-def test_process_fp_filters_by_covered_headlines(tmp_path, monkeypatch) -> None:
+def test_process_fp_filters_by_covered_headlines(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
     """When covered.json exists, FP show notes only include covered stories."""
     from pipeline.db import StateStore
 
@@ -226,10 +229,6 @@ def test_process_fp_filters_by_covered_headlines(tmp_path, monkeypatch) -> None:
     script_file.write_text("The FP briefing." + _FILLER, encoding="utf-8")
 
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="120.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -330,4 +329,65 @@ def test_process_fp_digest_job_rejects_empty_script(tmp_path, monkeypatch) -> No
     r2_client.upload_file.assert_not_called()
     assert len(store.list_due_fp_digest()) == 1
 
+    store.close()
+
+
+def _render_failures():
+    import openai
+
+    from pipeline.tts import TTSRenderError
+
+    return [
+        TTSRenderError("chunk 1/3 failed after 3 attempt(s): OpenAI HTTP 503"),
+        RuntimeError("ffmpeg exited 1: Invalid data found"),
+        openai.OpenAIError("missing key"),
+    ]
+
+
+@pytest.mark.parametrize("failure", _render_failures(), ids=lambda e: type(e).__name__)
+def test_process_fp_digest_job_propagates_render_failure(
+    tmp_path, monkeypatch, failure
+) -> None:
+    """Every renderer failure mode escapes the processor untouched.
+
+    The consumer's ``except Exception`` turns that into the normal job
+    retry/backoff; the processor must neither swallow it nor publish a
+    half-episode (no upload, no episode row, job still pending).
+    """
+    from pipeline.db import StateStore
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2_client = MagicMock()
+
+    past = (datetime.now(tz=UTC) - timedelta(hours=1)).isoformat()
+    store._conn.execute(
+        """INSERT INTO pending_fp_digest
+           (id, date_str, status, process_after)
+           VALUES (?, ?, ?, ?)""",
+        ("fp-job-fail", "2026-03-19", "pending", past),
+    )
+    store._conn.commit()
+
+    script_file = tmp_path / "fp_script.txt"
+    script_file.write_text(
+        "This is the Foreign Policy briefing." + _FILLER, encoding="utf-8"
+    )
+
+    def failing_render(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr("pipeline.tts.render_episode", failing_render)
+    monkeypatch.setattr(
+        "pipeline.fp_processor.regenerate_and_upload_feed",
+        lambda store, r2_client: pytest.fail("feed must not regenerate"),
+    )
+
+    job = store.list_due_fp_digest()[0]
+    with pytest.raises(type(failure)) as excinfo:
+        process_fp_digest_job(job, store, r2_client, script_path=script_file)
+    assert excinfo.value is failure
+
+    r2_client.upload_file.assert_not_called()
+    assert store.list_episodes(feed_slug="fp-digest") == []
+    assert len(store.list_due_fp_digest()) == 1  # still pending for the retry
     store.close()

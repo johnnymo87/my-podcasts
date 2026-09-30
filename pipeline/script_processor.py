@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import markdown as md_lib
 
+from pipeline import tts
 from pipeline.feed import regenerate_and_upload_feed
 from pipeline.fp_processor import FEED_SLUG as _FP_DIGEST_FEED_SLUG
 from pipeline.things_happen_processor import FEED_SLUG as _THE_RUNDOWN_FEED_SLUG
@@ -151,7 +152,12 @@ def _parse_duration_seconds(mp3_path: Path) -> int | None:
         "default=noprint_wrappers=1:nokey=1",
         str(mp3_path),
     ]
-    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            cmd, check=False, capture_output=True, text=True, timeout=60
+        )
+    except subprocess.TimeoutExpired:
+        return None  # a hung probe means "duration unknown", not a failed publish
     if result.returncode != 0:
         return None
     try:
@@ -209,22 +215,15 @@ def publish_script(
 
     with tempfile.TemporaryDirectory(prefix="publish-script-") as tmp_dir:
         tmp = Path(tmp_dir)
-        input_txt = tmp / f"{episode_slug}.txt"
         output_mp3 = tmp / f"{episode_slug}.mp3"
-        input_txt.write_text(tts_text, encoding="utf-8")
 
-        cmd = [
-            "ttsjoin",
-            "--input-file",
-            str(input_txt),
-            "--output-file",
-            str(output_mp3),
-            "--model",
-            TTS_MODEL,
-            "--voice",
-            voice,
-        ]
-        subprocess.run(cmd, check=True)
+        tts.render_episode(
+            tts_text,
+            tts.openai_config(model=TTS_MODEL, voice=voice),
+            output_mp3,
+            feed_slug=feed_slug,
+            episode_id=episode_slug,
+        )
 
         r2_client.upload_file(output_mp3, episode_r2_key, content_type="audio/mpeg")
         size_bytes = output_mp3.stat().st_size
