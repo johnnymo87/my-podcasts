@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from email_processor.api import EmailProcessor
+from pipeline import tts
 from pipeline.db import Episode, StateStore
 from pipeline.feed import regenerate_and_upload_feed
 from pipeline.presets import resolve_preset
@@ -49,7 +50,9 @@ def _parse_duration_seconds(mp3_path: Path) -> int | None:
         "default=noprint_wrappers=1:nokey=1",
         str(mp3_path),
     ]
-    result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    result = subprocess.run(
+        cmd, check=False, capture_output=True, text=True, timeout=60
+    )
     if result.returncode != 0:
         return None
     try:
@@ -130,25 +133,18 @@ def process_email_bytes(
 
     with tempfile.TemporaryDirectory(prefix="my-podcasts-") as tmp_dir:
         tmp = Path(tmp_dir)
-        input_txt = tmp / f"{episode_slug}.txt"
         output_mp3 = tmp / f"{episode_slug}.mp3"
         # TTS input only -- never the archived body, so a retry cannot
         # prepend twice.
         body = prepend_title(episode_title, body)
-        input_txt.write_text(body, encoding="utf-8")
 
-        cmd = [
-            "ttsjoin",
-            "--input-file",
-            str(input_txt),
-            "--output-file",
-            str(output_mp3),
-            "--model",
-            tts_model,
-            "--voice",
-            tts_voice,
-        ]
-        subprocess.run(cmd, check=True)
+        tts.render_episode(
+            body,
+            tts.openai_config(model=tts_model, voice=tts_voice),
+            output_mp3,
+            feed_slug=preset.feed_slug,
+            episode_id=episode_slug,
+        )
 
         r2_client.upload_file(output_mp3, episode_r2_key, content_type="audio/mpeg")
         size_bytes = output_mp3.stat().st_size
