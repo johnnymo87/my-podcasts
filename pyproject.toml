@@ -84,3 +84,9 @@ lines-after-imports = 2
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+
+[tool.pytest.ini_options]
+markers = [
+    "allow_network: let a test reach the real network (disables the transport guards in pipeline/conftest.py)",
+    "allow_persist: let a test write under the host's real /persist (disables the write guard in pipeline/conftest.py)",
+]

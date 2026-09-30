@@ -2,11 +2,156 @@
 
 from __future__ import annotations
 
+import builtins
+import contextlib
+import io
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+
+_PERSIST = "/persist"
+_WRITE_MODE_CHARS = frozenset("wax+")
+
+
+def _under_persist(path: object) -> bool:
+    """Is ``path`` at or below /persist (``..`` resolved, symlinks not)?"""
+    if isinstance(path, int):  # an already-open file descriptor
+        return False
+    try:
+        text = os.path.abspath(os.fsdecode(os.fspath(path)))  # type: ignore[arg-type]
+    except TypeError:
+        return False
+    return text == _PERSIST or text.startswith(_PERSIST + "/")
+
+
+def _opens_for_write(mode: object) -> bool:
+    return isinstance(mode, str) and not _WRITE_MODE_CHARS.isdisjoint(mode)
+
+
+@contextlib.contextmanager
+def persist_write_guard():
+    """Refuse (and record) any write-open or mkdir under /persist.
+
+    Patches the entry points a test could reach a write through: ``open``
+    (builtin and ``io``), ``Path.open``/``write_text``/``write_bytes``/``mkdir``,
+    ``os.mkdir`` and ``os.makedirs``. Reads are allowed. Every refusal is also
+    appended to the yielded list so the caller can fail the test even when the
+    code under test swallowed the ``AssertionError`` (manifest writes do, by
+    design).
+
+    Not a sandbox: a subprocess, ``os.open`` or ``shutil.copy`` is not covered.
+    It is a tripwire for the ordinary accidents (an unredirected archive root, a
+    default cache dir).
+    """
+    violations: list[str] = []
+
+    def refuse(what: str, path: object) -> AssertionError:
+        message = (
+            f"A test tried to {what} {os.fspath(path)!r} (under {_PERSIST}). "  # type: ignore[arg-type]
+            "Redirect the path into tmp_path, or mark the test allow_persist."
+        )
+        violations.append(message)
+        return AssertionError(message)
+
+    real_open = builtins.open
+    real_io_open = io.open
+    real_path_open = Path.open
+    real_write_text = Path.write_text
+    real_write_bytes = Path.write_bytes
+    real_mkdir = Path.mkdir
+    real_os_mkdir = os.mkdir
+    real_makedirs = os.makedirs
+
+    def guarded_open(file, mode="r", *args, **kwargs):
+        if _opens_for_write(mode) and _under_persist(file):
+            raise refuse("open for writing", file)
+        return real_open(file, mode, *args, **kwargs)
+
+    def guarded_io_open(file, mode="r", *args, **kwargs):
+        if _opens_for_write(mode) and _under_persist(file):
+            raise refuse("open for writing", file)
+        return real_io_open(file, mode, *args, **kwargs)
+
+    def guarded_path_open(self, mode="r", *args, **kwargs):
+        if _opens_for_write(mode) and _under_persist(self):
+            raise refuse("open for writing", self)
+        return real_path_open(self, mode, *args, **kwargs)
+
+    def guarded_write_text(self, *args, **kwargs):
+        if _under_persist(self):
+            raise refuse("write", self)
+        return real_write_text(self, *args, **kwargs)
+
+    def guarded_write_bytes(self, *args, **kwargs):
+        if _under_persist(self):
+            raise refuse("write", self)
+        return real_write_bytes(self, *args, **kwargs)
+
+    def guarded_mkdir(self, *args, **kwargs):
+        if _under_persist(self):
+            raise refuse("make directory", self)
+        return real_mkdir(self, *args, **kwargs)
+
+    def guarded_os_mkdir(path, *args, **kwargs):
+        if _under_persist(path):
+            raise refuse("make directory", path)
+        return real_os_mkdir(path, *args, **kwargs)
+
+    def guarded_makedirs(name, *args, **kwargs):
+        if _under_persist(name):
+            raise refuse("make directories", name)
+        return real_makedirs(name, *args, **kwargs)
+
+    with (
+        patch.object(builtins, "open", guarded_open),
+        patch.object(io, "open", guarded_io_open),
+        patch.object(Path, "open", guarded_path_open),
+        patch.object(Path, "write_text", guarded_write_text),
+        patch.object(Path, "write_bytes", guarded_write_bytes),
+        patch.object(Path, "mkdir", guarded_mkdir),
+        patch.object(os, "mkdir", guarded_os_mkdir),
+        patch.object(os, "makedirs", guarded_makedirs),
+    ):
+        yield violations
+
+
+@pytest.fixture(autouse=True)
+def _block_persist_writes(request):
+    """No test may create a file or directory under the host's real /persist.
+
+    This is the structural form of bead ``my-podcasts-9p3.12``: a test that
+    leaves a default path (the script archive, a cache or manifest dir) pointing
+    at /persist passes on a dev box and pollutes -- or fails on -- a host that
+    differs. Opt out with ``@pytest.mark.allow_persist`` (unused today).
+    """
+    if request.node.get_closest_marker("allow_persist"):
+        yield []
+        return
+    with persist_write_guard() as violations:
+        yield violations
+    if violations:
+        pytest.fail(
+            f"{len(violations)} write(s) under {_PERSIST}; first: {violations[0]}",
+            pytrace=False,
+        )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_script_archive(tmp_path, monkeypatch):
+    """``publish_script`` archives its inputs under ``SCRIPT_ARCHIVE_ROOT``.
+
+    In production that is /persist/my-podcasts/scripts. Redirect it for every
+    test so none depends on (or writes to) the host's real archive. A test that
+    asserts on the archive patches the constant itself; that patch nests inside
+    this one and wins.
+    """
+    monkeypatch.setattr(
+        "pipeline.script_processor.SCRIPT_ARCHIVE_ROOT", tmp_path / "scripts"
+    )
 
 
 def _install_fake_render(monkeypatch) -> tuple[list[dict], list[str]]:
