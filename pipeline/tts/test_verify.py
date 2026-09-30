@@ -4,11 +4,14 @@ from pathlib import Path
 
 import pytest
 
+from pipeline.tts.asr import Transcription, TranscriptionUnavailable
 from pipeline.tts.verify import (
     DEFAULT_THRESHOLDS,
+    VERIFIER_VERSION,
     VerifyThresholds,
     analyze,
     project_chunks,
+    verify_audio,
 )
 
 
@@ -185,3 +188,64 @@ def test_chunk_failure_with_passing_whole_uses_chunk_reason():
     assert per_chunk[1].status == "omission"
     assert whole.status == "omission"
     assert whole.reasons == ("chunk_recall_below_floor",)
+
+
+def fake_transcriber(text=None, exc=None):
+    calls = []
+
+    def t(audio, mime_type):
+        calls.append((audio, mime_type))
+        if exc:
+            raise exc
+        return Transcription(text, "gemini-3.8-flash", "1", "STOP", 1.5, 10, 20)
+
+    return t, calls
+
+
+def test_verify_audio_pass_records_asr_and_policy():
+    t, calls = fake_transcriber(as_asr(SCRIPT))
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.status == "pass"
+    assert v.recall is not None and v.recall >= 0.99
+    assert v.verifier_version == VERIFIER_VERSION
+    assert v.mode == "chunk"
+    assert v.asr.model == "gemini-3.8-flash" and v.asr.finish_reason == "STOP"
+    # The transcriber got the audio and its type, nothing else.
+    assert calls == [(b"WAV", "audio/wav")]
+
+
+def test_verify_audio_omission():
+    t, _ = fake_transcriber(drop_words(as_asr(SCRIPT), 200, 40))
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.status == "omission" and "long_unmatched_span" in v.reasons
+
+
+def test_verify_audio_unavailable_is_never_a_pass():
+    t, _ = fake_transcriber(exc=TranscriptionUnavailable("asr_timeout", "slow"))
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.status == "unavailable"
+    assert v.reasons == ("asr_timeout",)
+    assert v.recall is None and v.analysis is None and v.asr is None
+
+
+def test_verify_audio_punctuation_only_transcript_is_unavailable():
+    t, _ = fake_transcriber("... [music] ...")  # normalizes to "music" — still content
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.status == "omission"
+    t, _ = fake_transcriber("... --- ...")
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.status == "unavailable" and v.reasons == ("asr_empty",)
+
+
+def test_verify_audio_passes_thresholds_through():
+    t, _ = fake_transcriber(as_asr(SCRIPT))
+    th = VerifyThresholds(min_span_words=5)
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t, thresholds=th)
+    assert v.thresholds == th and v.analysis.thresholds == th
+
+
+def test_verdict_serializes():
+    t, _ = fake_transcriber(as_asr(SCRIPT))
+    d = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t).to_dict()
+    assert d["status"] == "pass" and d["asr"]["model"] == "gemini-3.8-flash"
+    assert d["analysis"]["recall"] >= 0.99

@@ -18,9 +18,11 @@ normalized token lists, not characters or seconds.
 from __future__ import annotations
 
 import difflib
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Literal
 
+from pipeline.tts.asr import Transcription, TranscriptionUnavailable
 from pipeline.tts.normalize import normalize_tokens
 
 
@@ -257,3 +259,80 @@ def _span_belongs_to_chunk(
     inside = sum(1 for i in range(lo, hi) if not matched[i])
     total = sum(1 for i in range(span.script_start, span.script_end) if not matched[i])
     return inside >= max(th.anchor_min, 0.25 * min(end - start, total))
+
+
+Transcriber = Callable[[bytes, str], Transcription]
+
+
+@dataclass(frozen=True)
+class AsrInfo:
+    model: str
+    prompt_version: str
+    finish_reason: str
+    elapsed_s: float
+    input_tokens: int | None
+    output_tokens: int | None
+    transcript_chars: int
+
+
+@dataclass(frozen=True)
+class Verdict:
+    status: Literal["pass", "omission", "unavailable"]
+    reasons: tuple[str, ...]
+    detail: str  # human-readable; "" when nothing to add
+    analysis: Analysis | None
+    asr: AsrInfo | None
+    thresholds: VerifyThresholds
+    verifier_version: str
+    mode: Literal["chunk"]
+
+    @property
+    def recall(self) -> float | None:
+        return self.analysis.recall if self.analysis else None
+
+    def to_dict(self) -> dict:
+        return _jsonable(asdict(self))
+
+
+def _unavailable(
+    reason: str, detail: str, th: VerifyThresholds, asr: AsrInfo | None
+) -> Verdict:
+    return Verdict(
+        "unavailable", (reason,), detail, None, asr, th, VERIFIER_VERSION, "chunk"
+    )
+
+
+def verify_audio(
+    audio: bytes,
+    mime_type: str,
+    script_text: str,
+    *,
+    transcriber: Transcriber,
+    thresholds: VerifyThresholds = DEFAULT_THRESHOLDS,
+) -> Verdict:
+    """Verify one rendered chunk. The transcriber never sees ``script_text``.
+
+    Only ``TranscriptionUnavailable`` becomes "unavailable"; any other
+    exception from the transcriber is a bug and propagates.
+    """
+    try:
+        tr = transcriber(audio, mime_type)
+    except TranscriptionUnavailable as exc:
+        return _unavailable(exc.reason, str(exc), thresholds, None)
+    info = AsrInfo(
+        model=tr.model,
+        prompt_version=tr.prompt_version,
+        finish_reason=tr.finish_reason,
+        elapsed_s=tr.elapsed_s,
+        input_tokens=tr.input_tokens,
+        output_tokens=tr.output_tokens,
+        transcript_chars=len(tr.text),
+    )
+    if not normalize_tokens(tr.text):
+        return _unavailable(
+            "asr_empty", "transcript has no word tokens", thresholds, info
+        )
+    a = analyze(script_text, tr.text, thresholds)
+    return Verdict(
+        a.status, a.reasons, "", a, info, thresholds, VERIFIER_VERSION, "chunk"
+    )
