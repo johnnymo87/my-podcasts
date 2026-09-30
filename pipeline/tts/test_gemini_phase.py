@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -16,7 +17,12 @@ from pathlib import Path
 import pytest
 
 from pipeline.tts import gemini_phase as gp
-from pipeline.tts._phase_testing import factories, fake_chunk_text, fake_pcm
+from pipeline.tts._phase_testing import (
+    factories,
+    fake_chunk_text,
+    fake_pcm,
+    make_chunks,
+)
 from pipeline.tts.asr import Transcription, TranscriptionUnavailable
 from pipeline.tts.config import GeminiConfig
 from pipeline.tts.providers import Synthesis, TTSProviderError
@@ -886,3 +892,423 @@ def test_traceback_keeps_the_exception_line_when_capped():
     except ValueError as exc:
         detail = gp._describe(exc)
     assert detail.rstrip().endswith("ValueError: the important message")
+
+
+# --- the parent side: result validation ----------------------------------------
+
+
+def _good_result(scratch: Path, n: int = 2) -> dict:
+    records = []
+    for i in range(n):
+        data = fake_pcm(i)
+        (scratch / gp.chunk_name(i)).write_bytes(data)
+        records.append(
+            {
+                "index": i,
+                "file": gp.chunk_name(i),
+                "bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        )
+    return gp._result_ok(records)
+
+
+def test_valid_ok_result_yields_the_pcm_in_order(scratch):
+    result = _good_result(scratch, 3)
+    assert gp._validate_result(result, scratch, 3) == [fake_pcm(i) for i in range(3)]
+
+
+def test_failed_result_with_a_known_reason_is_valid(scratch):
+    result = gp._result_failed(gp.REASON_FATAL, "nope", 1)
+    assert gp._validate_result(result, scratch, 2) is None
+
+
+def _invalid(result, scratch, n=2):
+    with pytest.raises(gp._InvalidResult) as info:
+        gp._validate_result(result, scratch, n)
+    return str(info.value)
+
+
+def test_missing_index_is_invalid(scratch):
+    assert "indices" in _invalid(_good_result(scratch, 2), scratch, 3)
+
+
+def test_extra_index_is_invalid(scratch):
+    assert "indices" in _invalid(_good_result(scratch, 3), scratch, 2)
+
+
+def test_duplicate_or_out_of_order_indices_are_invalid(scratch):
+    result = _good_result(scratch, 2)
+    result["chunks"] = [result["chunks"][1], result["chunks"][0]]
+    assert "indices" in _invalid(result, scratch)
+    result["chunks"] = [result["chunks"][0], result["chunks"][0]]
+    assert "indices" in _invalid(result, scratch)
+
+
+def test_missing_file_is_invalid(scratch):
+    result = _good_result(scratch)
+    (scratch / gp.chunk_name(1)).unlink()
+    assert "chunk-0001.pcm" in _invalid(result, scratch)
+
+
+def test_byte_count_mismatch_is_invalid(scratch):
+    result = _good_result(scratch)
+    result["chunks"][0]["bytes"] += 2
+    assert "bytes" in _invalid(result, scratch)
+
+
+def test_odd_byte_count_is_invalid(scratch):
+    result = _good_result(scratch)
+    (scratch / gp.chunk_name(0)).write_bytes(b"\x01\x02\x03")
+    result["chunks"][0]["bytes"] = 3
+    result["chunks"][0]["sha256"] = hashlib.sha256(b"\x01\x02\x03").hexdigest()
+    assert "odd" in _invalid(result, scratch)
+
+
+def test_zero_bytes_is_invalid(scratch):
+    result = _good_result(scratch)
+    (scratch / gp.chunk_name(0)).write_bytes(b"")
+    result["chunks"][0]["bytes"] = 0
+    result["chunks"][0]["sha256"] = hashlib.sha256(b"").hexdigest()
+    assert "empty" in _invalid(result, scratch)
+
+
+def test_sha_mismatch_is_invalid(scratch):
+    result = _good_result(scratch)
+    data = bytearray((scratch / gp.chunk_name(0)).read_bytes())
+    data[0] ^= 0xFF  # same length, different audio
+    (scratch / gp.chunk_name(0)).write_bytes(bytes(data))
+    assert "sha256" in _invalid(result, scratch)
+
+
+def test_a_result_naming_another_file_is_invalid(scratch):
+    result = _good_result(scratch)
+    result["chunks"][0]["file"] = "../../etc/passwd"
+    assert "file" in _invalid(result, scratch)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda r: r.update(schema=99),
+        lambda r: r.update(status="maybe"),
+        lambda r: r.update(chunks="not a list"),
+        lambda r: r.update(chunks=[{"index": 0}]),
+        lambda r: r["chunks"][0].update(index=True),
+        lambda r: r["chunks"][0].update(bytes="8"),
+    ],
+)
+def test_structurally_wrong_ok_results_are_invalid(scratch, mutate):
+    result = _good_result(scratch)
+    mutate(result)
+    _invalid(result, scratch)
+
+
+def test_not_a_dict_is_invalid(scratch):
+    _invalid(["ok"], scratch)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"schema": 1, "status": "failed", "reason": "made_up", "detail": ""},
+        {"schema": 1, "status": "failed", "reason": None, "detail": ""},
+        {"schema": 1, "status": "failed", "reason": "fatal", "failed_chunk": "0"},
+    ],
+)
+def test_failed_results_with_bad_reason_or_chunk_are_invalid(scratch, result):
+    _invalid(result, scratch)
+
+
+def test_read_result_is_none_when_absent(scratch):
+    assert gp._read_result(scratch) is None
+
+
+def test_read_result_rejects_partial_or_garbage_json(scratch):
+    (scratch / gp.RESULT_NAME).write_text('{"schema": 1, "status": "o')
+    with pytest.raises(gp._InvalidResult):
+        gp._read_result(scratch)
+    (scratch / gp.RESULT_NAME).write_bytes(b"\xff\xfe")
+    with pytest.raises(gp._InvalidResult):
+        gp._read_result(scratch)
+
+
+def test_read_progress_tolerates_missing_partial_and_wrong_shape(scratch):
+    _atomic = gp._atomic_write_json
+    _atomic(scratch / gp.progress_name(0), {"index": 0, "attempts": [{"n": 1}]})
+    (scratch / gp.progress_name(1)).write_text("{not json")
+    _atomic(scratch / gp.progress_name(2), {"index": 2, "attempts": "nope"})
+    records = gp._read_progress(scratch, 4)
+    assert records[0]["attempts"] == [{"n": 1}]
+    assert records[1] == {"index": 1, "attempts": [], "progress": "unreadable"}
+    assert records[2] == {"index": 2, "attempts": [], "progress": "unreadable"}
+    assert records[3] == {"index": 3, "attempts": [], "progress": "missing"}
+
+
+# --- the parent side: the runner with a fake process ---------------------------
+
+
+class FakeProc:
+    """Stands in for ``multiprocessing.Process``; ``start`` may run the child."""
+
+    pid = 4242
+
+    def __init__(self, args, *, on_start=None, on_kill=None, exits=False):
+        self.args = args
+        self.scratch = Path(args[3])
+        self._on_start = on_start
+        self._on_kill = on_kill
+        self._exits = exits  # exits right after start (having run on_start)
+        self.alive = False
+        self.exitcode = None
+        self.killed = 0
+        self.closed = False
+        self.joins: list[float | None] = []
+
+    def start(self):
+        self.alive = True
+        if self._on_start:
+            self._on_start(self)
+        if self._exits:
+            self.alive = False
+            self.exitcode = 0
+
+    def is_alive(self):
+        return self.alive
+
+    def join(self, timeout=None):
+        self.joins.append(timeout)
+        if self.alive and timeout:
+            time.sleep(min(timeout, 0.02))
+
+    def kill(self):
+        self.killed += 1
+        self.alive = False
+        self.exitcode = -9
+        if self._on_kill:
+            self._on_kill(self)
+
+    def close(self):
+        self.closed = True
+
+
+def run_child_inline(proc, deadline=None):
+    chunks, leaf, own_deadline, scratch, _ppid, fac, _boot = proc.args
+    gp._run_child(chunks, leaf, deadline or own_deadline, scratch, fac)
+
+
+@pytest.fixture
+def phase(monkeypatch, tmp_path):
+    """Run ``run_gemini_phase`` against a fake process: (outcome, procs, roots)."""
+    roots = tmp_path / "roots"
+    procs: list[FakeProc] = []
+
+    def run(make_proc, *, n=2, budget_s=5.0, fac=None):
+        def _make(args):
+            proc = make_proc(args)
+            procs.append(proc)
+            return proc
+
+        monkeypatch.setattr(gp, "_make_process", _make)
+        outcome = gp.run_gemini_phase(
+            make_chunks(n),
+            LEAF,
+            budget_s=budget_s,
+            scratch_root=roots,
+            _factories=fac or factories("ok"),
+        )
+        return outcome, procs, roots
+
+    return run
+
+
+def test_runner_happy_path_returns_ordered_pcm_and_cleans_up(phase):
+    outcome, procs, roots = phase(
+        lambda a: FakeProc(a, on_start=run_child_inline, exits=True), n=3
+    )
+    assert outcome.ok and outcome.reason is None
+    assert outcome.pcm_parts == [fake_pcm(i) for i in range(3)]
+    assert [r["index"] for r in outcome.chunk_records] == [0, 1, 2]
+    assert outcome.chunk_records[0]["attempts"][0]["outcome"] == "verified"
+    assert outcome.child_pid == 4242
+    assert outcome.spawn_s >= 0 and outcome.elapsed_s >= outcome.spawn_s
+    assert list(roots.iterdir()) == []  # scratch removed
+    assert procs[0].closed
+
+
+def test_runner_reports_a_child_failure_and_kills_a_lingering_child(phase):
+    def start(proc):
+        gp._atomic_write_json(
+            proc.scratch / gp.RESULT_NAME,
+            gp._result_failed(gp.REASON_FATAL, "boom", 1),
+        )
+
+    outcome, procs, roots = phase(lambda a: FakeProc(a, on_start=start))  # stays alive
+    assert (outcome.ok, outcome.reason, outcome.failed_chunk) == (False, "fatal", 1)
+    assert outcome.detail == "boom"
+    assert outcome.pcm_parts is None
+    assert procs[0].killed == 1 and procs[0].closed
+    assert list(roots.iterdir()) == []
+
+
+def test_child_that_dies_without_a_result_is_child_no_result(phase):
+    outcome, _, roots = phase(lambda a: FakeProc(a, exits=True))
+    assert (outcome.ok, outcome.reason) == (False, gp.REASON_CHILD_NO_RESULT)
+    assert "exit code 0" in outcome.detail
+    assert list(roots.iterdir()) == []
+
+
+def test_result_written_just_before_the_child_exits_is_not_lost(phase):
+    # is_alive() is False and the result is on disk: the result wins.
+    outcome, _, _ = phase(lambda a: FakeProc(a, on_start=run_child_inline, exits=True))
+    assert outcome.ok
+
+
+def test_hung_child_is_killed_at_the_deadline(phase):
+    started = time.monotonic()
+    outcome, procs, roots = phase(lambda a: FakeProc(a), budget_s=0.3)
+    assert time.monotonic() - started < 2.0
+    assert (outcome.ok, outcome.reason) == (False, gp.REASON_DEADLINE)
+    assert procs[0].killed == 1
+    assert gp.REAP_TIMEOUT_SECONDS in procs[0].joins  # join() after kill()
+    assert list(roots.iterdir()) == []
+
+
+def test_ok_result_that_lands_at_the_deadline_is_kept_and_validated(phase):
+    outcome, procs, _ = phase(
+        lambda a: FakeProc(a, on_kill=lambda p: run_child_inline(p, _far())),
+        budget_s=0.2,
+    )
+    assert procs[0].killed == 1
+    assert outcome.ok and outcome.pcm_parts == [fake_pcm(0), fake_pcm(1)]
+
+
+def test_bad_ok_result_that_lands_at_the_deadline_is_still_rejected(phase):
+    def on_kill(proc):
+        run_child_inline(proc, _far())
+        (proc.scratch / gp.chunk_name(0)).write_bytes(b"\x00\x00")  # tampered
+
+    outcome, _, _ = phase(lambda a: FakeProc(a, on_kill=on_kill), budget_s=0.2)
+    assert (outcome.ok, outcome.reason) == (False, gp.REASON_INVALID_RESULT)
+    assert outcome.pcm_parts is None
+
+
+def test_invalid_ok_result_means_no_audio_is_used(phase):
+    def start(proc):
+        run_child_inline(proc)
+        (proc.scratch / gp.chunk_name(1)).unlink()
+
+    outcome, _, _ = phase(lambda a: FakeProc(a, on_start=start, exits=True))
+    assert (outcome.ok, outcome.reason) == (False, gp.REASON_INVALID_RESULT)
+    assert outcome.pcm_parts is None
+    assert "chunk-0001.pcm" in outcome.detail
+
+
+def test_unparseable_result_is_invalid_result(phase):
+    def start(proc):
+        (proc.scratch / gp.RESULT_NAME).write_text('{"status": "ok", "chu')
+
+    outcome, procs, _ = phase(lambda a: FakeProc(a, on_start=start))
+    assert (outcome.ok, outcome.reason) == (False, gp.REASON_INVALID_RESULT)
+    assert procs[0].killed == 1
+
+
+def test_unreadable_progress_never_fails_the_phase(phase):
+    def start(proc):
+        run_child_inline(proc)
+        (proc.scratch / gp.progress_name(0)).write_text("{garbage")
+        (proc.scratch / gp.progress_name(1)).unlink()
+
+    outcome, _, _ = phase(lambda a: FakeProc(a, on_start=start, exits=True))
+    assert outcome.ok
+    assert [r.get("progress") for r in outcome.chunk_records] == [
+        "unreadable",
+        "missing",
+    ]
+
+
+def test_spawn_failure_is_spawn_failed_and_cleans_up(phase):
+    def start(proc):
+        raise OSError("cannot fork")
+
+    outcome, procs, roots = phase(lambda a: FakeProc(a, on_start=start))
+    assert (outcome.ok, outcome.reason) == (False, gp.REASON_SPAWN_FAILED)
+    assert "cannot fork" in outcome.detail
+    assert list(roots.iterdir()) == []
+
+
+def test_keyboard_interrupt_kills_the_child_cleans_up_and_propagates(
+    monkeypatch, phase
+):
+    def interrupt(proc, timeout):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(gp, "_join_child", interrupt)
+    made: list[FakeProc] = []
+    with pytest.raises(KeyboardInterrupt):
+        phase(lambda a: made.append(FakeProc(a)) or made[-1])
+    assert made[0].killed == 1 and made[0].closed
+    assert list((made[0].scratch.parent).iterdir()) == []
+
+
+def test_the_child_gets_one_absolute_deadline_computed_before_start(phase):
+    seen = {}
+
+    def start(proc):
+        seen["deadline"] = proc.args[2]
+        seen["at_start"] = time.monotonic()
+        run_child_inline(proc)
+
+    before = time.monotonic()
+    phase(lambda a: FakeProc(a, on_start=start, exits=True), budget_s=50.0)
+    assert before + 50.0 <= seen["deadline"] <= seen["at_start"] + 50.0
+
+
+def test_the_child_receives_only_picklable_arguments(phase):
+    import pickle
+
+    captured = {}
+
+    def start(proc):
+        captured["args"] = proc.args
+        run_child_inline(proc)
+
+    phase(
+        lambda a: FakeProc(a, on_start=start, exits=True),
+        fac=factories("ok"),
+    )
+    pickle.dumps(captured["args"])
+    assert captured["args"][4] == os.getpid()  # parent pid, for the watchdog
+
+
+def test_child_reported_start_time_is_used_when_available(phase):
+    def start(proc):
+        gp._atomic_write_json(
+            proc.scratch / gp.STARTED_NAME,
+            {"pid": 1, "monotonic": time.monotonic()},
+        )
+        run_child_inline(proc)
+
+    outcome, _, _ = phase(lambda a: FakeProc(a, on_start=start, exits=True))
+    assert outcome.child_started_s is not None and outcome.child_started_s >= 0
+
+
+def test_child_reported_start_time_is_none_when_absent_or_bad(phase):
+    outcome, _, _ = phase(lambda a: FakeProc(a, on_start=run_child_inline, exits=True))
+    assert outcome.child_started_s is None
+
+    def start(proc):
+        (proc.scratch / gp.STARTED_NAME).write_text("garbage")
+        run_child_inline(proc)
+
+    outcome, _, _ = phase(lambda a: FakeProc(a, on_start=start, exits=True))
+    assert outcome.child_started_s is None and outcome.ok
+
+
+def test_child_main_reports_when_it_started(scratch, child_env):
+    before = time.monotonic()
+    with pytest.raises(_Exited):
+        gp._child_main([TEXT], LEAF, _far(), str(scratch), 1, factories("ok"), None)
+    started = json.loads((scratch / gp.STARTED_NAME).read_text())
+    assert started["pid"] == os.getpid()
+    assert before <= started["monotonic"] <= time.monotonic()

@@ -39,6 +39,11 @@ Files, all in the parent-created scratch directory and all written atomically
     ``None`` tokens mean *unknown* (the request was killed, or failed before
     reporting usage), never zero. Synth and ASR tokens are separate, and a
     discarded omission attempt keeps its own.
+``started.json``
+    ``{"pid": int, "monotonic": float}``, written by the child as soon as its
+    watchdog is up. ``time.monotonic()`` is system-wide on Linux, so the parent
+    subtracts its own pre-``start()`` reading to get the real spawn latency
+    (``Process.start()`` returns before the child has imported anything).
 ``result.json``
     The done marker. ``{"schema": 1, "status": "ok"|"failed", "reason": None|
     <reason>, "detail": str, "failed_chunk": None|int}`` plus, on ``ok`` only,
@@ -50,13 +55,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 import queue
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -115,6 +124,8 @@ FALLBACK_REASONS = frozenset(
 
 SCHEMA = 1
 RESULT_NAME = "result.json"
+STARTED_NAME = "started.json"
+POLL_SECONDS = 0.2  # parent: how often to look for result.json
 
 
 def chunk_name(i: int) -> str:
@@ -588,10 +599,18 @@ def _child_main(
     could be written (the parent then reports ``child_no_result``). Code 3 is
     the watchdog's. stdout/stderr are flushed first, since ``os._exit`` skips it.
     """
+    entered = time.monotonic()
     code = 1  # until a result is on disk
     try:
         try:
             _start_watchdog(parent_pid, deadline)
+            try:  # telemetry only: never at the cost of the phase
+                _atomic_write_json(
+                    Path(scratch) / STARTED_NAME,
+                    {"pid": os.getpid(), "monotonic": entered},
+                )
+            except Exception:  # noqa: BLE001
+                pass
             if bootstrap is not None:
                 bootstrap()
             _run_child(chunks, leaf, deadline, scratch, factories)
@@ -614,3 +633,304 @@ def _child_main(
             except Exception:  # noqa: BLE001
                 pass
         _hard_exit(code)
+
+
+# --- the parent ----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PhaseOutcome:
+    """What the Gemini phase produced.
+
+    ``ok`` implies ``pcm_parts`` (one validated PCM blob per chunk, in order);
+    otherwise ``reason`` is one of ``FALLBACK_REASONS`` and ``pcm_parts`` is
+    None -- no Gemini audio is ever used from a failed phase. ``chunk_records``
+    are the per-chunk progress files (attempts, tokens), telemetry only: a
+    missing or unreadable one is flagged (``"progress": "missing"|"unreadable"``)
+    and never fails the phase. ``spawn_s`` is how long ``Process.start()`` took;
+    ``child_started_s`` is the true latency until the child was running (its own
+    clock reading minus ours), or None if it never reported one.
+    """
+
+    ok: bool
+    reason: str | None
+    detail: str
+    pcm_parts: list[bytes] | None
+    chunk_records: list[dict[str, Any]]
+    elapsed_s: float
+    spawn_s: float
+    failed_chunk: int | None = None
+    child_pid: int | None = None
+    child_started_s: float | None = None
+
+
+class _InvalidResult(Exception):
+    """result.json (or the files it names) cannot be trusted."""
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _read_result(scratch: Path) -> Any | None:
+    """The parsed ``result.json``, or None if it does not exist yet.
+
+    Writes are atomic, so a file that exists but does not parse is not a write
+    in progress: it is corruption, and ``_InvalidResult``.
+    """
+    try:
+        raw = (scratch / RESULT_NAME).read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _InvalidResult(f"result.json unreadable: {exc}") from exc
+    try:
+        result = json.loads(raw)
+    except ValueError as exc:  # JSONDecodeError and UnicodeDecodeError
+        raise _InvalidResult(f"result.json is not valid JSON: {exc}") from exc
+    if result is None:
+        raise _InvalidResult("result.json is null")
+    return result
+
+
+def _validate_result(result: Any, scratch: Path, n_chunks: int) -> list[bytes] | None:
+    """Trust nothing the child says about its own audio.
+
+    Returns the PCM blobs (in chunk order) for a valid ``ok`` result, or None for
+    a valid ``failed`` one. Anything else raises ``_InvalidResult``: a wrong
+    schema, a bad reason, indices other than exactly ``0..n-1`` in order, a file
+    that is missing / not the canonical name / of a different size than declared
+    / empty / odd-length (not whole 16-bit samples) / of a different sha256.
+    """
+    if not isinstance(result, dict):
+        raise _InvalidResult("result is not an object")
+    if result.get("schema") != SCHEMA:
+        raise _InvalidResult(f"unknown result schema {result.get('schema')!r}")
+    status = result.get("status")
+    if status == "failed":
+        if result.get("reason") not in FALLBACK_REASONS:
+            raise _InvalidResult(f"unknown failure reason {result.get('reason')!r}")
+        failed_chunk = result.get("failed_chunk")
+        if failed_chunk is not None and not _is_int(failed_chunk):
+            raise _InvalidResult(f"bad failed_chunk {failed_chunk!r}")
+        return None
+    if status != "ok":
+        raise _InvalidResult(f"unknown result status {status!r}")
+
+    chunks = result.get("chunks")
+    if not isinstance(chunks, list) or not all(isinstance(c, dict) for c in chunks):
+        raise _InvalidResult("ok result has no chunk list")
+    indices = [c.get("index") for c in chunks]
+    if indices != list(range(n_chunks)) or not all(_is_int(i) for i in indices):
+        raise _InvalidResult(f"chunk indices {indices!r}, expected 0..{n_chunks - 1}")
+    parts: list[bytes] = []
+    for rec in chunks:
+        i = rec["index"]
+        name = chunk_name(i)
+        if rec.get("file") != name:
+            raise _InvalidResult(
+                f"chunk {i} names file {rec.get('file')!r}, not {name}"
+            )
+        if not _is_int(rec.get("bytes")) or not isinstance(rec.get("sha256"), str):
+            raise _InvalidResult(f"chunk {i} has a malformed record")
+        try:
+            data = (scratch / name).read_bytes()
+        except OSError as exc:
+            raise _InvalidResult(f"{name} missing or unreadable: {exc}") from exc
+        if len(data) != rec["bytes"]:
+            raise _InvalidResult(
+                f"{name} has {len(data)} bytes, result declared {rec['bytes']}"
+            )
+        if not data:
+            raise _InvalidResult(f"{name} is empty")
+        if len(data) % 2:
+            raise _InvalidResult(f"{name} has an odd byte count ({len(data)})")
+        if hashlib.sha256(data).hexdigest() != rec["sha256"]:
+            raise _InvalidResult(f"{name} sha256 does not match the result")
+        parts.append(data)
+    return parts
+
+
+def _read_progress(scratch: Path, n_chunks: int) -> list[dict[str, Any]]:
+    """Per-chunk progress records. Telemetry: this never raises."""
+    records: list[dict[str, Any]] = []
+    for i in range(n_chunks):
+        try:
+            raw = (scratch / progress_name(i)).read_bytes()
+        except FileNotFoundError:
+            records.append({"index": i, "attempts": [], "progress": "missing"})
+            continue
+        except OSError:
+            records.append({"index": i, "attempts": [], "progress": "unreadable"})
+            continue
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict) and isinstance(parsed.get("attempts"), list):
+            records.append(parsed)
+        else:
+            records.append({"index": i, "attempts": [], "progress": "unreadable"})
+    return records
+
+
+def _read_started(scratch: Path) -> float | None:
+    try:
+        started = json.loads((scratch / STARTED_NAME).read_bytes())
+        value = started["monotonic"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _make_process(args: tuple) -> Any:
+    """The child process object. ``spawn``, so the child shares nothing with us:
+    no inherited locks, sockets or threads, and no re-run of a ``__main__``
+    ending in ``.__main__`` (the consumer's ``python -m pipeline``)."""
+    ctx = multiprocessing.get_context("spawn")
+    return ctx.Process(target=_child_main, args=args, name="gemini-phase", daemon=True)
+
+
+def _join_child(proc: Any, timeout: float) -> None:
+    proc.join(timeout)
+
+
+def _reap(proc: Any) -> None:
+    """Kill ``proc`` if it is running and wait (bounded) for it to die."""
+    if proc.is_alive():
+        proc.kill()
+    proc.join(REAP_TIMEOUT_SECONDS)
+
+
+def _await_child(
+    proc: Any, scratch: Path, deadline: float
+) -> tuple[Any, str | None, str]:
+    """Wait for a terminal ``result.json``: ``(result, None, "")``, or
+    ``(None, reason, detail)`` if there will not be one.
+
+    A result beats everything else seen in the same poll, including a dead
+    process and an expired deadline: at the deadline we kill, then look ONCE
+    more, so an ``ok`` that landed as the clock ran out is not thrown away (it
+    is still validated by the caller).
+    """
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            _join_child(proc, max(0.0, min(POLL_SECONDS, remaining)))
+            result = _read_result(scratch)
+            if result is not None:
+                return result, None, ""
+            if not proc.is_alive():
+                result = _read_result(scratch)  # written just before it exited
+                if result is not None:
+                    return result, None, ""
+                return (
+                    None,
+                    REASON_CHILD_NO_RESULT,
+                    f"child exited (exit code {proc.exitcode}) without a result",
+                )
+            if remaining <= 0:
+                _reap(proc)
+                result = _read_result(scratch)
+                if result is not None:
+                    return result, None, ""
+                return None, REASON_DEADLINE, "the Gemini phase budget ran out"
+    except _InvalidResult as exc:
+        return None, REASON_INVALID_RESULT, str(exc)
+
+
+def run_gemini_phase(
+    chunks: list[str],
+    leaf: GeminiConfig,
+    *,
+    budget_s: float = GEMINI_BUDGET_SECONDS,
+    scratch_root: str | os.PathLike[str] | None = None,
+    _factories: tuple[Callable[[], Any], Callable[[float], Any]] | None = None,
+    _child_bootstrap: Callable[[], Any] | None = None,
+) -> PhaseOutcome:
+    """Synthesize and verify ``chunks`` in a spawned child, within ``budget_s``.
+
+    Returns within the budget plus the child's spawn time and ``REAP_TIMEOUT_SECONDS``:
+    the deadline is one absolute ``time.monotonic()`` value computed before the
+    child starts; the child honours it cooperatively and this function enforces
+    it with ``kill()``. The child is always dead, and the scratch dir gone, by
+    the time this returns or raises. ``KeyboardInterrupt``/``SystemExit`` are
+    cleaned up after and propagate; they are never turned into a fallback.
+
+    ``_factories`` and ``_child_bootstrap`` are test seams (module-level
+    callables, so they pickle): see ``_phase_testing``.
+    """
+    t0 = time.monotonic()
+    deadline = t0 + budget_s
+    chunks = list(chunks)
+    if scratch_root is not None:
+        Path(scratch_root).mkdir(parents=True, exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(prefix="gemini-phase-", dir=scratch_root))
+    proc: Any = None
+    spawn_s = 0.0
+
+    def outcome(
+        reason: str | None,
+        detail: str = "",
+        *,
+        pcm: list[bytes] | None = None,
+        failed_chunk: int | None = None,
+    ) -> PhaseOutcome:
+        started = _read_started(scratch)
+        return PhaseOutcome(
+            ok=reason is None,
+            reason=reason,
+            detail=detail,
+            pcm_parts=pcm,
+            chunk_records=_read_progress(scratch, len(chunks)),
+            elapsed_s=time.monotonic() - t0,
+            spawn_s=spawn_s,
+            failed_chunk=failed_chunk,
+            child_pid=getattr(proc, "pid", None),
+            child_started_s=None if started is None else started - t0,
+        )
+
+    try:
+        args = (
+            chunks,
+            leaf,
+            deadline,
+            str(scratch),
+            os.getpid(),
+            _factories,
+            _child_bootstrap,
+        )
+        try:
+            proc = _make_process(args)
+            before_start = time.monotonic()
+            try:
+                proc.start()
+            finally:
+                spawn_s = time.monotonic() - before_start
+        except Exception as exc:  # noqa: BLE001
+            return outcome(REASON_SPAWN_FAILED, f"{type(exc).__name__}: {exc}")
+
+        result, reason, detail = _await_child(proc, scratch, deadline)
+        if reason is not None:
+            return outcome(reason, detail)
+        try:
+            parts = _validate_result(result, scratch, len(chunks))
+        except _InvalidResult as exc:
+            return outcome(REASON_INVALID_RESULT, str(exc))
+        if parts is None:  # a valid failure the child reported itself
+            return outcome(
+                result["reason"],
+                str(result.get("detail", ""))[: 2 * ERROR_DETAIL_CHARS],
+                failed_chunk=result.get("failed_chunk"),
+            )
+        return outcome(None, pcm=parts)
+    finally:
+        # The child is dead before the scratch dir goes: a live child writing
+        # into a deleted directory is how a stray file would outlive a phase.
+        if proc is not None:
+            try:
+                _reap(proc)
+                proc.close()
+            except Exception:  # noqa: BLE001 -- never mask the real outcome
+                pass
+        shutil.rmtree(scratch, ignore_errors=True)

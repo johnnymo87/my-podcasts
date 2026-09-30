@@ -36,6 +36,28 @@ def test_fatal_behavior_hits_only_the_chosen_chunk():
     assert info.value.kind == "fatal"
 
 
+def test_fatal_and_block_others_fails_only_the_target_after_a_sibling_blocks(
+    tmp_path, monkeypatch
+):
+    class Blocked(Exception):
+        pass
+
+    def stop(_seconds):
+        raise Blocked
+
+    make_provider, _ = pt.factories(
+        "fatal_and_block_others", chunk=0, marker_dir=tmp_path
+    )
+    provider = make_provider()
+    monkeypatch.setattr(pt.time, "sleep", stop)
+    with pytest.raises(Blocked):  # chunk 1 blocks, leaving its marker
+        provider.synthesize_detailed(pt.fake_chunk_text(1), CFG)
+    assert (tmp_path / "entered-synth-1").read_text().isdigit()
+    with pytest.raises(TTSProviderError) as info:  # now chunk 0 may fail
+        provider.synthesize_detailed(pt.fake_chunk_text(0), CFG)
+    assert info.value.kind == "fatal"
+
+
 def test_transcriber_hears_the_chunk_its_audio_came_from():
     _, make_transcriber = pt.factories("ok")
     asr = make_transcriber(5.0)

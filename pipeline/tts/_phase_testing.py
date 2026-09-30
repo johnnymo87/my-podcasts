@@ -16,11 +16,18 @@ Behaviors (``factories(behavior, chunk=...)``):
 
 ``ok``                      every chunk synthesizes and verifies
 ``fatal_on_chunk``          synth of ``chunk`` raises a fatal ``TTSProviderError``
+``fatal_and_block_others``  synth of ``chunk`` raises a fatal error, but only once
+                            another chunk is blocked in synth (they all block
+                            and leave ``entered-synth-<i>`` markers)
 ``block_synth_forever``     synth of ``chunk`` writes ``entered-synth-<i>`` into
                             ``marker_dir`` then sleeps 3600 s
 ``block_asr_forever``       same, in the transcriber (``entered-asr-<i>``)
 ``omission_on_chunk``       the transcript of ``chunk`` covers only its first words
 ``exit_on_build``           building the provider calls ``os._exit(1)`` at once
+
+Also here: ``hang_bootstrap`` (a child bootstrap that never returns),
+``wait_for_pid`` / ``pid_gone`` (test-side process checks) and ``parent_main``
+(a parent process for the parent-death test).
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ BEHAVIORS = frozenset(
     {
         "ok",
         "fatal_on_chunk",
+        "fatal_and_block_others",
         "block_synth_forever",
         "block_asr_forever",
         "omission_on_chunk",
@@ -133,9 +141,14 @@ def _pcm_index(wav_bytes: bytes) -> int:
 
 
 def _mark(spec: dict, name: str) -> None:
+    """Leave ``name`` in ``marker_dir`` holding this process's pid.
+
+    The pid lets a test that only sees the marker find (and later check the
+    death of) the child it is blocking.
+    """
     marker_dir = spec.get("marker_dir")
     if marker_dir:
-        Path(marker_dir, name).write_text("entered")
+        Path(marker_dir, name).write_text(str(os.getpid()))
 
 
 def _block() -> None:
@@ -154,6 +167,12 @@ class FakeProvider:
         if behavior == "block_synth_forever" and i == target:
             _mark(self._spec, f"entered-synth-{i}")
             _block()
+        if behavior == "fatal_and_block_others":
+            if i != target:
+                _mark(self._spec, f"entered-synth-{i}")
+                _block()
+            self._wait_for_a_blocked_sibling()
+            raise TTSProviderError(f"fake fatal on chunk {i}", kind="fatal")
         return Synthesis(
             pcm=fake_pcm(i),
             finish_reason="STOP",
@@ -161,6 +180,15 @@ class FakeProvider:
             audio_tokens=100,
             elapsed_s=0.0,
         )
+
+    def _wait_for_a_blocked_sibling(self, timeout_s: float = 20.0) -> None:
+        """Fail only once a sibling is demonstrably stuck (markers carry pids)."""
+        marker_dir = self._spec.get("marker_dir")
+        deadline = time.monotonic() + timeout_s
+        while marker_dir and time.monotonic() < deadline:
+            if any(Path(marker_dir).glob("entered-synth-*")):
+                return
+            time.sleep(0.02)
 
     def close(self) -> None:
         pass
@@ -252,3 +280,60 @@ def _selftest_deny_network(results) -> None:
         else:
             outcome[name] = "NOT DENIED"
     results.put(outcome)
+
+
+def hang_bootstrap() -> None:
+    """Child bootstrap that never returns: only the parent's kill (or the
+    child's own watchdog) can end this child."""
+    _require_child("hang_bootstrap")
+    time.sleep(_BLOCK_SECONDS)
+
+
+def wait_for_pid(path: str | os.PathLike[str], timeout_s: float) -> int:
+    """The pid a fake wrote to marker ``path``; ``TimeoutError`` if none appears.
+
+    The marker is written non-atomically, so an empty or partial file is retried.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            return int(Path(path).read_text())
+        except (OSError, ValueError):
+            time.sleep(0.02)
+    raise TimeoutError(f"no pid marker at {path} after {timeout_s}s")
+
+
+def pid_gone(pid: int) -> bool:
+    """True if ``pid`` no longer runs. A zombie counts as gone: an orphan
+    reparented to a PID 1 that does not reap stays listed as ``Z`` forever."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return True
+    return stat.rsplit(")", 1)[1].split()[0] == "Z"
+
+
+def parent_main(marker_dir: str, scratch_root: str, budget_s: str) -> None:
+    """Entry point of the helper parent in the parent-death test.
+
+    Runs a real phase whose chunk 0 blocks in synth (leaving its pid in
+    ``marker_dir``). The test then SIGKILLs this process and checks that the
+    orphaned child's watchdog ends it. Never returns normally within the test.
+    """
+    from pipeline.tts import gemini_phase
+    from pipeline.tts.config import GeminiConfig
+
+    gemini_phase.run_gemini_phase(
+        make_chunks(2),
+        GeminiConfig(model="fake-model", voice="Kore"),
+        budget_s=float(budget_s),
+        scratch_root=scratch_root,
+        _factories=factories("block_synth_forever", chunk=0, marker_dir=marker_dir),
+        _child_bootstrap=deny_network,
+    )
