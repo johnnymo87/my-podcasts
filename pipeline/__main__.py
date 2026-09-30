@@ -23,6 +23,7 @@ from pipeline.source_cache import (
     sync_antiwar_rss_cache,
     sync_semafor_cache,
 )
+from pipeline.tts.config import FEED_VOICES
 from pipeline.zvi_cache import sync_zvi_cache
 
 
@@ -1524,6 +1525,135 @@ def _tts_verify(
     click.echo(summary, err=True)
     if code:
         raise SystemExit(code)
+
+
+def _csv(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+@cli.command("tts-audition")
+@click.option(
+    "--feed",
+    "feed_slug",
+    required=True,
+    type=click.Choice(sorted(FEED_VOICES)),
+    help="Feed whose current OpenAI voice is the baseline.",
+)
+@click.option(
+    "--script",
+    "script_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="The exact text to render.",
+)
+@click.option(
+    "--voices",
+    required=True,
+    help="Comma-separated Gemini voice names (e.g. Kore,Puck).",
+)
+@click.option(
+    "--models",
+    default=None,
+    help="Comma-separated Gemini models "
+    "[default: gemini-3.8-flash-tts,gemini-3.8-flash-lite-tts].",
+)
+@click.option(
+    "--style",
+    default=None,
+    help="Gemini style prompt; '' means none [default: calm, measured news anchor].",
+)
+@click.option(
+    "--max-chars",
+    default=None,
+    type=click.IntRange(min=200),
+    help="Cut the script at the last paragraph boundary at or before N characters.",
+)
+@click.option(
+    "--out-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Where the mp3s, script.txt, manifests/ and summary.json go.",
+)
+@click.option("--no-openai", is_flag=True, help="Skip the OpenAI baseline variant.")
+@click.option("--force", is_flag=True, help="Overwrite existing audition files.")
+def tts_audition_command(
+    feed_slug: str,
+    script_path: Path,
+    voices: str,
+    models: str | None,
+    style: str | None,
+    max_chars: int | None,
+    out_dir: Path,
+    no_openai: bool,
+    force: bool,
+) -> None:
+    """Render one script through the feed's OpenAI voice and Gemini model x voice
+    variants into local mp3s, to compare by ear. Local only: nothing is published,
+    cached, stored in R2 or the DB, or alerted.
+
+    A Gemini variant that fails is reported FAILED and never replaced by an OpenAI
+    render. Gemini variants also run per-chunk ASR verification and cost money.
+
+    Exit status: 0 all variants rendered, 1 at least one FAILED.
+    """
+    from pipeline.tts import audition
+
+    voice_list = _csv(voices)
+    if not voice_list:
+        raise click.BadParameter("give at least one voice", param_hint="--voices")
+    model_list = _csv(models) if models is not None else list(audition.DEFAULT_MODELS)
+    style_text = audition.DEFAULT_STYLE if style is None else style.strip()
+
+    try:
+        variants = audition.build_variants(
+            feed_slug,
+            models=model_list,
+            voices=voice_list,
+            style=style_text,
+            include_openai=not no_openai,
+        )
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--voices/--models") from None
+
+    text = _read_utf8(script_path, "script")
+    try:
+        text = audition.excerpt(text, max_chars)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--max-chars") from None
+    if not text.strip():
+        raise click.UsageError(f"{script_path} is empty")
+
+    # Fail before any render (and before creating the out dir) on a missing key.
+    # Only the variable NAME is ever printed.
+    needed = []
+    if any(v.requested.provider == "gemini" for v in variants):
+        needed.append(("GEMINI_API_KEY", "the Gemini variants"))
+    if any(v.requested.provider == "openai" for v in variants):
+        needed.append(("OPENAI_API_KEY", "the OpenAI baseline"))
+    for name, purpose in needed:
+        if not os.environ.get(name, "").strip():
+            raise click.UsageError(f"{name} is not set (needed for {purpose})")
+
+    try:
+        summary = audition.run_audition(
+            text,
+            variants,
+            out_dir,
+            feed_slug=feed_slug,
+            style=style_text,
+            force=force,
+            echo=click.echo,
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from None
+
+    results = summary["variants"]
+    failed = sum(1 for v in results if v["status"] != "ok")
+    click.echo(
+        f"tts-audition: {len(results) - failed} ok, {failed} FAILED; files in {out_dir}"
+    )
+    if failed:
+        raise SystemExit(1)
 
 
 @cli.command("sync-sources")
