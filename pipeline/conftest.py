@@ -6,6 +6,7 @@ import builtins
 import contextlib
 import io
 import os
+import sqlite3
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -43,9 +44,17 @@ def persist_write_guard():
     code under test swallowed the ``AssertionError`` (manifest writes do, by
     design).
 
-    Not a sandbox: a subprocess, ``os.open`` or ``shutil.copy`` is not covered.
-    It is a tripwire for the ordinary accidents (an unredirected archive root, a
-    default cache dir).
+    Also refused: ``sqlite3.connect`` to a path there (it creates the file),
+    ``os.open`` with a write/create flag, and ``Path.touch``.
+
+    Not a sandbox. Known gaps, accepted: a subprocess; ``shutil`` helpers that
+    go through ``os.open`` *read* flags then write by fd; a path spelled
+    ``//persist/...`` (POSIX keeps two leading slashes distinct, ``abspath``
+    does not collapse them); a relative path resolved against a cwd under
+    /persist; a path reached through a symlink (``..`` is resolved lexically,
+    symlinks are not); and a ``TMPDIR`` that points under /persist. It is a
+    tripwire for the ordinary accidents (an unredirected archive root, a
+    default cache dir, a state DB), not a defence against a hostile test.
     """
     violations: list[str] = []
 
@@ -65,6 +74,10 @@ def persist_write_guard():
     real_mkdir = Path.mkdir
     real_os_mkdir = os.mkdir
     real_makedirs = os.makedirs
+    real_os_open = os.open
+    real_touch = Path.touch
+    real_sqlite_connect = sqlite3.connect
+    write_flags = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
 
     def guarded_open(file, mode="r", *args, **kwargs):
         if _opens_for_write(mode) and _under_persist(file):
@@ -106,7 +119,25 @@ def persist_write_guard():
             raise refuse("make directories", name)
         return real_makedirs(name, *args, **kwargs)
 
+    def guarded_os_open(path, flags, *args, **kwargs):
+        if flags & write_flags and _under_persist(path):
+            raise refuse("open for writing", path)
+        return real_os_open(path, flags, *args, **kwargs)
+
+    def guarded_touch(self, *args, **kwargs):
+        if _under_persist(self):
+            raise refuse("touch", self)
+        return real_touch(self, *args, **kwargs)
+
+    def guarded_sqlite_connect(database, *args, **kwargs):
+        if _under_persist(database):
+            raise refuse("connect (creating) sqlite database", database)
+        return real_sqlite_connect(database, *args, **kwargs)
+
     with (
+        patch.object(os, "open", guarded_os_open),
+        patch.object(Path, "touch", guarded_touch),
+        patch.object(sqlite3, "connect", guarded_sqlite_connect),
         patch.object(builtins, "open", guarded_open),
         patch.object(io, "open", guarded_io_open),
         patch.object(Path, "open", guarded_path_open),
@@ -221,7 +252,38 @@ def captured_tts_input(monkeypatch) -> list[str]:
 
 
 @pytest.fixture(autouse=True)
-def _block_real_telegram_posts(request):
+def _guard_violations():
+    """Every refusal a ``_block_real_*`` guard makes, failed at teardown.
+
+    A guard raises ``AssertionError`` at the call site, but plenty of production
+    code catches ``Exception`` on purpose (``send_alert``, the article fetch, the
+    Gemini phase's ``child_error`` path) and so would turn a real-API attempt
+    into a green test. Recording the refusal here makes that impossible: the
+    test fails at teardown whatever the code under test did with the exception.
+    A test that *means* to provoke a refusal asserts on this list and clears it.
+    """
+    violations: list[str] = []
+    yield violations
+    if violations:
+        pytest.fail(
+            f"{len(violations)} guarded call(s) made by the test; "
+            f"first: {violations[0]}",
+            pytrace=False,
+        )
+
+
+def _refusal(violations: list[str], message: str):
+    """A callable that records ``message`` in ``violations`` and raises it."""
+
+    def refuse(*args, **kwargs):
+        violations.append(message)
+        raise AssertionError(message)
+
+    return refuse
+
+
+@pytest.fixture(autouse=True)
+def _block_real_telegram_posts(request, _guard_violations):
     """Make "no test posts to production Telegram" a structural guarantee.
 
     ``PIGEON_DAEMON_URL`` defaults to ``http://127.0.0.1:4731`` (``pigeon.py``),
@@ -246,16 +308,17 @@ def _block_real_telegram_posts(request):
         return
     with patch(
         "pipeline.alerts.requests.post",
-        side_effect=AssertionError(
+        side_effect=_refusal(
+            _guard_violations,
             "Test attempted a real pigeon/Telegram POST. Patch "
-            "pipeline.alerts.send_alert (or requests.post) in your test."
+            "pipeline.alerts.send_alert (or requests.post) in your test.",
         ),
     ):
         yield
 
 
 @pytest.fixture(autouse=True)
-def _block_real_article_fetches(request):
+def _block_real_article_fetches(request, _guard_violations):
     """No test may fetch a real article over HTTP.
 
     ``fp_collector`` fetches article bodies during collection. Its fetch helper
@@ -272,17 +335,18 @@ def _block_real_article_fetches(request):
         return
     with patch(
         "pipeline.fp_collector.requests.get",
-        side_effect=AssertionError(
+        side_effect=_refusal(
+            _guard_violations,
             "A test made a real HTTP GET (outbound) through pipeline's requests "
             "module. Patch the fetch helper your code path uses (e.g. "
-            "pipeline.fp_collector._extract_article_text)."
+            "pipeline.fp_collector._extract_article_text).",
         ),
     ):
         yield
 
 
 @pytest.fixture(autouse=True)
-def _block_real_openai_tts(request):
+def _block_real_openai_tts(request, _guard_violations):
     """No test may build a real OpenAI client (a real TTS call costs money).
 
     Tests exercising the provider patch ``pipeline.tts.providers._make_openai_client``
@@ -292,18 +356,17 @@ def _block_real_openai_tts(request):
         yield
         return
 
-    def _refuse(timeout: float):
-        raise AssertionError(
-            "A test tried to build a real OpenAI client. Patch "
-            "pipeline.tts.providers._make_openai_client or pipeline.tts.render_episode."
-        )
-
-    with patch("pipeline.tts.providers._make_openai_client", _refuse):
+    refuse = _refusal(
+        _guard_violations,
+        "A test tried to build a real OpenAI client. Patch "
+        "pipeline.tts.providers._make_openai_client or pipeline.tts.render_episode.",
+    )
+    with patch("pipeline.tts.providers._make_openai_client", refuse):
         yield
 
 
 @pytest.fixture(autouse=True)
-def _block_real_gemini_tts(request):
+def _block_real_gemini_tts(request, _guard_violations):
     """No test may build a real Gemini TTS HTTP session (a real call costs money).
 
     Tests inject a fake via
@@ -314,18 +377,17 @@ def _block_real_gemini_tts(request):
         yield
         return
 
-    def _refuse():
-        raise AssertionError(
-            "A test tried to build a real Gemini TTS session. Patch "
-            "pipeline.tts.providers._make_gemini_session."
-        )
-
-    with patch("pipeline.tts.providers._make_gemini_session", _refuse):
+    refuse = _refusal(
+        _guard_violations,
+        "A test tried to build a real Gemini TTS session. Patch "
+        "pipeline.tts.providers._make_gemini_session.",
+    )
+    with patch("pipeline.tts.providers._make_gemini_session", refuse):
         yield
 
 
 @pytest.fixture(autouse=True)
-def _block_real_gemini_asr(request):
+def _block_real_gemini_asr(request, _guard_violations):
     """No test may build a real Gemini client for TTS verification (costs money).
 
     Tests patch ``pipeline.tts.asr._make_genai_client`` themselves; their patch
@@ -335,13 +397,12 @@ def _block_real_gemini_asr(request):
         yield
         return
 
-    def _refuse(timeout_s: float):
-        raise AssertionError(
-            "A test tried to build a real Gemini ASR client. Patch "
-            "pipeline.tts.asr._make_genai_client or pass a fake transcriber."
-        )
-
-    with patch("pipeline.tts.asr._make_genai_client", _refuse):
+    refuse = _refusal(
+        _guard_violations,
+        "A test tried to build a real Gemini ASR client. Patch "
+        "pipeline.tts.asr._make_genai_client or pass a fake transcriber.",
+    )
+    with patch("pipeline.tts.asr._make_genai_client", refuse):
         yield
 
 
@@ -356,3 +417,24 @@ def _isolate_tts_state_dirs(tmp_path, monkeypatch):
         "pipeline.tts.manifest.DEFAULT_MANIFEST_DIR", tmp_path / "tts-renders"
     )
     monkeypatch.setattr("pipeline.tts.cache.DEFAULT_CACHE_DIR", tmp_path / "tts-cache")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_state_db(tmp_path, monkeypatch):
+    """``_default_state_db_path`` (``pipeline.__main__``) falls back to /persist."""
+    monkeypatch.setenv("MY_PODCASTS_STATE_DB", str(tmp_path / "state.sqlite3"))
+
+
+@pytest.fixture(autouse=True)
+def _harmless_api_keys(monkeypatch):
+    """No test process, nor any child it spawns, holds a real API key.
+
+    A spawned child inherits ``os.environ``; if the developer's shell exports a
+    real ``GEMINI_API_KEY`` (or ``GOOGLE_API_KEY``, which the genai SDK also
+    reads), a child whose fake is bypassed by a bug could spend money. Dummies
+    make that request fail authentication instead. Tests that need a specific
+    value set it themselves; their setenv wins.
+    """
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-gemini-key-for-tests")
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key-for-tests")

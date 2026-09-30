@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -42,6 +44,23 @@ def test_path_helpers_under_persist_are_refused(_block_persist_writes):
     _refused(_block_persist_writes, lambda: p.mkdir(parents=True))
     _refused(_block_persist_writes, lambda: os.makedirs(f"{_MISSING}/a/b"))
     _refused(_block_persist_writes, lambda: os.mkdir(f"{_MISSING}/a"))
+
+
+def test_sqlite_os_open_and_touch_under_persist_are_refused(_block_persist_writes):
+    import sqlite3
+
+    _refused(
+        _block_persist_writes, lambda: sqlite3.connect(f"{_MISSING}/state.sqlite3")
+    )
+    for flags in (os.O_WRONLY, os.O_RDWR, os.O_RDONLY | os.O_CREAT):
+        _refused(_block_persist_writes, lambda f=flags: os.open(f"{_MISSING}/f", f))
+    _refused(_block_persist_writes, lambda: Path(f"{_MISSING}/f").touch())
+
+
+def test_os_open_for_reading_under_persist_is_allowed(_block_persist_writes):
+    with pytest.raises(FileNotFoundError):
+        os.open(f"{_MISSING}/f", os.O_RDONLY)
+    assert _block_persist_writes == []
 
 
 def test_dotdot_does_not_escape_the_guard(_block_persist_writes):
@@ -100,3 +119,90 @@ def test_script_archive_root_is_redirected_off_persist(tmp_path):
     root = Path(script_processor.SCRIPT_ARCHIVE_ROOT)
     assert root == tmp_path / "scripts"
     assert not str(root).startswith("/persist")
+
+
+def test_state_db_env_is_redirected_off_persist(tmp_path):
+    from pipeline.__main__ import _default_state_db_path
+
+    assert _default_state_db_path() == tmp_path / "state.sqlite3"
+
+
+def test_api_keys_in_the_environment_are_harmless_dummies():
+    assert os.environ["GEMINI_API_KEY"].startswith("dummy")
+    assert os.environ["OPENAI_API_KEY"].startswith("dummy")
+    assert "GOOGLE_API_KEY" not in os.environ
+
+
+# --- the _block_real_* guards record, so a swallowed refusal still fails -------
+
+
+def _swallowing(call) -> None:
+    """What production code that catches ``Exception`` around a call does."""
+    try:
+        call()
+    except Exception:  # noqa: BLE001 -- the point of the test
+        pass
+
+
+def _openai():
+    from pipeline.tts import providers
+
+    providers._make_openai_client(1.0)
+
+
+def _gemini_tts():
+    from pipeline.tts import providers
+
+    providers._make_gemini_session()
+
+
+def _gemini_asr():
+    from pipeline.tts import asr
+
+    asr._make_genai_client(1.0)
+
+
+def _telegram():
+    from pipeline import alerts
+
+    alerts.requests.post("http://127.0.0.1:1/")
+
+
+def _article_fetch():
+    from pipeline import fp_collector
+
+    fp_collector.requests.get("http://127.0.0.1:1/")
+
+
+@pytest.mark.parametrize(
+    "call",
+    [_openai, _gemini_tts, _gemini_asr, _telegram, _article_fetch],
+    ids=lambda f: f.__name__.strip("_"),
+)
+def test_a_swallowed_guard_refusal_is_still_recorded(call, _guard_violations):
+    _swallowing(call)
+    assert len(_guard_violations) == 1
+    _guard_violations.clear()  # we asserted on it; don't fail this test at teardown
+
+
+def test_recorded_guard_violation_fails_the_test_at_teardown(tmp_path):
+    """End to end: the teardown really turns a recorded violation into a failure."""
+    conftest = Path(__file__).with_name("conftest.py").read_text(encoding="utf-8")
+    start = conftest.index("@pytest.fixture(autouse=True)\ndef _guard_violations")
+    end = conftest.index("@pytest.fixture(autouse=True)\ndef _block_real_telegram")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "conftest.py").write_text("import pytest\n\n\n" + conftest[start:end])
+    (proj / "test_it.py").write_text(
+        "def test_swallows(_guard_violations):\n    _guard_violations.append('boom')\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", "test_it.py"],
+        cwd=proj,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert out.returncode != 0
+    assert "1 passed" in out.stdout and "1 error" in out.stdout
+    assert "1 guarded call(s)" in out.stdout and "boom" in out.stdout

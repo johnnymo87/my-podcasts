@@ -607,9 +607,11 @@ def test_unguarded_session_is_a_plain_session_without_adapter_retries() -> None:
         session.close()
 
 
-def test_autouse_guard_blocks_real_gemini_session() -> None:
+def test_autouse_guard_blocks_real_gemini_session(_guard_violations) -> None:
     with pytest.raises(AssertionError, match="real Gemini"):
         providers._make_gemini_session()
+    assert len(_guard_violations) == 1
+    _guard_violations.clear()  # provoked on purpose
 
 
 # --- I1: malformed response shapes never escape as non-TTSProviderError -----------

@@ -701,7 +701,7 @@ def test_should_fetch_full_text_boundary_is_exclusive():
     assert _should_fetch_full_text("x" * 600, "https://a/") is False
 
 
-def test_collector_cannot_reach_the_network_in_tests():
+def test_collector_cannot_reach_the_network_in_tests(_guard_violations):
     """conftest severs fp_collector's HTTP transport structurally.
 
     Mirrors _block_real_telegram_posts: a test that grows a new outbound fetch
@@ -718,6 +718,9 @@ def test_collector_cannot_reach_the_network_in_tests():
         fp_collector.requests.get("https://example.invalid/")
 
     assert _extract_article_text("https://example.invalid/") == ""
+    # Both calls hit the guard (the second swallowed, as production does).
+    assert len(_guard_violations) == 2
+    _guard_violations.clear()  # provoked on purpose
 
 
 def test_rss_teaser_is_replaced_with_fetched_full_text(tmp_path, monkeypatch):
