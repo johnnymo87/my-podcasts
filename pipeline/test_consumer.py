@@ -3,10 +3,29 @@ from __future__ import annotations
 import time
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from pipeline.consumer import (
     _compute_lookback,
     consume_forever,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_outbound_side_channels(monkeypatch):
+    """``consume_forever`` polls blogs (real HTTP) and alerts (real Telegram).
+
+    Both run inside ``except Exception`` blocks, so when the conftest guards
+    refused them the tests stayed green and the attempt went unnoticed -- and
+    the blog poll fired for real on whichever consumer test ran first in a
+    session (``_last_blog_poll`` starts at 0). Tests that assert on alerts patch
+    ``pipeline.alerts.send_alert`` themselves; that patch nests inside this one.
+    """
+    monkeypatch.setattr("pipeline.blog_poller.poll_all_blogs", lambda store, r2: None)
+    # consume_forever records the poll time in a module global; monkeypatch puts
+    # it back, so the stub cannot change what a later test in the session sees.
+    monkeypatch.setattr("pipeline.consumer._last_blog_poll", 0.0)
+    monkeypatch.setattr("pipeline.alerts.send_alert", lambda *a, **k: True)
 
 
 class _Done(BaseException):

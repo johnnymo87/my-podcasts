@@ -140,9 +140,11 @@ def test_real_client_has_sdk_retries_off_and_timeout(monkeypatch):
     assert captured["api_key"] == "k"
 
 
-def test_guard_blocks_real_client_in_tests():
+def test_guard_blocks_real_client_in_tests(_guard_violations):
     with pytest.raises(AssertionError, match="real Gemini"):
         asr._make_genai_client(timeout_s=1)
+    assert len(_guard_violations) == 1
+    _guard_violations.clear()  # provoked on purpose
 
 
 def test_pcm_to_wav_roundtrip():
@@ -248,10 +250,12 @@ def test_client_construction_valueerror_is_asr_error():
     assert exc_info.value.reason == "asr_error"
 
 
-def test_guard_assertion_is_not_converted_to_unavailable():
+def test_guard_assertion_is_not_converted_to_unavailable(_guard_violations):
     # Under the conftest guard: the AssertionError must reach the test author.
     with pytest.raises(AssertionError, match="real Gemini"):
         GeminiTranscriber()(b"x", "audio/wav")
+    assert len(_guard_violations) == 1
+    _guard_violations.clear()  # provoked on purpose
 
 
 def test_thought_parts_are_not_the_transcript():

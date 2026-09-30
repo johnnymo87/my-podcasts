@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from pipeline.__main__ import cli
@@ -13,6 +14,18 @@ from pipeline.source_cache import (
     sync_antiwar_rss_cache,
     sync_semafor_cache,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_gemini_semafor_routing(monkeypatch):
+    """``sync_semafor_cache`` routes articles with Gemini; stub it to the 'both'
+    default a host with no API key gives, so no test reaches Google. Tests of the
+    classifier itself call ``classify_semafor_articles`` directly (their own
+    reference, unaffected) and stub ``genai.Client``."""
+    monkeypatch.setattr(
+        "pipeline.source_cache.classify_semafor_articles",
+        lambda articles: dict.fromkeys(range(len(articles)), "both"),
+    )
 
 
 def _make_semafor_entry(

@@ -870,6 +870,7 @@ def publish_script_command(
                 episode_id="dry-run",
                 manifest_dir=None,
                 cache_dir=None,
+                notify_fallback=False,  # a dry run pages nobody
             )
             size = output_mp3.stat().st_size
             click.echo(f"MP3 generated: {output_mp3} ({size} bytes)")

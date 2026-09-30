@@ -155,9 +155,11 @@ def test_context_manager_closes_client(monkeypatch) -> None:
     client.close.assert_called_once_with()
 
 
-def test_autouse_guard_blocks_real_client() -> None:
+def test_autouse_guard_blocks_real_client(_guard_violations) -> None:
     with pytest.raises(AssertionError, match="real OpenAI"):
         providers._make_openai_client(timeout=1.0)
+    assert len(_guard_violations) == 1
+    _guard_violations.clear()  # provoked on purpose
 
 
 def test_error_kind_and_retryable_are_exclusive_and_derived() -> None:

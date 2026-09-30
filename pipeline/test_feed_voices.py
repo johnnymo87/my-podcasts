@@ -27,13 +27,7 @@ from pipeline.tts import FEED_VOICES, openai_config
 
 
 @pytest.fixture(autouse=True)
-def _stub_probe_and_feed(monkeypatch, tmp_path):
-    # publish_script archives its inputs under SCRIPT_ARCHIVE_ROOT (/persist/...
-    # in production). Without this redirect the test writes a file on the real
-    # host and fails outright on a runner with no /persist.
-    monkeypatch.setattr(
-        "pipeline.script_processor.SCRIPT_ARCHIVE_ROOT", tmp_path / "persisted-scripts"
-    )
+def _stub_probe_and_feed(monkeypatch):
     monkeypatch.setattr(
         "pipeline.processor.regenerate_and_upload_feed", lambda store, r2_client: None
     )

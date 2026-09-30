@@ -128,8 +128,15 @@ The inline text above stays; where it disagrees with these, these win.
   counter: at most 3 TTS calls and 2 ASR calls per chunk.
 - **429 is fatal only with confirmed daily/billing `QuotaFailure` detail.** `RESOURCE_EXHAUSTED`
   alone is transient.
-- **The bound** is the 6-minute Gemini budget plus a reap margin (time to kill and join the
-  child). `send_alert` is synchronous, so it counts against the caller, not the budget.
+- **The bound** is the 6-minute Gemini budget plus one poll interval (0.2 s) plus ONE bounded reap
+  (5 s, shared by the deadline path and the cleanup, never paid twice). Child startup (about 1.4 s
+  to import `google.genai`, several times that on a loaded host) is *inside* the budget, because
+  the deadline is one absolute `time.monotonic()` value taken before the child starts. `start()`
+  itself is small and cannot stall on the episode: the parent writes the chunks to `input.json` in
+  the scratch dir first and passes the child only a few hundred bytes (a child that stopped reading
+  a large spawn payload would otherwise block the parent inside `start()`, past any deadline). A
+  per-render worst case is therefore about 6 minutes 6 seconds of Gemini phase, then the OpenAI
+  fallback (itself bounded by its per-chunk retries) and the alert wait below.
 - **Config shape** is the `primary`/`fallback` pair of typed leaves, not flat provider fields.
 - **Gemini WAVs carry a trailing C2PA chunk** after `data` (about 6 KB, RIFF size covers it), so
   the audio is the declared frames read via `wave`, never "everything after 44 bytes".
@@ -139,11 +146,50 @@ The inline text above stays; where it disagrees with these, these win.
   `verification`; a hit is valid only if its rendered leaf is the request's primary or fallback.
   `RENDERER_VERSION` 2 started a cold cache.
 - **PR split.** T3a (`my-podcasts-9p3.3`) is the typed config, `FEED_VOICES`, `GeminiProvider` and
-  provenance-checked cache; `render_episode` still refuses a Gemini primary. T3b
+  provenance-checked cache; it left `render_episode` refusing a Gemini primary, and T3b removed that
+  refusal. T3b
   (`my-podcasts-9p3.11`) adds the child-process Gemini phase, per-chunk verification, fallback and
   alerts.
 - **Manual-publish defaults stay `nova`** (`publish_script`, CLI `--voice`) on every feed until
   T6 (`my-podcasts-9p3.7`) makes them fall through to `FEED_VOICES`.
+
+#### Amendments (T3b implementation, 2026-09-30)
+
+- **The alert is bounded.** `send_alert` has a 10 s timeout per read, not a wall-clock bound, so
+  alerts go to ONE lazily started module-level daemon worker through a queue of at most
+  `ALERT_QUEUE_MAX = 8`, and a render waits at most `ALERT_WAIT_SECONDS = 12.0` for its own alert.
+  A stuck sender therefore costs one thread in total (a per-alert thread would pile up across
+  repeated fallbacks); a dead worker is restarted, and a full queue drops the alert (logged in
+  full). The manifest's `alert_sent` records `true`, `false`, `"timeout"` (queued, not finished in
+  time: delivery unknown), `"dropped"` (queue full: not sent) or `null` (no alert attempted).
+  Nothing in building or sending the alert can raise into the render. This replaces the earlier
+  "synchronous, counts against the caller" wording. The alert is sent by the parent only, after the fallback
+  attempt (also when that attempt fails), never on a cache hit, never when there is no fallback,
+  and not at all with `notify_fallback=False` (local tools and `publish-script --dry-run`).
+- **The fallback-reason set is closed:** `fatal`, `exhausted`, `deadline`, `asr_unavailable`,
+  `second_omission`, `child_error`, `child_no_result`, `invalid_result`, `spawn_failed`,
+  `runner_error` (parent-side: an exception escaped `run_gemini_phase`; `render_episode` converts it
+  to a failed phase so the invariant holds that a Gemini problem costs an OpenAI episode, never the
+  episode; with no fallback it raises `TTSRenderError` from it). Token totals in the manifest treat a
+  completed call with no thinking count as 0, and a killed, in-flight or errored one as unknown
+  (`null`). The parent rejects any other value the child reports as `invalid_result`, and
+  `runner_error` is not a reason a child may report. Manifest telemetry built from child progress is
+  best-effort: malformed progress makes the affected totals `null` (and `audio_seconds_generated`
+  `null`), and a failure building the block degrades it to a minimal record with a
+  `telemetry_error` note; it never fails or changes the render.
+- **The parent validates before it uses any audio.** The child's `result.json` is a claim. On
+  `ok` the parent requires indices exactly `0..n-1` in order, the canonical file name for each,
+  every file present, byte counts matching, non-empty and even (whole 16-bit samples), and the
+  sha256 matching. Any mismatch is `invalid_result` and no Gemini audio is used. A result that
+  lands as the deadline expires is still read (once, after the kill) and still validated.
+- **`RENDERER_VERSION` stays `"2"`.** The OpenAI path is byte-identical and no Gemini cache
+  entries exist yet, so nothing needed invalidating.
+- **Re-chunking for the fallback yields the same boundaries.** `chunk_text`'s 3000-character
+  target is fixed; the `ceiling` argument (3000 for Gemini, 4096 for OpenAI) is only a backstop.
+  The fallback still chunks afresh from the whole text and reuses no Gemini chunk or audio.
+- **Cache entries carry the fallback.** A fallback render is stored as `provider=openai`,
+  `verification=not_run_openai`, `fallback_reason=<reason>`; a replay returns it (with the stored
+  `fallback_reason` on `RenderResult`) without running the phase or alerting again.
 
 ### Completed-render reuse
 

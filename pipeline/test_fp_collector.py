@@ -6,9 +6,33 @@ from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from pipeline.exa_client import ExaResult
 from pipeline.fp_collector import _slugify, collect_fp_artifacts
 from pipeline.fp_editor import FPResearchPlan, FPStoryDirective
+
+
+@pytest.fixture(autouse=True)
+def _no_gemini_freshness_calls(monkeypatch):
+    """Freshness classification and prior-theme extraction call Gemini.
+
+    Stubbed at the two seams the collector uses, to the answer a host with no
+    API key gives (everything FRESH, no fallback themes). Before this, these
+    tests reached Google for real on any host with a key -- billable, ~10 s each
+    -- and were only fast on a host without one. Tests that exercise
+    classification patch ``classify_headlines`` themselves and win.
+    """
+    from pipeline.freshness import HeadlineClassification
+
+    monkeypatch.setattr(
+        "pipeline.fp_collector.classify_headlines",
+        lambda headlines, summary: [
+            HeadlineClassification(headline_index=i, matched_theme=None)
+            for i in range(len(headlines))
+        ],
+    )
+    monkeypatch.setattr("pipeline.freshness.extract_themes_from_scripts", lambda s: [])
 
 
 _et = ZoneInfo("America/New_York")
@@ -701,7 +725,7 @@ def test_should_fetch_full_text_boundary_is_exclusive():
     assert _should_fetch_full_text("x" * 600, "https://a/") is False
 
 
-def test_collector_cannot_reach_the_network_in_tests():
+def test_collector_cannot_reach_the_network_in_tests(_guard_violations):
     """conftest severs fp_collector's HTTP transport structurally.
 
     Mirrors _block_real_telegram_posts: a test that grows a new outbound fetch
@@ -718,6 +742,9 @@ def test_collector_cannot_reach_the_network_in_tests():
         fp_collector.requests.get("https://example.invalid/")
 
     assert _extract_article_text("https://example.invalid/") == ""
+    # Both calls hit the guard (the second swallowed, as production does).
+    assert len(_guard_violations) == 2
+    _guard_violations.clear()  # provoked on purpose
 
 
 def test_rss_teaser_is_replaced_with_fetched_full_text(tmp_path, monkeypatch):
