@@ -272,6 +272,7 @@ class AsrInfo:
     elapsed_s: float
     input_tokens: int | None
     output_tokens: int | None
+    thinking_tokens: int | None
     transcript_chars: int
 
 
@@ -326,6 +327,7 @@ def verify_audio(
         elapsed_s=tr.elapsed_s,
         input_tokens=tr.input_tokens,
         output_tokens=tr.output_tokens,
+        thinking_tokens=tr.thinking_tokens,
         transcript_chars=len(tr.text),
     )
     if not normalize_tokens(tr.text):

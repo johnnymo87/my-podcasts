@@ -3,15 +3,19 @@
 The model gets AUDIO ONLY, never the script: a transcriber that can see the
 script can "hear" what it expects. Callers align afterwards (verify.py).
 
-The SDK's own retries are OFF (``HttpRetryOptions(attempts=1)``) and the
-timeout is explicit; the caller owns retry policy and, in T3, the hard
-deadline (a child process). ``timeout`` is per HTTP request, not a wall clock.
+The SDK's own retries are OFF (``HttpRetryOptions(attempts=1)``) and a
+timeout is set explicitly; the caller owns retry policy. That timeout is an
+httpx per-phase / per-read limit, NOT a per-request or wall-clock bound: a
+server that trickles bytes can exceed it many times over. The real bound is
+T3's child-process kill, so nothing here may be relied on to return promptly.
 """
 
 from __future__ import annotations
 
 import io
+import math
 import os
+import threading
 import time
 import wave
 from dataclasses import dataclass
@@ -54,15 +58,22 @@ class Transcription:
     elapsed_s: float
     input_tokens: int | None
     output_tokens: int | None
+    thinking_tokens: int | None
 
 
-def _make_genai_client_unguarded(*, timeout_s: float) -> genai.Client:
+def _make_genai_client_unguarded(
+    *, timeout_s: float, base_url: str | None = None
+) -> genai.Client:
+    options = {
+        # 0 means "no timeout" to the SDK, so never round down to it.
+        "timeout": max(1, math.ceil(timeout_s * 1000)),
+        "retry_options": types.HttpRetryOptions(attempts=1),
+    }
+    if base_url is not None:
+        options["base_url"] = base_url
     return genai.Client(
         api_key=os.environ["GEMINI_API_KEY"],
-        http_options=types.HttpOptions(
-            timeout=int(timeout_s * 1000),
-            retry_options=types.HttpRetryOptions(attempts=1),
-        ),
+        http_options=types.HttpOptions(**options),
     )
 
 
@@ -71,7 +82,11 @@ def _make_genai_client(timeout_s: float) -> genai.Client:
 
 
 class GeminiTranscriber:
-    """Callable ``(audio_bytes, mime_type) -> Transcription``. Client is lazy."""
+    """Callable ``(audio_bytes, mime_type) -> Transcription``. Client is lazy.
+
+    Safe to share across threads (lazy init and close are locked); T3 may
+    equally build one per call. Usable as a context manager (exit closes).
+    """
 
     def __init__(
         self, *, model: str = ASR_MODEL, timeout_s: float = DEFAULT_ASR_TIMEOUT_SECONDS
@@ -79,13 +94,33 @@ class GeminiTranscriber:
         self.model = model
         self.timeout_s = timeout_s
         self._client: genai.Client | None = None
+        self._lock = threading.Lock()
+
+    def __enter__(self) -> GeminiTranscriber:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def _get_client(self) -> genai.Client:
+        with self._lock:
+            if self._client is None:
+                try:
+                    self._client = _make_genai_client(self.timeout_s)
+                except (KeyError, ValueError) as exc:
+                    # Missing GEMINI_API_KEY / bad client config. Deliberately
+                    # not `Exception`: the test guard's AssertionError must
+                    # propagate, not be mistaken for an outage.
+                    raise TranscriptionUnavailable("asr_error", repr(exc)) from exc
+            return self._client
 
     def __call__(self, audio: bytes, mime_type: str) -> Transcription:
-        if self._client is None:
-            self._client = _make_genai_client(self.timeout_s)
+        if self.timeout_s <= 0:
+            raise TranscriptionUnavailable("asr_timeout", "no time budget left")
+        client = self._get_client()
         started = time.monotonic()
         try:
-            resp = self._client.models.generate_content(
+            resp = client.models.generate_content(
                 model=self.model,
                 contents=[
                     types.Part.from_bytes(data=audio, mime_type=mime_type),
@@ -100,7 +135,12 @@ class GeminiTranscriber:
         elapsed = time.monotonic() - started
 
         if not resp.candidates:
-            raise TranscriptionUnavailable("asr_empty", "no candidates")
+            feedback = getattr(resp, "prompt_feedback", None)
+            block = getattr(feedback, "block_reason", None)
+            detail = "no candidates"
+            if block is not None:
+                detail += f" (block_reason={getattr(block, 'name', block)})"
+            raise TranscriptionUnavailable("asr_empty", detail)
         finish = resp.candidates[0].finish_reason
         finish_name = finish.name if finish is not None else "NONE"
         if finish_name != "STOP":
@@ -119,12 +159,14 @@ class GeminiTranscriber:
             elapsed_s=elapsed,
             input_tokens=getattr(usage, "prompt_token_count", None),
             output_tokens=getattr(usage, "candidates_token_count", None),
+            thinking_tokens=getattr(usage, "thoughts_token_count", None),
         )
 
     def close(self) -> None:
-        if self._client is not None:
-            self._client.close()
-            self._client = None
+        with self._lock:
+            client, self._client = self._client, None
+        if client is not None:
+            client.close()
 
 
 def pcm_to_wav(pcm: bytes, sample_rate: int = PCM_SAMPLE_RATE) -> bytes:

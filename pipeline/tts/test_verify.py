@@ -197,7 +197,7 @@ def fake_transcriber(text=None, exc=None):
         calls.append((audio, mime_type))
         if exc:
             raise exc
-        return Transcription(text, "gemini-3.8-flash", "1", "STOP", 1.5, 10, 20)
+        return Transcription(text, "gemini-3.8-flash", "1", "STOP", 1.5, 10, 20, 7)
 
     return t, calls
 
@@ -210,6 +210,7 @@ def test_verify_audio_pass_records_asr_and_policy():
     assert v.verifier_version == VERIFIER_VERSION
     assert v.mode == "chunk"
     assert v.asr.model == "gemini-3.8-flash" and v.asr.finish_reason == "STOP"
+    assert v.asr.thinking_tokens == 7
     # The transcriber got the audio and its type, nothing else.
     assert calls == [(b"WAV", "audio/wav")]
 

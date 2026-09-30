@@ -1,5 +1,9 @@
 import io
+import json
+import threading
+import time
 import wave
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -149,3 +153,190 @@ def test_pcm_to_wav_roundtrip():
 def test_pcm_to_wav_rejects_odd_length():
     with pytest.raises(ValueError):
         pcm_to_wav(b"\x00\x00\x00")
+
+
+def test_zero_budget_is_timeout_and_never_builds_a_client():
+    made = []
+
+    def make(timeout_s):
+        made.append(timeout_s)
+        return FakeClient(response())
+
+    t = GeminiTranscriber(timeout_s=0)
+    with patch.object(asr, "_make_genai_client", make):
+        with pytest.raises(TranscriptionUnavailable) as exc_info:
+            t(b"x", "audio/wav")
+    assert exc_info.value.reason == "asr_timeout"
+    assert made == []
+
+
+def test_tiny_budget_rounds_up_to_one_millisecond(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    captured = {}
+
+    def fake_client(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace()
+
+    with patch.object(asr.genai, "Client", fake_client):
+        asr._make_genai_client_unguarded(timeout_s=0.0004)
+    # 0 would mean "no timeout" to the SDK.
+    assert captured["http_options"].timeout == 1
+
+
+def test_context_manager_closes_and_double_close_is_harmless():
+    client = FakeClient(response())
+    with patch.object(asr, "_make_genai_client", lambda timeout_s: client):
+        with GeminiTranscriber(timeout_s=30) as t:
+            t(b"x", "audio/wav")
+        assert client.closed
+        t.close()
+        t.close()
+
+
+def test_lazy_init_under_threads_builds_exactly_one_client():
+    made = []
+    barrier = threading.Barrier(4)
+
+    def make(timeout_s):
+        time.sleep(0.05)
+        made.append(1)
+        return FakeClient(response())
+
+    t = GeminiTranscriber(timeout_s=30)
+    errors = []
+
+    def worker():
+        barrier.wait()
+        try:
+            t(b"x", "audio/wav")
+        except Exception as exc:  # pragma: no cover - failure reporting
+            errors.append(exc)
+
+    with patch.object(asr, "_make_genai_client", make):
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join()
+    assert errors == []
+    assert len(made) == 1
+
+
+def test_missing_api_key_is_asr_error(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    t = GeminiTranscriber(timeout_s=30)
+    unguarded = lambda timeout_s: asr._make_genai_client_unguarded(  # noqa: E731
+        timeout_s=timeout_s
+    )
+    with patch.object(asr, "_make_genai_client", unguarded):
+        with pytest.raises(TranscriptionUnavailable) as exc_info:
+            t(b"x", "audio/wav")
+    assert exc_info.value.reason == "asr_error"
+
+
+def test_client_construction_valueerror_is_asr_error():
+    def make(timeout_s):
+        raise ValueError("bad client config")
+
+    t = GeminiTranscriber(timeout_s=30)
+    with patch.object(asr, "_make_genai_client", make):
+        with pytest.raises(TranscriptionUnavailable) as exc_info:
+            t(b"x", "audio/wav")
+    assert exc_info.value.reason == "asr_error"
+
+
+def test_guard_assertion_is_not_converted_to_unavailable():
+    # Under the conftest guard: the AssertionError must reach the test author.
+    with pytest.raises(AssertionError, match="real Gemini"):
+        GeminiTranscriber()(b"x", "audio/wav")
+
+
+def test_thought_parts_are_not_the_transcript():
+    resp = response()
+    resp.candidates[0].content.parts = [
+        types.Part(text="REASONING", thought=True),
+        types.Part(text="hello world"),
+    ]
+    t, _, p = transcriber_with(resp)
+    with p:
+        out = t(b"x", "audio/wav")
+    assert out.text == "hello world"
+
+    only_thought = response()
+    only_thought.candidates[0].content.parts = [
+        types.Part(text="REASONING", thought=True)
+    ]
+    t, _, p = transcriber_with(only_thought)
+    with p, pytest.raises(TranscriptionUnavailable) as exc_info:
+        t(b"x", "audio/wav")
+    assert exc_info.value.reason == "asr_empty"
+
+
+def test_thinking_tokens_are_recorded():
+    resp = response()
+    resp.usage_metadata = types.GenerateContentResponseUsageMetadata(
+        prompt_token_count=100, candidates_token_count=5, thoughts_token_count=77
+    )
+    t, _, p = transcriber_with(resp)
+    with p:
+        assert t(b"x", "audio/wav").thinking_tokens == 77
+    t, _, p = transcriber_with(response())
+    with p:
+        assert t(b"x", "audio/wav").thinking_tokens is None
+
+
+def test_no_candidates_message_includes_block_reason():
+    resp = response(candidates=False)
+    resp.prompt_feedback = types.GenerateContentResponsePromptFeedback(
+        block_reason=types.BlockedReason.PROHIBITED_CONTENT
+    )
+    t, _, p = transcriber_with(resp)
+    with p, pytest.raises(TranscriptionUnavailable) as exc_info:
+        t(b"x", "audio/wav")
+    assert exc_info.value.reason == "asr_empty"
+    assert "PROHIBITED_CONTENT" in str(exc_info.value)
+
+
+def test_sdk_makes_exactly_one_attempt_on_503(monkeypatch):
+    """Real SDK client against a local server: retries are really off."""
+    hits = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            hits.append(self.path)
+            body = json.dumps(
+                {"error": {"code": 503, "message": "x", "status": "UNAVAILABLE"}}
+            ).encode()
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    t = GeminiTranscriber(timeout_s=10)
+    try:
+        with patch.object(
+            asr,
+            "_make_genai_client",
+            lambda timeout_s: asr._make_genai_client_unguarded(
+                timeout_s=timeout_s, base_url=base_url
+            ),
+        ):
+            with pytest.raises(TranscriptionUnavailable) as exc_info:
+                t(b"x", "audio/wav")
+    finally:
+        t.close()
+        server.shutdown()
+        server.server_close()
+    assert exc_info.value.reason == "asr_error"
+    assert len(hits) == 1
