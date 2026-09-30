@@ -157,6 +157,27 @@ def _block_real_openai_tts(request):
 
 
 @pytest.fixture(autouse=True)
+def _block_real_gemini_asr(request):
+    """No test may build a real Gemini client for TTS verification (costs money).
+
+    Tests patch ``pipeline.tts.asr._make_genai_client`` themselves; their patch
+    nests inside this one and wins.
+    """
+    if request.node.get_closest_marker("allow_network"):
+        yield
+        return
+
+    def _refuse(timeout_s: float):
+        raise AssertionError(
+            "A test tried to build a real Gemini ASR client. Patch "
+            "pipeline.tts.asr._make_genai_client or pass a fake transcriber."
+        )
+
+    with patch("pipeline.tts.asr._make_genai_client", _refuse):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_tts_state_dirs(tmp_path, monkeypatch):
     """No test may write TTS manifests or cache entries under /persist.
 
