@@ -27,8 +27,9 @@ def _install_fake_render(monkeypatch) -> tuple[list[dict], list[str]]:
         texts.append(text)
         Path(out_mp3).write_bytes(b"\xff\xfb\x90\x00" * 100)
         return RenderResult(
-            provider=config.provider,
+            provider=config.primary.provider,
             config=config,
+            rendered=config.primary,
             cached=False,
             chunks=1,
             manifest_path=None,

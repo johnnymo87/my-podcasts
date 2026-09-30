@@ -2,21 +2,48 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import openai
 
 
 if TYPE_CHECKING:
-    from pipeline.tts.config import RenderConfig
+    from pipeline.tts.config import OpenAIConfig
 
 _RETRYABLE_STATUS = frozenset({408, 409, 429})
 
 
+ErrorKind = Literal["content", "infra", "fatal"]
+_KINDS = frozenset({"content", "infra", "fatal"})
+
+
 class TTSProviderError(Exception):
-    def __init__(self, message: str, *, retryable: bool) -> None:
+    """A provider could not produce audio for one chunk.
+
+    Give exactly one of ``retryable`` (legacy, OpenAI call sites) or ``kind``.
+    ``retryable=True`` means ``kind="infra"``, ``False`` means ``"fatal"``.
+    ``retryable`` is always derived: everything but ``fatal`` may be retried.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool | None = None,
+        kind: ErrorKind | None = None,
+    ) -> None:
         super().__init__(message)
-        self.retryable = retryable
+        if (retryable is None) == (kind is None):
+            raise ValueError("give exactly one of retryable= or kind=")
+        if kind is None:
+            kind = "infra" if retryable else "fatal"
+        if kind not in _KINDS:
+            raise ValueError(f"unknown TTS error kind: {kind!r}")
+        self.kind: ErrorKind = kind
+
+    @property
+    def retryable(self) -> bool:
+        return self.kind != "fatal"
 
 
 def _make_openai_client_unguarded(*, timeout: float) -> openai.OpenAI:
@@ -77,13 +104,13 @@ class OpenAIProvider:
     def __exit__(self, *exc_info: object) -> None:
         self.close()
 
-    def synthesize(self, text: str, config: RenderConfig) -> bytes:
+    def synthesize(self, text: str, cfg: OpenAIConfig) -> bytes:
         if self._client is None:
             self._client = _make_openai_client(self._timeout)
         try:
             response = self._client.audio.speech.create(
-                model=config.openai_model,
-                voice=config.openai_voice,
+                model=cfg.model,
+                voice=cfg.voice,
                 input=text,
                 response_format="pcm",
             )

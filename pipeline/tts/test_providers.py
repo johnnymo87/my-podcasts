@@ -7,11 +7,11 @@ import openai
 import pytest
 
 from pipeline.tts import providers
-from pipeline.tts.config import openai_config
+from pipeline.tts.config import OpenAIConfig
 from pipeline.tts.providers import OpenAIProvider, TTSProviderError
 
 
-CONFIG = openai_config(model="tts-1-hd", voice="onyx")
+CONFIG = OpenAIConfig(model="tts-1-hd", voice="onyx")
 
 
 def _client_returning(data: bytes) -> MagicMock:
@@ -158,3 +158,30 @@ def test_context_manager_closes_client(monkeypatch) -> None:
 def test_autouse_guard_blocks_real_client() -> None:
     with pytest.raises(AssertionError, match="real OpenAI"):
         providers._make_openai_client(timeout=1.0)
+
+
+def test_error_kind_and_retryable_are_exclusive_and_derived() -> None:
+    assert TTSProviderError("x", retryable=True).kind == "infra"
+    assert TTSProviderError("x", retryable=False).kind == "fatal"
+    for kind, retryable in [("content", True), ("infra", True), ("fatal", False)]:
+        err = TTSProviderError("x", kind=kind)
+        assert err.kind == kind and err.retryable is retryable
+    with pytest.raises(ValueError):
+        TTSProviderError("x")
+    with pytest.raises(ValueError):
+        TTSProviderError("x", retryable=True, kind="infra")
+    with pytest.raises(ValueError):
+        TTSProviderError("x", kind="weird")
+
+
+def test_openai_retryable_errors_carry_infra_kind(monkeypatch) -> None:
+    client = MagicMock()
+    client.audio.speech.create.side_effect = _status_error(503)
+    monkeypatch.setattr(providers, "_make_openai_client", lambda timeout: client)
+    with pytest.raises(TTSProviderError) as exc:
+        OpenAIProvider().synthesize("Hello.", CONFIG)
+    assert exc.value.kind == "infra"
+    client.audio.speech.create.side_effect = _status_error(401)
+    with pytest.raises(TTSProviderError) as exc:
+        OpenAIProvider().synthesize("Hello.", CONFIG)
+    assert exc.value.kind == "fatal"

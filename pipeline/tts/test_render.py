@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import dataclasses
 import json
+from types import SimpleNamespace
 
 import pytest
 
-from pipeline.tts import render
-from pipeline.tts.config import openai_config
+from pipeline.tts import cache, render
+from pipeline.tts.config import (
+    GeminiConfig,
+    OpenAIConfig,
+    RenderConfig,
+    openai_config,
+)
 from pipeline.tts.providers import TTSProviderError
 
 
@@ -79,7 +86,13 @@ def test_manifest_records_render(harness) -> None:
     assert result.manifest_path.name.startswith("2026-09-30-fp-")
     assert data["status"] == "rendered"
     assert data["rendered_provider"] == "openai"
-    assert data["config"]["openai_voice"] == "onyx"
+    assert data["config"]["primary"]["voice"] == "onyx"
+    assert data["config"]["fallback"] is None
+    assert data["rendered_config"] == {
+        "provider": "openai",
+        "model": "tts-1-hd",
+        "voice": "onyx",
+    }
     assert data["total_audio_seconds"] == pytest.approx(result.chunks * 1.0)
     assert [c["attempts"] for c in data["chunks"]] == [1] * result.chunks
 
@@ -253,28 +266,128 @@ def test_two_attempts_write_distinct_manifests(harness) -> None:
     assert len(list((tmp / "m" / "fp-digest").glob("*.json"))) == 2
 
 
-def test_unknown_provider_fails_loudly(tmp_path) -> None:
-    from dataclasses import replace
-
+def test_unknown_provider_fails_loudly() -> None:
     with pytest.raises(ValueError, match="provider"):
+        render._provider_for(SimpleNamespace(provider="nope"))
+
+
+def test_provider_for_builds_openai_provider() -> None:
+    assert isinstance(
+        render._provider_for(OpenAIConfig("tts-1-hd", "nova")), render.OpenAIProvider
+    )
+
+
+def test_gemini_primary_is_refused_before_any_side_effect(
+    tmp_path, monkeypatch
+) -> None:
+    made: list[object] = []
+    monkeypatch.setattr(render, "_provider_for", lambda leaf: made.append(leaf))
+    cfg = RenderConfig(GeminiConfig("gemini-3.8-flash-lite-tts", "Kore"), None)
+    with pytest.raises(ValueError, match="T3b"):
         render.render_episode(
             TEXT,
-            replace(CFG, provider="nope"),  # type: ignore[arg-type]
+            cfg,
             tmp_path / "o.mp3",
             feed_slug="x",
             episode_id="y",
-            manifest_dir=None,
-            cache_dir=None,
+            manifest_dir=tmp_path / "m",
+            cache_dir=tmp_path / "c",
         )
+    assert made == []
+    assert not (tmp_path / "m").exists() and not (tmp_path / "c").exists()
+    assert not (tmp_path / "o.mp3").exists()
 
 
-def test_malformed_cache_result_does_not_fail_hit(harness) -> None:
+def _only_entry(tmp):
+    [entry] = [p for p in (tmp / "c").iterdir() if not p.name.startswith(".")]
+    return entry
+
+
+def test_malformed_cache_stats_do_not_fail_hit(harness) -> None:
     _, _, tmp = harness
     _run(tmp)
-    [entry] = [p for p in (tmp / "c").iterdir() if not p.name.startswith(".")]
-    (entry / "result.json").write_text('{"chunks": "many", "provider": "openai"}')
+    entry = _only_entry(tmp)
+    res = json.loads((entry / "result.json").read_text())
+    res["chunks"] = "many"
+    (entry / "result.json").write_text(json.dumps(res))
     hit = _run(tmp)
     assert hit.cached and hit.chunks == 0 and hit.provider == "openai"
+
+
+def test_result_json_records_provenance(harness) -> None:
+    _, _, tmp = harness
+    result = _run(tmp)
+    res = json.loads((_only_entry(tmp) / "result.json").read_text())
+    assert res["schema"] == 2
+    assert res["provider"] == "openai"
+    assert res["requested"] == dataclasses.asdict(CFG)
+    assert res["rendered"] == dataclasses.asdict(CFG.primary)
+    assert res["verification"] == "not_run_openai"
+    assert res["fallback_reason"] is None
+    assert res["renderer_version"] == "2"
+    assert res["chunks"] == result.chunks
+    assert res["total_audio_seconds"] == pytest.approx(result.chunks * 1.0)
+    assert res["rendered_at"]
+
+
+def test_rendered_leaf_on_render_and_cache_hit(harness) -> None:
+    _, _, tmp = harness
+    first = _run(tmp)
+    assert first.rendered == OpenAIConfig("tts-1-hd", "onyx")
+    assert first.config == CFG
+    hit = _run(tmp)
+    assert hit.cached and hit.rendered == OpenAIConfig("tts-1-hd", "onyx")
+    assert hit.provider == "openai"
+
+
+def test_cache_hit_reports_entry_provenance_not_request(harness) -> None:
+    _, _, tmp = harness
+    other = OpenAIConfig("tts-1", "echo")
+    (tmp / "out.mp3").write_bytes(b"ID3x")
+    res = {
+        "schema": 2,
+        "provider": "openai",
+        "requested": dataclasses.asdict(RenderConfig(other)),
+        "rendered": dataclasses.asdict(other),
+        "verification": "not_run_openai",
+        "fallback_reason": None,
+        "renderer_version": "2",
+        "chunks": 3,
+        "total_audio_seconds": 7.5,
+    }
+    assert cache.store(tmp / "c", cache.cache_key(TEXT, CFG), tmp / "out.mp3", res)
+    hit = _run(tmp)
+    assert hit.cached and hit.chunks == 3
+    assert hit.provider == "openai" and hit.rendered == other
+    assert hit.config == CFG  # the request is still reported as the request
+    data = json.loads(hit.manifest_path.read_text())
+    assert data["config"]["primary"]["voice"] == "onyx"
+    assert data["rendered_config"] == dataclasses.asdict(other)
+
+
+def test_entry_without_provenance_is_a_miss_and_is_overwritten(harness) -> None:
+    provider, _, tmp = harness
+    (tmp / "out.mp3").write_bytes(b"ID3x")
+    assert cache.store(
+        tmp / "c",
+        cache.cache_key(TEXT, CFG),
+        tmp / "out.mp3",
+        {"provider": "openai", "chunks": 1, "total_audio_seconds": 1.0},
+    )
+    result = _run(tmp)
+    assert not result.cached and provider.calls
+    assert cache.lookup(tmp / "c", cache.cache_key(TEXT, CFG)) is not None
+
+
+def test_failed_manifest_has_no_rendered_config(harness) -> None:
+    provider, _, tmp = harness
+    provider.script = [TTSProviderError("401", retryable=False)]
+    with pytest.raises(render.TTSRenderError):
+        _run(tmp)
+    [manifest] = (tmp / "m" / "fp-digest").glob("*.json")
+    data = json.loads(manifest.read_text())
+    assert data["rendered_config"] is None
+    assert data["config"]["primary"]["voice"] == "onyx"
 
 
 def test_cache_hit_copy_failure_is_atomic_and_falls_back(harness, monkeypatch) -> None:

@@ -1,8 +1,10 @@
 """What an episode is rendered with.
 
-T1 knows only OpenAI. T3 adds Gemini fields and per-feed resolution; keep this
-dataclass the single description of a render so the cache key and manifest
-can serialize it with ``dataclasses.asdict``.
+A render is described by a ``RenderConfig``: a provider-specific *primary* leaf
+plus an optional OpenAI *fallback*. Every dataclass is frozen and serializes
+with ``dataclasses.asdict`` (the cache key and manifest rely on that).
+
+``FEED_VOICES`` is the one owner of per-feed TTS settings.
 """
 
 from __future__ import annotations
@@ -12,22 +14,152 @@ from typing import Literal
 
 
 DEFAULT_OPENAI_MODEL = "tts-1-hd"
+DEFAULT_OPENAI_VOICE = "nova"
 
 # Raw PCM every provider hands the renderer: 24 kHz, mono, signed 16-bit LE.
 PCM_SAMPLE_RATE = 24_000
 PCM_BYTES_PER_SECOND = PCM_SAMPLE_RATE * 2  # mono, 16-bit
 
+# An OpenAI voice name must never reach Gemini (and vice versa): a stale feed
+# entry would otherwise fail at the provider, mid-render.
+OPENAI_VOICES = frozenset(
+    {
+        "alloy",
+        "ash",
+        "ballad",
+        "coral",
+        "echo",
+        "fable",
+        "nova",
+        "onyx",
+        "sage",
+        "shimmer",
+        "verse",
+    }
+)
+
+
+def _require_nonempty(kind: str, model: object, voice: object) -> None:
+    if not isinstance(model, str) or not isinstance(voice, str):
+        raise ValueError(f"{kind} needs string model and voice")
+    if not model or not voice:
+        raise ValueError(f"{kind} needs model and voice, got {model!r}/{voice!r}")
+
+
+@dataclass(frozen=True)
+class OpenAIConfig:
+    model: str
+    voice: str
+    provider: Literal["openai"] = "openai"
+
+    def __post_init__(self) -> None:
+        _require_nonempty("OpenAI render", self.model, self.voice)
+        if self.provider != "openai":
+            raise ValueError(
+                f"OpenAIConfig provider must be 'openai': {self.provider!r}"
+            )
+
+
+@dataclass(frozen=True)
+class GeminiConfig:
+    model: str
+    voice: str
+    style: str = ""
+    provider: Literal["gemini"] = "gemini"
+
+    def __post_init__(self) -> None:
+        _require_nonempty("Gemini render", self.model, self.voice)
+        if self.provider != "gemini":
+            raise ValueError(
+                f"GeminiConfig provider must be 'gemini': {self.provider!r}"
+            )
+        if not isinstance(self.style, str):
+            raise ValueError("Gemini style must be a string")
+        if self.voice.lower() in OPENAI_VOICES:
+            raise ValueError(
+                f"{self.voice!r} is an OpenAI voice name, not a Gemini voice"
+            )
+
 
 @dataclass(frozen=True)
 class RenderConfig:
-    provider: Literal["openai"]
-    openai_model: str
-    openai_voice: str
+    primary: OpenAIConfig | GeminiConfig
+    fallback: OpenAIConfig | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.primary, (OpenAIConfig, GeminiConfig)):
+            raise ValueError(
+                f"primary must be an OpenAI/Gemini config: {self.primary!r}"
+            )
+        if self.fallback is not None and not isinstance(self.fallback, OpenAIConfig):
+            raise ValueError(f"fallback must be an OpenAIConfig: {self.fallback!r}")
+        if isinstance(self.primary, OpenAIConfig) and self.fallback is not None:
+            raise ValueError("an OpenAI primary takes no fallback")
+
+
+def leaf_from_dict(d: object) -> OpenAIConfig | GeminiConfig:
+    """Rebuild a leaf config from ``asdict`` output; ``ValueError`` on anything else."""
+    if not isinstance(d, dict):
+        raise ValueError(f"not a config dict: {d!r}")
+    provider = d.get("provider")
+    if provider == "openai":
+        if set(d) != {"provider", "model", "voice"}:
+            raise ValueError(f"unexpected OpenAI config keys: {sorted(d)}")
+        return OpenAIConfig(model=d["model"], voice=d["voice"])
+    if provider == "gemini":
+        if set(d) != {"provider", "model", "voice", "style"}:
+            raise ValueError(f"unexpected Gemini config keys: {sorted(d)}")
+        return GeminiConfig(model=d["model"], voice=d["voice"], style=d["style"])
+    raise ValueError(f"unknown provider in config: {provider!r}")
 
 
 def openai_config(*, model: str, voice: str) -> RenderConfig:
-    if not model or not voice:
-        raise ValueError(
-            f"OpenAI render needs model and voice, got {model!r}/{voice!r}"
-        )
-    return RenderConfig(provider="openai", openai_model=model, openai_voice=voice)
+    return RenderConfig(OpenAIConfig(model=model, voice=voice), None)
+
+
+def _openai(voice: str) -> RenderConfig:
+    return RenderConfig(OpenAIConfig(model=DEFAULT_OPENAI_MODEL, voice=voice))
+
+
+# The ONE owner of per-feed TTS settings. Feed slugs are literals because
+# pipeline.tts must not import call-site modules (cycle); a test in
+# pipeline/test_feed_voices.py pins that every routable feed slug is a key.
+FEED_VOICES: dict[str, RenderConfig] = {
+    "general": _openai("ash"),
+    "levine": _openai("ash"),
+    "yglesias": _openai("shimmer"),
+    "silver": _openai("echo"),
+    "the-rundown": _openai("nova"),
+    "fp-digest": _openai("onyx"),
+    "aaronson": _openai("fable"),
+    "chinatalk": _openai("alloy"),
+}
+DEFAULT_RENDER_CONFIG = _openai(DEFAULT_OPENAI_VOICE)
+
+
+def resolve_render_config(
+    feed_slug: str,
+    *,
+    voice_override: str | None = None,
+    model_override: str | None = None,
+) -> RenderConfig:
+    """The render config for ``feed_slug``.
+
+    Either override forces OpenAI; a field the override leaves unspecified comes
+    from the feed's OpenAI config (its primary if OpenAI, else its fallback, else
+    the default). An explicit empty-string override is an error, never "unset".
+    """
+    for name, value in (("voice", voice_override), ("model", model_override)):
+        if value is not None and not value:
+            raise ValueError(f"empty TTS {name} override")
+    entry = FEED_VOICES.get(feed_slug, DEFAULT_RENDER_CONFIG)
+    if voice_override is None and model_override is None:
+        return entry
+    base = entry.primary if isinstance(entry.primary, OpenAIConfig) else entry.fallback
+    if base is None:
+        base = DEFAULT_RENDER_CONFIG.primary
+    assert isinstance(base, OpenAIConfig)
+    return openai_config(
+        model=model_override if model_override is not None else base.model,
+        voice=voice_override if voice_override is not None else base.voice,
+    )
