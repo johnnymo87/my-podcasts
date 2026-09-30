@@ -13,6 +13,10 @@ from typing import Literal
 
 DEFAULT_OPENAI_MODEL = "tts-1-hd"
 
+# Raw PCM every provider hands the renderer: 24 kHz, mono, signed 16-bit LE.
+PCM_SAMPLE_RATE = 24_000
+PCM_BYTES_PER_SECOND = PCM_SAMPLE_RATE * 2  # mono, 16-bit
+
 
 @dataclass(frozen=True)
 class RenderConfig:

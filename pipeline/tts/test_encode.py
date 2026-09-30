@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +15,7 @@ def test_encode_invokes_ffmpeg_with_pinned_format(monkeypatch, tmp_path) -> None
     def fake_run(cmd, **kwargs):
         seen["cmd"] = cmd
         seen["kwargs"] = kwargs
+        Path(cmd[-1]).write_bytes(b"mp3")  # ffmpeg writes to the temp path
         return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(encode.subprocess, "run", fake_run)
@@ -23,8 +25,18 @@ def test_encode_invokes_ffmpeg_with_pinned_format(monkeypatch, tmp_path) -> None
     assert cmd[0] == "ffmpeg"
     for flag, value in [("-f", "s16le"), ("-codec:a", "libmp3lame"), ("-b:a", "32k")]:
         assert cmd[cmd.index(flag) + 1] == value
-    assert cmd.count("24000") == 2 and cmd.count("1") >= 2
-    assert cmd[-1] == str(out)
+    assert cmd.count("-ar") == 2 and cmd.count("-ac") == 2
+    for i, arg in enumerate(cmd):
+        if arg == "-ar":
+            assert cmd[i + 1] == "24000"
+        if arg == "-ac":
+            assert cmd[i + 1] == "1"
+    # Output goes to a temp sibling, then is atomically renamed into place.
+    assert cmd[-1] != str(out)
+    assert Path(cmd[-1]).parent == out.parent
+    assert cmd[cmd.index("-f", cmd.index("-i")) + 1] == "mp3"
+    assert out.read_bytes() == b"mp3"
+    assert list(tmp_path.iterdir()) == [out]
     assert seen["kwargs"]["input"] == b"\x00\x00" * 10
     assert seen["kwargs"]["check"] is True
     assert seen["kwargs"]["timeout"] > 0
@@ -40,7 +52,7 @@ def test_encode_real_ffmpeg_produces_24k_mono_32kbps(tmp_path) -> None:
             "-v",
             "error",
             "-show_entries",
-            "stream=codec_name,sample_rate,channels",
+            "stream=codec_name,sample_rate,channels,bit_rate",
             "-of",
             "csv=p=0",
             str(out),
@@ -50,4 +62,49 @@ def test_encode_real_ffmpeg_produces_24k_mono_32kbps(tmp_path) -> None:
         check=True,
         timeout=30,
     )
-    assert probe.stdout.strip() == "mp3,24000,1"
+    codec, rate, channels, bit_rate = probe.stdout.strip().split(",")
+    assert (codec, rate, channels) == ("mp3", "24000", "1")
+    assert 31_000 <= int(bit_rate) <= 33_000
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+def test_encode_failure_raises_runtime_error_with_ffmpeg_text(tmp_path) -> None:
+    out = tmp_path / "no-such-dir" / "x.mp3"
+    with pytest.raises(RuntimeError, match=r"ffmpeg exited \d+: .*[Nn]o such file"):
+        encode.encode_mp3(b"\x00\x00" * 100, out)
+
+
+def test_failed_encode_leaves_no_output_or_temp_file(monkeypatch, tmp_path) -> None:
+    def fake_run(cmd, **kwargs):
+        Path(cmd[-1]).write_bytes(b"partial")  # ffmpeg got partway
+        raise subprocess.CalledProcessError(1, cmd, stderr=b"boom \xff")
+
+    monkeypatch.setattr(encode.subprocess, "run", fake_run)
+    out = tmp_path / "x.mp3"
+    with pytest.raises(RuntimeError, match="ffmpeg exited 1: boom"):
+        encode.encode_mp3(b"\x00\x00", out)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_failed_encode_does_not_clobber_existing_output(monkeypatch, tmp_path) -> None:
+    def fake_run(cmd, **kwargs):
+        raise subprocess.CalledProcessError(1, cmd, stderr=b"")
+
+    monkeypatch.setattr(encode.subprocess, "run", fake_run)
+    out = tmp_path / "x.mp3"
+    out.write_bytes(b"previous good render")
+    with pytest.raises(RuntimeError):
+        encode.encode_mp3(b"\x00\x00", out)
+    assert out.read_bytes() == b"previous good render"
+    assert list(tmp_path.iterdir()) == [out]
+
+
+def test_stderr_tail_is_capped(monkeypatch, tmp_path) -> None:
+    def fake_run(cmd, **kwargs):
+        raise subprocess.CalledProcessError(1, cmd, stderr=b"x" * 10_000 + b"END")
+
+    monkeypatch.setattr(encode.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError) as exc:
+        encode.encode_mp3(b"\x00\x00", tmp_path / "x.mp3")
+    assert str(exc.value).endswith("END")
+    assert len(str(exc.value)) < 2_100

@@ -52,15 +52,24 @@ def test_empty_or_odd_pcm_is_retryable(monkeypatch, data: bytes) -> None:
     assert exc.value.retryable
 
 
-def _status_error(code: int) -> openai.APIStatusError:
+def _status_error(code: int, body: object | None = None) -> openai.APIStatusError:
     request = httpx.Request("POST", "https://api.openai.com/v1/audio/speech")
     response = httpx.Response(code, request=request)
-    return openai.APIStatusError("boom", response=response, body=None)
+    return openai.APIStatusError("boom", response=response, body=body)
 
 
 @pytest.mark.parametrize(
     "code,retryable",
-    [(500, True), (503, True), (429, True), (400, False), (401, False)],
+    [
+        (500, True),
+        (503, True),
+        (408, True),
+        (409, True),
+        (429, True),
+        (400, False),
+        (401, False),
+        (404, False),
+    ],
 )
 def test_status_errors_map_retryability(
     monkeypatch, code: int, retryable: bool
@@ -81,6 +90,69 @@ def test_connection_error_is_retryable(monkeypatch) -> None:
     with pytest.raises(TTSProviderError) as exc:
         OpenAIProvider().synthesize("Hello.", CONFIG)
     assert exc.value.retryable
+
+
+def test_insufficient_quota_429_is_not_retryable(monkeypatch) -> None:
+    client = MagicMock()
+    client.audio.speech.create.side_effect = _status_error(
+        429, body={"code": "insufficient_quota", "message": "out of credit"}
+    )
+    monkeypatch.setattr(providers, "_make_openai_client", lambda timeout: client)
+    with pytest.raises(TTSProviderError) as exc:
+        OpenAIProvider().synthesize("Hello.", CONFIG)
+    assert exc.value.retryable is False
+
+
+def test_rate_limit_429_with_other_code_is_retryable(monkeypatch) -> None:
+    client = MagicMock()
+    client.audio.speech.create.side_effect = _status_error(
+        429, body={"code": "rate_limit_exceeded"}
+    )
+    monkeypatch.setattr(providers, "_make_openai_client", lambda timeout: client)
+    with pytest.raises(TTSProviderError) as exc:
+        OpenAIProvider().synthesize("Hello.", CONFIG)
+    assert exc.value.retryable is True
+
+
+def test_bare_connection_error_is_retryable(monkeypatch) -> None:
+    client = MagicMock()
+    request = httpx.Request("POST", "https://api.openai.com/v1/audio/speech")
+    client.audio.speech.create.side_effect = openai.APIConnectionError(request=request)
+    monkeypatch.setattr(providers, "_make_openai_client", lambda timeout: client)
+    with pytest.raises(TTSProviderError) as exc:
+        OpenAIProvider().synthesize("Hello.", CONFIG)
+    assert exc.value.retryable
+
+
+def test_generic_api_error_is_not_retryable(monkeypatch) -> None:
+    client = MagicMock()
+    request = httpx.Request("POST", "https://api.openai.com/v1/audio/speech")
+    client.audio.speech.create.side_effect = openai.APIError(
+        "weird", request, body=None
+    )
+    monkeypatch.setattr(providers, "_make_openai_client", lambda timeout: client)
+    with pytest.raises(TTSProviderError) as exc:
+        OpenAIProvider().synthesize("Hello.", CONFIG)
+    assert exc.value.retryable is False
+
+
+def test_close_closes_client_and_is_idempotent(monkeypatch) -> None:
+    client = _client_returning(b"\x00\x00")
+    monkeypatch.setattr(providers, "_make_openai_client", lambda timeout: client)
+    provider = OpenAIProvider()
+    provider.close()  # before any client was built: no-op
+    provider.synthesize("Hello.", CONFIG)
+    provider.close()
+    provider.close()
+    client.close.assert_called_once_with()
+
+
+def test_context_manager_closes_client(monkeypatch) -> None:
+    client = _client_returning(b"\x00\x00")
+    monkeypatch.setattr(providers, "_make_openai_client", lambda timeout: client)
+    with OpenAIProvider() as provider:
+        provider.synthesize("Hello.", CONFIG)
+    client.close.assert_called_once_with()
 
 
 def test_autouse_guard_blocks_real_client() -> None:
