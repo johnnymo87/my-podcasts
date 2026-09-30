@@ -29,7 +29,12 @@ from pipeline.tts.cache import (
     store,
 )
 from pipeline.tts.chunker import chunk_text
-from pipeline.tts.config import PCM_BYTES_PER_SECOND, RenderConfig
+from pipeline.tts.config import (
+    PCM_BYTES_PER_SECOND,
+    GeminiConfig,
+    OpenAIConfig,
+    RenderConfig,
+)
 from pipeline.tts.encode import encode_mp3
 from pipeline.tts.manifest import prune_manifests, write_manifest
 from pipeline.tts.providers import OpenAIProvider, TTSProviderError
@@ -63,7 +68,8 @@ class RenderResult:
     provider: (
         str  # provider that RENDERED the audio (not "published": caller's concern)
     )
-    config: RenderConfig
+    config: RenderConfig  # what was requested
+    rendered: OpenAIConfig | GeminiConfig  # the leaf that actually produced the audio
     cached: bool
     chunks: int
     manifest_path: Path | None
@@ -77,10 +83,10 @@ def _sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def _provider_for(config: RenderConfig):
-    if config.provider == "openai":
+def _provider_for(leaf: OpenAIConfig | GeminiConfig):
+    if leaf.provider == "openai":
         return OpenAIProvider()
-    raise ValueError(f"unsupported TTS provider: {config.provider!r}")
+    raise ValueError(f"unsupported TTS provider: {leaf.provider!r}")
 
 
 def _close(provider) -> None:
@@ -90,12 +96,14 @@ def _close(provider) -> None:
         log.warning("TTS provider close failed", exc_info=True)
 
 
-def _synthesize_chunk(provider, config: RenderConfig, chunk: str, rec: dict, n: int):
+def _synthesize_chunk(
+    provider, leaf: OpenAIConfig | GeminiConfig, chunk: str, rec: dict, n: int
+):
     """One chunk to PCM, retrying retryable provider errors with backoff."""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         rec["attempts"] = attempt
         try:
-            return provider.synthesize(chunk, config)
+            return provider.synthesize(chunk, leaf)
         except TTSProviderError as exc:
             rec["errors"].append(str(exc))
             if not exc.retryable or attempt == MAX_ATTEMPTS:
@@ -140,16 +148,32 @@ def _size_or_none(path: Path) -> int | None:
         return None
 
 
-def _cached_stats(result: dict, config: RenderConfig) -> tuple[int, float, str]:
-    """Telemetry from a cache entry's result.json; a bad value is not an error."""
+def _cached_stats(result: dict) -> tuple[int, float]:
+    """Telemetry from a cache entry's result.json; a bad value is not an error.
+
+    Provenance (provider, rendered config) is not telemetry: ``cache.lookup``
+    has already validated it and returns it on the ``CachedRender``.
+    """
     try:
         return (
             int(result.get("chunks", 0)),
             float(result.get("total_audio_seconds", 0.0)),
-            str(result.get("provider", config.provider)),
         )
     except (TypeError, ValueError):
-        return 0, 0.0, config.provider
+        return 0, 0.0
+
+
+def _hit_matches_request(
+    rendered: OpenAIConfig | GeminiConfig, config: RenderConfig
+) -> bool:
+    """A cache entry may only serve a request whose primary or fallback rendered it.
+
+    The key already hashes both, so a mismatch means a corrupt or hand-placed
+    entry; serving it would hand back audio in a voice nobody asked for.
+    """
+    return rendered == config.primary or (
+        config.fallback is not None and rendered == config.fallback
+    )
 
 
 def render_episode(
@@ -164,7 +188,8 @@ def render_episode(
 ) -> RenderResult:
     """Render ``text`` to ``out_mp3``.
 
-    Raises ``ValueError`` for empty text, ``TTSRenderError`` when a chunk fails
+    Raises ``ValueError`` for empty text or a Gemini primary (not wired until
+    T3b), ``TTSRenderError`` when a chunk fails
     for good, and lets anything else (missing API key, encoder failure)
     propagate unwrapped -- those are not retryable and must be loud. Every
     failure after validation still writes a ``status="failed"`` manifest.
@@ -174,6 +199,9 @@ def render_episode(
     """
     if not text.strip():
         raise ValueError("cannot render empty text")
+    if config.primary.provider != "openai":
+        # Checked before any cache/manifest work so a refused render leaves no trace.
+        raise ValueError("Gemini rendering is not wired yet (T3b, my-podcasts-9p3.11)")
     if manifest_dir is _DEFAULT:
         manifest_dir = _manifest_mod.DEFAULT_MANIFEST_DIR
     if cache_dir is _DEFAULT:
@@ -192,6 +220,7 @@ def render_episode(
         "input_chars": len(text),
         "cache_key": key,
         "config": asdict(config),
+        "rendered_config": None,
         "rendered_provider": None,
         "cached": False,
         "chunk_count": None,
@@ -221,16 +250,29 @@ def render_episode(
     if cache_dir is not None:
         prune(cache_dir)
         hit = lookup(cache_dir, key)
+        if hit is not None and not _hit_matches_request(hit.rendered, config):
+            log.warning(
+                "TTS cache entry %s was rendered by %r, not the request's "
+                "primary/fallback; re-rendering",
+                key,
+                hit.rendered,
+            )
+            # store() keeps an existing structurally-valid entry, so without
+            # this the bad one would shadow every fresh render of this key.
+            shutil.rmtree(cache_dir / key, ignore_errors=True)
+            hit = None
         if hit is not None:
             try:
                 _copy_atomic(hit.audio, out_mp3)
             except OSError as exc:
                 log.warning("TTS cache hit unusable (%s); re-rendering", exc)
             else:
-                n_chunks, seconds, provider_name = _cached_stats(hit.result, config)
+                n_chunks, seconds = _cached_stats(hit.result)
+                provider_name = hit.rendered.provider
                 record.update(
                     status="cache_hit",
                     cached=True,
+                    rendered_config=asdict(hit.rendered),
                     rendered_provider=provider_name,
                     total_audio_seconds=seconds,
                     chunk_count=n_chunks,
@@ -248,15 +290,17 @@ def render_episode(
                 return RenderResult(
                     provider=provider_name,
                     config=config,
+                    rendered=hit.rendered,
                     cached=True,
                     chunks=n_chunks,
                     manifest_path=path,
                 )
 
+    leaf = config.primary
     provider = None
     chunks: list[str] = []
     try:
-        provider = _provider_for(config)
+        provider = _provider_for(leaf)
         chunks = chunk_text(text, ceiling=provider.max_chars)
         record["chunk_count"] = len(chunks)
         pcm_parts: list[bytes] = []
@@ -269,7 +313,7 @@ def render_episode(
                 "audio_seconds": 0.0,
             }
             chunk_records.append(rec)
-            pcm = _synthesize_chunk(provider, config, chunk, rec, len(chunks))
+            pcm = _synthesize_chunk(provider, leaf, chunk, rec, len(chunks))
             rec["audio_seconds"] = len(pcm) / PCM_BYTES_PER_SECOND
             pcm_parts.append(pcm)
 
@@ -289,8 +333,12 @@ def render_episode(
             key,
             out_mp3,
             {
-                "provider": config.provider,
-                "config": asdict(config),
+                "schema": 2,
+                "provider": leaf.provider,
+                "requested": asdict(config),
+                "rendered": asdict(leaf),
+                "verification": "not_run_openai",
+                "fallback_reason": None,
                 "renderer_version": RENDERER_VERSION,
                 "rendered_at": datetime.now(UTC).isoformat(),
                 "chunks": len(chunks),
@@ -299,20 +347,22 @@ def render_episode(
         )
     record.update(
         status="rendered",
-        rendered_provider=config.provider,
+        rendered_config=asdict(leaf),
+        rendered_provider=leaf.provider,
         out_bytes=_size_or_none(out_mp3),
     )
     path = emit()
     log.info(
         "TTS render: provider=%s chunks=%d audio=%.1fs wall=%.1fs cached=False",
-        config.provider,
+        leaf.provider,
         len(chunks),
         total_seconds,
         record["wall_seconds"],
     )
     return RenderResult(
-        provider=config.provider,
+        provider=leaf.provider,
         config=config,
+        rendered=leaf,
         cached=False,
         chunks=len(chunks),
         manifest_path=path,

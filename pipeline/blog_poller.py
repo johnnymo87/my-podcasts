@@ -20,7 +20,6 @@ from google.genai import types
 from pipeline import tts
 from pipeline.blog_sources import BLOG_SOURCES
 from pipeline.feed import regenerate_and_upload_feed
-from pipeline.script_processor import TTS_MODEL
 from pipeline.title_prelude import prepend_title
 
 
@@ -157,7 +156,7 @@ def process_blog_post(
 
         tts.render_episode(
             adapted_text,
-            tts.openai_config(model=TTS_MODEL, voice=source.tts_voice),
+            tts.resolve_render_config(source.feed_slug),
             output_mp3,
             feed_slug=source.feed_slug,
             episode_id=episode_slug,

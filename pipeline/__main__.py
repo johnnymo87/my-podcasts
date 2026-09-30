@@ -846,7 +846,6 @@ def publish_script_command(
 
         from pipeline import tts
         from pipeline.script_processor import (
-            TTS_MODEL,
             apply_title_prelude,
             strip_markdown_for_tts,
         )
@@ -865,7 +864,7 @@ def publish_script_command(
             # A dry run touches no state: no manifest, no completed-render cache.
             tts.render_episode(
                 tts_text,
-                tts.openai_config(model=TTS_MODEL, voice=voice),
+                tts.resolve_render_config(feed_slug, voice_override=voice),
                 output_mp3,
                 feed_slug=feed_slug,
                 episode_id="dry-run",

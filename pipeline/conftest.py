@@ -27,8 +27,9 @@ def _install_fake_render(monkeypatch) -> tuple[list[dict], list[str]]:
         texts.append(text)
         Path(out_mp3).write_bytes(b"\xff\xfb\x90\x00" * 100)
         return RenderResult(
-            provider=config.provider,
+            provider=config.primary.provider,
             config=config,
+            rendered=config.primary,
             cached=False,
             chunks=1,
             manifest_path=None,
@@ -153,6 +154,28 @@ def _block_real_openai_tts(request):
         )
 
     with patch("pipeline.tts.providers._make_openai_client", _refuse):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _block_real_gemini_tts(request):
+    """No test may build a real Gemini TTS HTTP session (a real call costs money).
+
+    Tests inject a fake via
+    ``monkeypatch.setattr(providers, "_make_gemini_session", lambda: fake)``;
+    their patch nests inside this one and wins.
+    """
+    if request.node.get_closest_marker("allow_network"):
+        yield
+        return
+
+    def _refuse():
+        raise AssertionError(
+            "A test tried to build a real Gemini TTS session. Patch "
+            "pipeline.tts.providers._make_gemini_session."
+        )
+
+    with patch("pipeline.tts.providers._make_gemini_session", _refuse):
         yield
 
 

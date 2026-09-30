@@ -24,8 +24,6 @@ if TYPE_CHECKING:
     from pipeline.r2 import R2Client
 
 
-TTS_MODEL = "tts-1-hd"
-TTS_VOICE = "onyx"
 # Also read by script_processor._NO_PRELUDE_FEEDS -- this feed's writer
 # prompt already self-announces, so publish_script must not double it.
 FEED_SLUG = "fp-digest"
@@ -85,7 +83,7 @@ def process_fp_digest_job(
 
         tts.render_episode(
             script,
-            tts.openai_config(model=TTS_MODEL, voice=TTS_VOICE),
+            tts.resolve_render_config(FEED_SLUG),
             output_mp3,
             feed_slug=FEED_SLUG,
             episode_id=episode_slug,

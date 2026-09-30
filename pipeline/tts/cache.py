@@ -17,15 +17,14 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+from pipeline.tts.config import GeminiConfig, OpenAIConfig, RenderConfig, leaf_from_dict
 
-if TYPE_CHECKING:
-    from pipeline.tts.config import RenderConfig
 
 log = logging.getLogger(__name__)
 
-RENDERER_VERSION = "1"
+# "2": typed primary/fallback config in the key, provenance-checked entries.
+RENDERER_VERSION = "2"
 DEFAULT_CACHE_DIR = Path("/persist/my-podcasts/tts-cache")
 RETENTION_DAYS = 14
 
@@ -34,20 +33,57 @@ RETENTION_DAYS = 14
 class CachedRender:
     audio: Path
     result: dict
+    rendered: OpenAIConfig | GeminiConfig
+
+
+def _verifier_policy(config: RenderConfig) -> str | None:
+    """What a Gemini render was verified against; ``None`` when nothing is.
+
+    Imported lazily: ``verify`` pulls in ``asr`` and so ``google.genai``, which
+    the OpenAI path must never load.
+    """
+    if config.primary.provider != "gemini":
+        return None
+    from pipeline.tts.verify import VERIFIER_POLICY
+
+    return VERIFIER_POLICY
 
 
 def cache_key(text: str, config: RenderConfig) -> str:
     payload = json.dumps(
         {
             "text": text,
-            "primary": asdict(config),
-            "fallback": None,
+            "primary": asdict(config.primary),
+            "fallback": asdict(config.fallback) if config.fallback else None,
             "renderer_version": RENDERER_VERSION,
+            "verifier_policy": _verifier_policy(config),
         },
         sort_keys=True,
         ensure_ascii=False,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _validated_leaf(result: dict) -> OpenAIConfig | GeminiConfig | None:
+    """The leaf that rendered this entry, or ``None`` if its provenance is bad.
+
+    Verification must agree with the renderer: a Gemini render is valid only if
+    it ``passed`` verification, an OpenAI render only as ``not_run_openai``.
+    """
+    if result.get("schema") != 2:
+        return None
+    try:
+        rendered = leaf_from_dict(result.get("rendered"))
+    except ValueError:
+        return None
+    if result.get("provider") != rendered.provider:
+        return None
+    verification = result.get("verification")
+    if verification not in {"passed", "not_run_openai"}:
+        return None
+    if (verification == "passed") != (rendered.provider == "gemini"):
+        return None
+    return rendered
 
 
 def lookup(cache_dir: Path, key: str) -> CachedRender | None:
@@ -61,7 +97,10 @@ def lookup(cache_dir: Path, key: str) -> CachedRender | None:
             or audio.stat().st_size == 0
         ):
             return None
-        return CachedRender(audio=audio, result=result)
+        rendered = _validated_leaf(result)
+        if rendered is None:
+            return None
+        return CachedRender(audio=audio, result=result, rendered=rendered)
     except Exception:  # noqa: BLE001 -- a cache miss is always safe
         return None
 

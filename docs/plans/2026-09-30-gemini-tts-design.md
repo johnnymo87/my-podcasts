@@ -54,9 +54,9 @@ today. Every rule below about budgets, verification and telemetry exists to keep
 
 | Module | Job |
 |---|---|
-| `config.py` | `RenderConfig(provider, openai_model, openai_voice, gemini_model, gemini_voice, gemini_style)` and `resolve_render_config(feed_slug, *, voice_override=None, model_override=None)`. Precedence below. |
+| `config.py` | Typed leaves `OpenAIConfig(model, voice)` and `GeminiConfig(model, voice, style)`, joined as `RenderConfig(primary, fallback)`. Valid pairs: OpenAI/None, Gemini/OpenAI, Gemini/None (OpenAI/OpenAI is rejected). `FEED_VOICES` is the one owner of per-feed settings; `resolve_render_config(feed_slug, *, voice_override=None, model_override=None)` resolves it. Precedence below. |
 | `chunker.py` | Lossless partition: paragraphs packed to ≤ ~3000 chars; oversize paragraph → sentences; oversize sentence → whitespace; unbroken string → hard cut. A hard per-provider ceiling (OpenAI 4096) is asserted. Regex, no nltk. |
-| `providers.py` | `synthesize(text, config) -> pcm` (24 kHz mono s16le). `GeminiProvider`: REST via `requests`, `speech_metadata.style`, WAV parsed with `wave` (format + length validated, not a fixed header strip), classifies errors (below). `OpenAIProvider`: `openai` SDK, `response_format="pcm"`, **SDK `max_retries=0` and explicit timeout** — the renderer owns all retries. Gemini client created lazily. |
+| `providers.py` | `synthesize(text, config) -> pcm` (24 kHz mono s16le). `GeminiProvider`: REST via `requests`, `speech_metadata.style`, WAV parsed with `wave` (24 kHz/mono/s16, declared frame count validated; never a fixed header strip, because responses carry a trailing `C2PA` chunk after `data`). Every failure is a `TTSProviderError` with `kind` `content` (empty/non-STOP candidate), `infra` (5xx, 408/409, transient 429, transport, corrupt transfer) or `fatal` (any 400, including the invalid-key `API_KEY_INVALID`; 401/403/404; daily-quota 429; format drift); `retryable` is `kind != "fatal"`. `OpenAIProvider`: `openai` SDK, `response_format="pcm"`, **SDK `max_retries=0` and explicit timeout** — the renderer owns all retries. Gemini client created lazily. |
 | `verify.py` | Large-omission detector (see Verification). Used synchronously only on Gemini renders. |
 | `render.py` | `render_episode(text, config, out_mp3, *, episode_id, manifest_dir=None) -> RenderResult`. |
 | `cache.py` | Completed-render reuse (see below). |
@@ -117,6 +117,33 @@ costs the full budget). The bound is **up to 6 minutes per uncached render attem
 at a normal 3–5 attempts, but more when attempts multiply (OpenAI also failing → daily-job retries,
 up to 51; email redelivery, which has no application-level cap). It self-heals when Gemini
 recovers. A cooldown is a later addition if manifests show it matters.
+
+### Amendments (T3 consult, 2026-09-30)
+
+The inline text above stays; where it disagrees with these, these win.
+
+- **Dropped rule:** "infra-transient exhausting retries on 2 distinct chunks" no longer exists as
+  a separate trigger. Any chunk that exhausts its retries already triggers whole-episode fallback.
+- **One counter per chunk.** Transient retries and the single omission re-render share one 3-call
+  counter: at most 3 TTS calls and 2 ASR calls per chunk.
+- **429 is fatal only with confirmed daily/billing `QuotaFailure` detail.** `RESOURCE_EXHAUSTED`
+  alone is transient.
+- **The bound** is the 6-minute Gemini budget plus a reap margin (time to kill and join the
+  child). `send_alert` is synchronous, so it counts against the caller, not the budget.
+- **Config shape** is the `primary`/`fallback` pair of typed leaves, not flat provider fields.
+- **Gemini WAVs carry a trailing C2PA chunk** after `data` (about 6 KB, RIFF size covers it), so
+  the audio is the declared frames read via `wave`, never "everything after 44 bytes".
+- **Cache key and provenance.** The key is `{text, primary, fallback, renderer_version,
+  verifier_policy}`; `verifier_policy` is `verify.VERIFIER_POLICY` for a Gemini primary and `None`
+  for OpenAI. `result.json` (schema 2) records the requested and rendered configs and
+  `verification`; a hit is valid only if its rendered leaf is the request's primary or fallback.
+  `RENDERER_VERSION` 2 started a cold cache.
+- **PR split.** T3a (`my-podcasts-9p3.3`) is the typed config, `FEED_VOICES`, `GeminiProvider` and
+  provenance-checked cache; `render_episode` still refuses a Gemini primary. T3b
+  (`my-podcasts-9p3.11`) adds the child-process Gemini phase, per-chunk verification, fallback and
+  alerts.
+- **Manual-publish defaults stay `nova`** (`publish_script`, CLI `--voice`) on every feed until
+  T6 (`my-podcasts-9p3.7`) makes them fall through to `FEED_VOICES`.
 
 ### Completed-render reuse
 

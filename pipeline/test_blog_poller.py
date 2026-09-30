@@ -67,7 +67,6 @@ def test_blog_sources_has_aaronson() -> None:
     assert len(aaronson) == 1
     src = aaronson[0]
     assert src.feed_url == "https://scottaaronson.blog/?feed=rss2"
-    assert src.tts_voice == "fable"
     assert src.category == "Technology"
 
 
