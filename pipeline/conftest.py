@@ -158,6 +158,28 @@ def _block_real_openai_tts(request):
 
 
 @pytest.fixture(autouse=True)
+def _block_real_gemini_tts(request):
+    """No test may build a real Gemini TTS HTTP session (a real call costs money).
+
+    Tests inject a fake via
+    ``monkeypatch.setattr(providers, "_make_gemini_session", lambda: fake)``;
+    their patch nests inside this one and wins.
+    """
+    if request.node.get_closest_marker("allow_network"):
+        yield
+        return
+
+    def _refuse():
+        raise AssertionError(
+            "A test tried to build a real Gemini TTS session. Patch "
+            "pipeline.tts.providers._make_gemini_session."
+        )
+
+    with patch("pipeline.tts.providers._make_gemini_session", _refuse):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _block_real_gemini_asr(request):
     """No test may build a real Gemini client for TTS verification (costs money).
 
