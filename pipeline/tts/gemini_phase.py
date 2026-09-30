@@ -125,6 +125,10 @@ FALLBACK_REASONS = frozenset(
     }
 )
 
+# What a CHILD may report. ``runner_error`` is the parent's alone: a child that
+# claims it is lying or broken, and its result is ``invalid_result``.
+CHILD_REASONS = FALLBACK_REASONS - {REASON_RUNNER_ERROR}
+
 # --- files ---------------------------------------------------------------------
 
 SCHEMA = 1
@@ -669,7 +673,7 @@ class PhaseOutcome:
     pcm_parts: list[bytes] | None
     chunk_records: list[dict[str, Any]]
     elapsed_s: float
-    spawn_s: float
+    spawn_s: float | None  # None = unknown (the runner itself failed)
     failed_chunk: int | None = None
     child_pid: int | None = None
     child_started_s: float | None = None
@@ -722,7 +726,7 @@ def _validate_result(result: Any, scratch: Path, n_chunks: int) -> list[bytes] |
         reason = result.get("reason")
         # isinstance first: membership in a frozenset hashes, and an unhashable
         # value (a list) would raise TypeError instead of being refused.
-        if not isinstance(reason, str) or reason not in FALLBACK_REASONS:
+        if not isinstance(reason, str) or reason not in CHILD_REASONS:
             raise _InvalidResult(f"unknown failure reason {reason!r}")
         failed_chunk = result.get("failed_chunk")
         if failed_chunk is not None and not (
@@ -788,7 +792,8 @@ def _read_progress(scratch: Path | None, n_chunks: int) -> list[dict[str, Any]]:
             parsed = json.loads(raw)
         except ValueError:
             parsed = None
-        if isinstance(parsed, dict) and isinstance(parsed.get("attempts"), list):
+        attempts = parsed.get("attempts") if isinstance(parsed, dict) else None
+        if isinstance(attempts, list) and all(isinstance(a, dict) for a in attempts):
             records.append(parsed)
         else:
             records.append({"index": i, "attempts": [], "progress": "unreadable"})
@@ -1060,5 +1065,5 @@ def runner_error_outcome(exc: BaseException, *, elapsed_s: float) -> PhaseOutcom
         pcm_parts=None,
         chunk_records=[],
         elapsed_s=elapsed_s,
-        spawn_s=0.0,
+        spawn_s=None,
     )

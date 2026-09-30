@@ -1454,3 +1454,24 @@ def test_runner_error_outcome_carries_a_traceback_and_no_audio():
     )
     assert len(out.detail) <= gp.ERROR_DETAIL_CHARS + 50
     assert out.chunk_records == [] and out.elapsed_s == 1.5
+
+
+def test_a_child_cannot_report_the_parent_only_runner_error_reason(scratch):
+    result = gp._result_failed(gp.REASON_RUNNER_ERROR, "claimed", 0)
+    with pytest.raises(gp._InvalidResult):
+        gp._validate_result(result, scratch, 2)
+    assert gp.REASON_RUNNER_ERROR not in gp.CHILD_REASONS
+    assert gp.CHILD_REASONS == gp.FALLBACK_REASONS - {gp.REASON_RUNNER_ERROR}
+
+
+def test_runner_error_outcome_reports_spawn_time_as_unknown():
+    out = gp.runner_error_outcome(RuntimeError("x"), elapsed_s=0.5)
+    assert out.spawn_s is None and out.child_started_s is None
+
+
+def test_read_progress_flags_attempts_that_are_not_dicts(scratch):
+    gp._atomic_write_json(
+        scratch / gp.progress_name(0), {"index": 0, "attempts": [{"n": 1}, "junk"]}
+    )
+    (record,) = gp._read_progress(scratch, 1)
+    assert record == {"index": 0, "attempts": [], "progress": "unreadable"}

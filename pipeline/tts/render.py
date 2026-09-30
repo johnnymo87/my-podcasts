@@ -15,7 +15,9 @@ say what to render with via ``RenderConfig`` and which feed/episode it is for.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -236,6 +238,15 @@ _TOKEN_FIELDS = (
 )
 
 
+def _exc_text(exc: BaseException) -> str:
+    """``str(exc)`` that cannot raise: an exception with a broken ``__str__`` must
+    not turn reporting into a second failure."""
+    try:
+        return str(exc)
+    except Exception:  # noqa: BLE001
+        return "<unprintable>"
+
+
 def _stage_completed(stage: str, part: dict) -> bool:
     """Did this request finish and report usage, as opposed to being killed,
     still in flight, or failed before any usage came back?"""
@@ -249,32 +260,56 @@ def _stage_completed(stage: str, part: dict) -> bool:
     return status == "unavailable" and part.get("elapsed_s") is not None
 
 
-def _phase_totals(phase_chunk_records: list[dict]) -> tuple[dict, float]:
+def _phase_totals(phase_chunk_records: list) -> tuple[dict, float | None]:
     """Token totals and generated audio seconds across every Gemini attempt.
 
     A total is ``None`` when ANY contributing count is genuinely unknown -- a
     request that was killed or is still in flight, one that errored without
-    usage, a chunk with no readable progress -- because a sum that silently
-    omits a cost is worse than no sum. An attempt that never reached ASR
-    contributes nothing to the ASR totals (nothing was requested). The one
-    absence that is NOT unknown: a *completed* call with no thinking count means
-    the model reported none, which totals as 0 (the raw per-attempt value stays
-    as reported, in ``gemini_phase.chunks``).
+    usage, a chunk with no readable progress, anything malformed -- because a
+    sum that silently omits a cost is worse than no sum. The generated-seconds
+    figure is ``None`` in the same cases a chunk's attempts cannot be read at
+    all. An attempt that never reached ASR contributes nothing to the ASR totals
+    (nothing was requested). The one absence that is NOT unknown: a *completed*
+    call with no thinking count means the model reported none, which totals as 0
+    (the raw per-attempt value stays as reported, in ``gemini_phase.chunks``).
+
+    The records come from files a child wrote, so nothing about their shape is
+    trusted: a non-dict anywhere marks the totals unknown rather than raising.
     """
     totals: dict[str, int | None] = {name: 0 for name, _, _ in _TOKEN_FIELDS}
     pcm_bytes = 0
+    seconds_known = True
+
+    def unknown_chunk() -> None:
+        nonlocal totals, seconds_known
+        totals = dict.fromkeys(totals)  # we cannot know what this chunk cost
+        seconds_known = False
+
     for rec in phase_chunk_records:
-        if rec.get("progress") in ("missing", "unreadable"):
-            totals = dict.fromkeys(totals)  # we cannot know what this chunk cost
+        if not isinstance(rec, dict) or rec.get("progress") in (
+            "missing",
+            "unreadable",
+        ):
+            unknown_chunk()
             continue
-        for attempt in rec.get("attempts", []):
-            synth = attempt.get("synth") or {}
-            if isinstance(synth.get("pcm_bytes"), int):
+        attempts = rec.get("attempts", [])
+        if not isinstance(attempts, list):
+            unknown_chunk()
+            continue
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                unknown_chunk()
+                continue
+            synth = attempt.get("synth")
+            if isinstance(synth, dict) and isinstance(synth.get("pcm_bytes"), int):
                 pcm_bytes += synth["pcm_bytes"]
             for name, stage, field in _TOKEN_FIELDS:
                 part = attempt.get(stage)
                 if part is None:
                     continue  # the stage never ran: nothing to count
+                if not isinstance(part, dict):
+                    totals[name] = None
+                    continue
                 value = part.get(field)
                 if value is None and field == "thinking_tokens":
                     if _stage_completed(stage, part):
@@ -284,48 +319,98 @@ def _phase_totals(phase_chunk_records: list[dict]) -> tuple[dict, float]:
                         totals[name] += value
                 else:
                     totals[name] = None
-    return totals, pcm_bytes / PCM_BYTES_PER_SECOND
+    return totals, (pcm_bytes / PCM_BYTES_PER_SECOND if seconds_known else None)
 
 
-def _phase_record(outcome, *, budget_s: float, pcm_parts) -> dict:
+def _phase_record(outcome, *, budget_s: float) -> dict:
     """The manifest's ``gemini_phase`` block. Kept apart from ``chunks``, which
-    is only the audio that shipped."""
-    if outcome.chunk_records:
-        tokens, generated = _phase_totals(outcome.chunk_records)
-    else:  # e.g. the runner itself failed: what the phase did or cost is unknown
-        tokens, generated = dict.fromkeys(name for name, _, _ in _TOKEN_FIELDS), None
-    used = sum(len(p) for p in pcm_parts) / PCM_BYTES_PER_SECOND if pcm_parts else 0.0
-    return {
-        "outcome": "ok" if outcome.ok else "failed",
-        "reason": outcome.reason,
-        "detail": outcome.detail,
-        "failed_chunk": outcome.failed_chunk,
+    is only the audio that shipped.
+
+    Telemetry must never cost a render: if building the full record fails for
+    any reason, degrade to a minimal one (tokens unknown, a ``telemetry_error``
+    note) and carry on.
+    """
+    unknown_tokens = dict.fromkeys(name for name, _, _ in _TOKEN_FIELDS)
+    base = {
+        "outcome": "ok" if getattr(outcome, "ok", False) else "failed",
+        "reason": getattr(outcome, "reason", None),
+        "detail": getattr(outcome, "detail", ""),
+        "failed_chunk": getattr(outcome, "failed_chunk", None),
         "budget_s": budget_s,
-        "elapsed_s": outcome.elapsed_s,
-        "spawn_s": outcome.spawn_s,
-        "child_started_s": outcome.child_started_s,
-        "child_pid": outcome.child_pid,
-        "chunks": outcome.chunk_records,
-        "tokens": tokens,
-        "audio_seconds_generated": generated,
-        "audio_seconds_used": used,
+        "elapsed_s": getattr(outcome, "elapsed_s", None),
+        "spawn_s": getattr(outcome, "spawn_s", None),
+        "child_started_s": getattr(outcome, "child_started_s", None),
+        "child_pid": getattr(outcome, "child_pid", None),
     }
+    try:
+        records = outcome.chunk_records
+        if records:
+            tokens, generated = _phase_totals(records)
+        else:  # e.g. the runner itself failed: what the phase did or cost is unknown
+            tokens, generated = unknown_tokens, None
+        pcm_parts = outcome.pcm_parts if outcome.ok else None
+        used = (
+            sum(len(p) for p in pcm_parts) / PCM_BYTES_PER_SECOND if pcm_parts else 0.0
+        )
+        json.dumps(records, default=str)  # the manifest must be able to hold it
+        return {
+            **base,
+            "chunks": records,
+            "tokens": tokens,
+            "audio_seconds_generated": generated,
+            "audio_seconds_used": used,
+        }
+    except Exception as exc:  # noqa: BLE001 -- telemetry must never cost the render
+        log.warning("Gemini phase telemetry failed (%r); using a minimal record", exc)
+        return {
+            **base,
+            "chunks": [],
+            "tokens": unknown_tokens,
+            "audio_seconds_generated": None,
+            "audio_seconds_used": None,
+            "telemetry_error": f"{type(exc).__name__}: {_exc_text(exc)}"[:300],
+        }
+
+
+def _attempt_errors(attempts: list) -> list[str]:
+    errors = []
+    for a in attempts:
+        synth = a.get("synth") if isinstance(a, dict) else None
+        if isinstance(synth, dict) and synth.get("error"):
+            errors.append(str(synth["error"]))
+    return errors
 
 
 def _shipped_chunk_records(gemini_chunks: list[str], outcome) -> list[dict]:
-    """``chunks`` records for a successful Gemini phase (attempts from progress)."""
-    by_index = {r.get("index"): r for r in outcome.chunk_records}
+    """``chunks`` records for a successful Gemini phase (attempts from progress).
+
+    The audio and its per-chunk seconds come from validated PCM; the attempt
+    counts and errors come from child-written progress, which is telemetry and so
+    is read defensively: a chunk whose progress cannot be read reports
+    ``attempts: None`` instead of failing the render.
+    """
+    by_index: dict = {}
+    try:
+        by_index = {
+            r.get("index"): r for r in outcome.chunk_records if isinstance(r, dict)
+        }
+    except Exception:  # noqa: BLE001
+        by_index = {}
     records = []
     for i, chunk in enumerate(gemini_chunks):
-        attempts = by_index.get(i, {}).get("attempts", [])
-        errors = [
-            a["synth"]["error"] for a in attempts if (a.get("synth") or {}).get("error")
-        ]
+        attempts_n: int | None
+        errors: list[str]
+        try:
+            attempts = by_index.get(i, {}).get("attempts", [])
+            attempts_n = len(attempts)
+            errors = _attempt_errors(attempts)
+        except Exception:  # noqa: BLE001
+            attempts_n, errors = None, []
         records.append(
             {
                 "index": i,
                 "chars": len(chunk),
-                "attempts": len(attempts),
+                "attempts": attempts_n,
                 "errors": errors,
                 "audio_seconds": len(outcome.pcm_parts[i]) / PCM_BYTES_PER_SECOND,
             }
@@ -333,34 +418,46 @@ def _shipped_chunk_records(gemini_chunks: list[str], outcome) -> list[dict]:
     return records
 
 
-def _deliver_alert(text: str) -> bool | str:
-    """Send ``text`` without letting delivery hold up the render.
+def _deliver_alert(
+    feed_slug, episode_id, primary, reason, fallback, error
+) -> bool | str:
+    """Alert that a render fell back, without letting anything about it reach the
+    caller: an episode that has been rendered must not be lost to its own report.
 
-    True/False is ``send_alert``'s own answer (an exception counts as False);
-    ``"timeout"`` means it had not finished after ``ALERT_WAIT_SECONDS`` and the
-    daemon thread was abandoned. ``send_alert`` is looked up on the
-    ``pipeline.alerts`` module at call time so a test can replace it.
+    Builds the text, starts a daemon thread for ``send_alert`` and waits at most
+    ``ALERT_WAIT_SECONDS``. Returns True/False (``send_alert``'s own answer; any
+    exception, including failing to build the text, import, or start the thread,
+    is False) or ``"timeout"``, which means delivery is UNKNOWN: the thread was
+    abandoned still sending. ``send_alert`` is looked up on ``pipeline.alerts`` at
+    call time so a test can replace it.
     """
-    from pipeline import alerts
+    try:
+        from pipeline import alerts
 
-    result: list[bool] = []
-
-    def run() -> None:
-        try:
-            result.append(bool(alerts.send_alert(text)))
-        except Exception:  # noqa: BLE001 -- reporting must never disturb a render
-            result.append(False)
-
-    thread = threading.Thread(target=run, name="tts-fallback-alert", daemon=True)
-    thread.start()
-    thread.join(ALERT_WAIT_SECONDS)
-    if thread.is_alive():
-        log.warning(
-            "TTS fallback alert still sending after %.0fs; moving on",
-            ALERT_WAIT_SECONDS,
+        text = _fallback_alert_text(
+            feed_slug, episode_id, primary, reason, fallback, error
         )
-        return "timeout"
-    return result[0] if result else False
+        result: list[bool] = []
+
+        def run() -> None:
+            try:
+                result.append(bool(alerts.send_alert(text)))
+            except Exception:  # noqa: BLE001
+                result.append(False)
+
+        thread = threading.Thread(target=run, name="tts-fallback-alert", daemon=True)
+        thread.start()
+        thread.join(ALERT_WAIT_SECONDS)
+        if thread.is_alive():
+            log.warning(
+                "TTS fallback alert still sending after %.0fs; moving on",
+                ALERT_WAIT_SECONDS,
+            )
+            return "timeout"
+        return result[0] if result else False
+    except Exception:  # noqa: BLE001
+        log.warning("TTS fallback alert could not be sent", exc_info=True)
+        return False
 
 
 def _fallback_alert_text(
@@ -374,7 +471,11 @@ def _fallback_alert_text(
     if error is None:
         outcome = "rendered"
     else:
-        message = " ".join(str(error).split())[:200]
+        try:
+            detail = str(error)
+        except Exception:  # noqa: BLE001 -- a broken __str__: name the type instead
+            detail = ""
+        message = " ".join(detail.split())[:200] if detail else type(error).__name__
         outcome = f"FAILED: {message}"
     return (
         f"TTS fallback: {feed_slug} {episode_id}: "
@@ -419,9 +520,27 @@ def _render_gemini_primary(
         outcome = gemini_phase.runner_error_outcome(
             exc, elapsed_s=time.monotonic() - started
         )
-    record["gemini_phase"] = _phase_record(
-        outcome, budget_s=budget_s, pcm_parts=outcome.pcm_parts
-    )
+    if outcome.ok:
+        # The runner validates before it says ok; this is the last line of
+        # defence, and what makes a wrong-shaped "ok" a fallback, not a bad episode.
+        parts = outcome.pcm_parts
+        if (
+            not isinstance(parts, list)
+            or len(parts) != len(gemini_chunks)
+            or not all(isinstance(p, bytes) and p for p in parts)
+        ):
+            outcome = dataclasses.replace(
+                outcome,
+                ok=False,
+                reason=gemini_phase.REASON_INVALID_RESULT,
+                detail=(
+                    f"phase reported ok but returned "
+                    f"{len(parts) if isinstance(parts, list) else parts!r} audio "
+                    f"part(s) for {len(gemini_chunks)} chunk(s)"
+                ),
+                pcm_parts=None,
+            )
+    record["gemini_phase"] = _phase_record(outcome, budget_s=budget_s)
 
     if outcome.ok:
         record["chunk_count"] = len(gemini_chunks)
@@ -446,16 +565,15 @@ def _render_gemini_primary(
     if notify_fallback:
         # After the attempt, so the alert can say how it ended; also when it failed.
         record["alert_sent"] = _deliver_alert(
-            _fallback_alert_text(
-                feed_slug, episode_id, primary, reason, fallback, error
-            )
+            feed_slug, episode_id, primary, reason, fallback, error
         )
     if error is not None:
         if isinstance(error, TTSRenderError):
             raise TTSRenderError(
                 f"Gemini phase failed ({reason}) and the OpenAI fallback "
-                f"failed: {error}"
+                f"failed: {_exc_text(error)}"
             ) from error
+        error.add_note(f"after Gemini {reason}")
         raise error
     return fallback, "not_run_openai", reason
 
@@ -495,7 +613,7 @@ def render_episode(
 
     started_mono = time.monotonic()
     started_at = datetime.now(UTC)
-    key = cache_key(text, config)
+    key: str | None = None  # computed below, inside the guard that writes manifests
     chunk_records: list[dict] = []
     record: dict = {
         "renderer_version": RENDERER_VERSION,
@@ -504,7 +622,7 @@ def render_episode(
         "started_at": started_at.isoformat(),
         "input_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         "input_chars": len(text),
-        "cache_key": key,
+        "cache_key": None,
         "config": asdict(config),
         "rendered_config": None,
         "rendered_provider": None,
@@ -535,6 +653,18 @@ def render_episode(
             )
             prune_manifests(manifest_dir)
         return path
+
+    try:
+        # For a Gemini primary this imports ``verify`` (and so ``google.genai``);
+        # a broken import there is a failed render with a manifest, not a bare
+        # traceback. (It is deliberately not a fallback: nothing has run yet, and
+        # a broken install needs to be loud.)
+        key = cache_key(text, config)
+    except BaseException as exc:
+        record["error"] = f"{type(exc).__name__}: {_exc_text(exc)}"
+        emit()
+        raise
+    record["cache_key"] = key
 
     if cache_dir is not None:
         prune(cache_dir)
@@ -609,8 +739,10 @@ def render_episode(
         else:
             pcm_parts = _synthesize_all(leaf, text, chunk_records, record)
             encode_mp3(b"".join(pcm_parts), out_mp3)
-    except Exception as exc:
-        record["error"] = f"{type(exc).__name__}: {exc}"
+    except BaseException as exc:
+        # BaseException: a KeyboardInterrupt/SystemExit must still leave the
+        # failed manifest behind -- and still propagate, never becoming a fallback.
+        record["error"] = f"{type(exc).__name__}: {_exc_text(exc)}"
         emit()
         raise
 

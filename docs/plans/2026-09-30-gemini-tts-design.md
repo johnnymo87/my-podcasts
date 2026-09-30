@@ -143,7 +143,8 @@ The inline text above stays; where it disagrees with these, these win.
   `verification`; a hit is valid only if its rendered leaf is the request's primary or fallback.
   `RENDERER_VERSION` 2 started a cold cache.
 - **PR split.** T3a (`my-podcasts-9p3.3`) is the typed config, `FEED_VOICES`, `GeminiProvider` and
-  provenance-checked cache; `render_episode` still refuses a Gemini primary. T3b
+  provenance-checked cache; it left `render_episode` refusing a Gemini primary, and T3b removed that
+  refusal. T3b
   (`my-podcasts-9p3.11`) adds the child-process Gemini phase, per-chunk verification, fallback and
   alerts.
 - **Manual-publish defaults stay `nova`** (`publish_script`, CLI `--voice`) on every feed until
@@ -154,7 +155,8 @@ The inline text above stays; where it disagrees with these, these win.
 - **The alert is bounded.** `send_alert` has a 10 s timeout per read, not a wall-clock bound, so
   the parent runs it in a daemon thread and `join`s for at most `ALERT_WAIT_SECONDS = 12.0`; after
   that it moves on and the thread is abandoned. The manifest's `alert_sent` records `true`,
-  `false` or `"timeout"` (`null` = no alert attempted). This replaces the earlier "synchronous,
+  `false` or `"timeout"` (delivery unknown: still sending when the wait ended); `null` = no alert
+  attempted. Nothing in building or sending the alert can raise into the render. This replaces the earlier "synchronous,
   counts against the caller" wording. The alert is sent by the parent only, after the fallback
   attempt (also when that attempt fails), never on a cache hit, never when there is no fallback,
   and not at all with `notify_fallback=False` (local tools and `publish-script --dry-run`).
@@ -164,7 +166,11 @@ The inline text above stays; where it disagrees with these, these win.
   to a failed phase so the invariant holds that a Gemini problem costs an OpenAI episode, never the
   episode; with no fallback it raises `TTSRenderError` from it). Token totals in the manifest treat a
   completed call with no thinking count as 0, and a killed, in-flight or errored one as unknown
-  (`null`). The parent rejects any other value the child reports as `invalid_result`.
+  (`null`). The parent rejects any other value the child reports as `invalid_result`, and
+  `runner_error` is not a reason a child may report. Manifest telemetry built from child progress is
+  best-effort: malformed progress makes the affected totals `null` (and `audio_seconds_generated`
+  `null`), and a failure building the block degrades it to a minimal record with a
+  `telemetry_error` note; it never fails or changes the render.
 - **The parent validates before it uses any audio.** The child's `result.json` is a claim. On
   `ok` the parent requires indices exactly `0..n-1` in order, the canonical file name for each,
   every file present, byte counts matching, non-empty and even (whole 16-bit samples), and the

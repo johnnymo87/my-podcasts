@@ -9,6 +9,7 @@ output" is a byte-level assertion, not an inference.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 import sys
@@ -558,11 +559,13 @@ def test_an_exception_escaping_the_phase_without_a_fallback_raises_from_it(env):
     assert m["status"] == "failed" and m["gemini_phase"]["reason"] == "runner_error"
 
 
-def test_system_exit_in_the_phase_propagates_too(env):
+def test_system_exit_in_the_phase_propagates_but_leaves_a_failed_manifest(env):
     env.outcome = SystemExit(3)
     with pytest.raises(SystemExit):
         env.render()
-    assert env.openai.calls == [] and env.alerts == []
+    assert env.openai.calls == [] and env.alerts == []  # never a fallback
+    [m] = env.manifests()
+    assert m["status"] == "failed" and "SystemExit" in m["error"]
 
 
 def test_keyboard_interrupt_in_the_phase_is_not_turned_into_a_fallback(env):
@@ -570,6 +573,7 @@ def test_keyboard_interrupt_in_the_phase_is_not_turned_into_a_fallback(env):
     with pytest.raises(KeyboardInterrupt):
         env.render()
     assert env.openai.calls == [] and env.alerts == []
+    assert env.manifests()[0]["status"] == "failed"
 
 
 def test_empty_text_is_still_rejected_for_gemini(env):
@@ -606,3 +610,207 @@ def test_openai_render_imports_neither_asr_genai_nor_the_phase_module():
     )
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip().endswith("LOADED:"), out.stdout
+
+
+# --- review round: telemetry and alert can never cost the episode -----------------
+
+MALFORMED = [
+    None,
+    "not a dict",
+    {"index": 0, "attempts": [None, "str", 7, {"synth": "s", "asr": 5}]},
+    {"index": 1, "attempts": "nope"},
+    {"index": 2, "attempts": [{"synth": {"status": "ok", "pcm_bytes": "x"}}]},
+]
+
+
+def test_malformed_progress_on_an_ok_phase_still_ships_the_audio(env):
+    def outcome(chunks):
+        out = ok_outcome(chunks)
+        return dataclasses.replace(out, chunk_records=list(MALFORMED))
+
+    env.outcome = outcome
+    result = env.render()
+    assert result.provider == "gemini" and env.alerts == []
+    assert env.encoded == [b"".join(gemini_pcm(i) for i in range(N_GEMINI))]
+    [m] = env.manifests()
+    assert m["status"] == "rendered"
+    assert set(m["gemini_phase"]["tokens"].values()) == {None}  # unknown, not wrong
+    assert m["gemini_phase"]["audio_seconds_generated"] is None
+    assert len(m["chunks"]) == N_GEMINI
+
+
+def test_malformed_progress_on_a_failed_phase_still_falls_back(env):
+    def outcome(chunks):
+        return dataclasses.replace(
+            failed_outcome("deadline"), chunk_records=list(MALFORMED)
+        )
+
+    env.outcome = outcome
+    result = env.render()
+    assert result.provider == "openai" and result.fallback_reason == "deadline"
+    assert len(env.alerts) == 1 and MARK not in env.encoded[0]
+
+
+def test_a_telemetry_bug_degrades_to_a_minimal_record_on_an_ok_phase(env, monkeypatch):
+    def boom(records):
+        raise RuntimeError("telemetry bug")
+
+    monkeypatch.setattr(render, "_phase_totals", boom)
+    env.outcome = ok_outcome
+    result = env.render()
+    assert result.provider == "gemini"
+    [m] = env.manifests()
+    phase = m["gemini_phase"]
+    assert (phase["outcome"], phase["reason"]) == ("ok", None)
+    assert set(phase["tokens"].values()) == {None}
+    assert "RuntimeError" in phase["telemetry_error"]
+    assert m["status"] == "rendered"
+
+
+def test_a_telemetry_bug_does_not_stop_the_fallback(env, monkeypatch):
+    def boom(records):
+        raise RuntimeError("telemetry bug")
+
+    monkeypatch.setattr(render, "_phase_totals", boom)
+    env.outcome = failed_outcome("deadline")
+    result = env.render()
+    assert result.fallback_reason == "deadline" and len(env.alerts) == 1
+    assert "telemetry_error" in env.manifests()[0]["gemini_phase"]
+
+
+def test_a_bug_building_shipped_chunk_records_still_ships_the_audio(env, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("records bug")
+
+    monkeypatch.setattr(render, "_attempt_errors", boom)
+    env.outcome = ok_outcome
+    result = env.render()
+    assert result.provider == "gemini"
+    [m] = env.manifests()
+    assert [c["index"] for c in m["chunks"]] == list(range(N_GEMINI))
+    assert sum(c["audio_seconds"] for c in m["chunks"]) == pytest.approx(N_GEMINI)
+
+
+class BadStr(Exception):
+    def __str__(self):
+        raise RuntimeError("no string for you")
+
+
+def test_an_exception_that_cannot_be_stringified_does_not_break_the_alert(env):
+    env.outcome = failed_outcome("deadline")
+    env.openai.script = [BadStr()]
+    with pytest.raises(BadStr):
+        env.render()
+    (alert,) = env.alerts
+    assert alert.endswith("deadline -> OpenAI nova FAILED: BadStr")
+    [m] = env.manifests()
+    assert m["status"] == "failed" and m["error"].startswith("BadStr")
+    assert m["alert_sent"] is True
+
+
+def test_a_thread_that_cannot_start_means_alert_sent_false_not_a_crash(
+    env, monkeypatch
+):
+    class NoThread:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(render.threading, "Thread", NoThread)
+    env.outcome = failed_outcome("deadline")
+    result = env.render()
+    assert result.fallback_reason == "deadline" and env.alerts == []
+    assert env.manifests()[0]["alert_sent"] is False
+
+
+def test_fallback_failure_carries_a_note_naming_the_gemini_reason(env):
+    env.outcome = failed_outcome("deadline")
+    env.openai.script = [KeyError("OPENAI_API_KEY")]
+    with pytest.raises(KeyError) as info:
+        env.render()
+    assert "after Gemini deadline" in info.value.__notes__
+
+
+def test_a_cache_key_failure_still_writes_a_failed_manifest(env, monkeypatch):
+    def boom(text, config):
+        raise ImportError("google.genai is broken")
+
+    monkeypatch.setattr(render, "cache_key", boom)
+    with pytest.raises(ImportError):
+        env.render()
+    [m] = env.manifests()
+    assert m["status"] == "failed" and m["cache_key"] is None
+    assert "ImportError" in m["error"]
+    assert env.phase_calls == [] and env.alerts == []
+
+
+def test_audio_generated_is_unknown_when_any_chunk_progress_is_missing(env):
+    def outcome(chunks):
+        out = failed_outcome("child_no_result", chunks=2)
+        out.chunk_records[1] = {"index": 1, "attempts": [], "progress": "missing"}
+        return out
+
+    env.outcome = outcome
+    env.render()
+    assert env.manifests()[0]["gemini_phase"]["audio_seconds_generated"] is None
+
+
+def test_audio_used_is_zero_unless_the_phase_was_ok(env):
+    def outcome(chunks):
+        return dataclasses.replace(failed_outcome("deadline"), pcm_parts=[b"\x00\x00"])
+
+    env.outcome = outcome
+    env.render()
+    assert env.manifests()[0]["gemini_phase"]["audio_seconds_used"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "parts", [lambda n: [gemini_pcm(0)], lambda n: None, lambda n: [b""] * n]
+)
+def test_an_ok_phase_with_the_wrong_audio_is_treated_as_invalid_and_falls_back(
+    env, parts
+):
+    def outcome(chunks):
+        return dataclasses.replace(ok_outcome(chunks), pcm_parts=parts(len(chunks)))
+
+    env.outcome = outcome
+    result = env.render()
+    assert result.provider == "openai" and result.fallback_reason == "invalid_result"
+    assert MARK not in env.encoded[0]
+    phase = env.manifests()[0]["gemini_phase"]
+    assert (phase["outcome"], phase["reason"]) == ("failed", "invalid_result")
+    assert phase["audio_seconds_used"] == 0.0
+
+
+def test_the_runner_error_outcome_reports_spawn_time_as_unknown(env):
+    env.outcome = RuntimeError("runner bug")
+    env.render()
+    phase = env.manifests()[0]["gemini_phase"]
+    assert phase["spawn_s"] is None and phase["child_started_s"] is None
+
+
+def test_encode_failure_after_an_ok_phase_is_loud_with_a_failed_manifest(
+    env, monkeypatch
+):
+    def boom(pcm, out):
+        raise RuntimeError("ffmpeg died")
+
+    monkeypatch.setattr(render, "encode_mp3", boom)
+    env.outcome = ok_outcome
+    with pytest.raises(RuntimeError, match="ffmpeg died"):
+        env.render()
+    assert env.openai.calls == [] and env.alerts == []  # not a Gemini problem
+    [m] = env.manifests()
+    assert m["status"] == "failed" and m["gemini_phase"]["outcome"] == "ok"
+    assert cache.lookup(env.tmp / "c", cache.cache_key(TEXT, CFG)) is None
+
+
+def test_a_cache_store_failure_does_not_lose_the_audio(env, monkeypatch):
+    monkeypatch.setattr(render, "store", lambda *a, **k: False)
+    env.outcome = ok_outcome
+    result = env.render()
+    assert result.provider == "gemini" and (env.tmp / "out.mp3").exists()
+    [m] = env.manifests()
+    assert m["cache_stored"] is False and m["status"] == "rendered"
