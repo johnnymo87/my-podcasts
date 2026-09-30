@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import subprocess
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from pipeline.things_happen_processor import process_things_happen_job
+from pipeline.tts import openai_config
 
 
 # Processors reject scripts too short to be a real episode
@@ -18,7 +18,9 @@ from pipeline.things_happen_processor import process_things_happen_job
 _FILLER = " The briefing continues with further detail." * 15
 
 
-def test_process_things_happen_job_end_to_end(tmp_path, monkeypatch) -> None:
+def test_process_things_happen_job_end_to_end(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
     """Verify the full orchestration: resolve links, fetch, summarize, TTS, upload."""
     from pipeline.db import StateStore
 
@@ -77,12 +79,8 @@ def test_process_things_happen_job_end_to_end(tmp_path, monkeypatch) -> None:
         lambda articles, date_str: "Here is the briefing script for today." + _FILLER,
     )
 
-    # Mock ttsjoin and ffprobe subprocess
+    # Mock ffprobe subprocess (rendering is stubbed by fake_tts_render)
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="60.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -113,6 +111,13 @@ def test_process_things_happen_job_end_to_end(tmp_path, monkeypatch) -> None:
     # upload_file(local_path, r2_key, content_type=...)
     upload_key = upload_args[0][1]
     assert upload_key.startswith("episodes/the-rundown/")
+
+    # Rendered with nova under the Rundown's feed identity.
+    [call] = fake_tts_render
+    assert call["config"] == openai_config(model="tts-1-hd", voice="nova")
+    assert call["feed_slug"] == "the-rundown"
+    assert call["episode_id"] == "2026-02-26-the-rundown"
+    assert call["text"].startswith("Here is the briefing script for today.")
 
     store.close()
 
@@ -147,7 +152,9 @@ def test_levine_email_caches_links(tmp_path) -> None:
     assert links[0]["link_text"] == "Blue Owl"
 
 
-def test_process_things_happen_job_with_script_file(tmp_path, monkeypatch) -> None:
+def test_process_things_happen_job_with_script_file(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
     """When script_path is provided, skip steps 1-3 and go straight to TTS."""
     import subprocess
 
@@ -193,12 +200,8 @@ def test_process_things_happen_job_with_script_file(tmp_path, monkeypatch) -> No
         ),
     )
 
-    # Mock ttsjoin and ffprobe subprocess.
+    # Mock ffprobe subprocess (rendering is stubbed by fake_tts_render).
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="45.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -232,7 +235,9 @@ def test_process_things_happen_job_with_script_file(tmp_path, monkeypatch) -> No
     store.close()
 
 
-def test_process_things_happen_with_show_notes(tmp_path, monkeypatch) -> None:
+def test_process_things_happen_with_show_notes(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
     """When work_dir has plan.json and articles, show notes are stored."""
     from pipeline.db import StateStore
     from pipeline.things_happen_processor import process_things_happen_job
@@ -281,10 +286,6 @@ def test_process_things_happen_with_show_notes(tmp_path, monkeypatch) -> None:
 
     # Mock subprocess and feed regen
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="60.0\n")
         return subprocess.CompletedProcess(cmd, 0)
@@ -316,7 +317,7 @@ def test_process_things_happen_with_show_notes(tmp_path, monkeypatch) -> None:
 
 
 def test_process_things_happen_filters_by_covered_headlines(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, fake_tts_render
 ) -> None:
     """When covered.json exists, show notes only include covered stories."""
     from pipeline.db import StateStore
@@ -383,10 +384,6 @@ def test_process_things_happen_filters_by_covered_headlines(
 
     # Mock subprocess and feed regen
     def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            output_file = cmd[cmd.index("--output-file") + 1]
-            Path(output_file).write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
         if cmd[0] == "ffprobe":
             return subprocess.CompletedProcess(cmd, 0, stdout="60.0\n")
         return subprocess.CompletedProcess(cmd, 0)
