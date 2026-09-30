@@ -20,8 +20,25 @@ _SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+|(?<=[.!?][\"'’”)\]])\s+")
 def chunk_text(
     text: str, *, target: int = DEFAULT_TARGET_CHARS, ceiling: int = OPENAI_MAX_CHARS
 ) -> list[str]:
-    if target > ceiling:
-        raise ValueError(f"target {target} exceeds provider ceiling {ceiling}")
+    """Partition ``text`` into TTS-sized chunks.
+
+    Guarantees:
+    - Every chunk is at most ``target`` characters (and so at most ``ceiling``).
+    - Lossless modulo whitespace: ``" ".join(chunks).split() == text.split()``,
+      except that a single word longer than ``target`` is hard-cut into pieces.
+      Runs of whitespace inside a paragraph that has to be split collapse to
+      single spaces.
+    - Paragraph breaks are preserved as ``"\\n\\n"`` wherever a chunk keeps whole
+      paragraphs together; a paragraph split across chunks loses its internal
+      layout but keeps its words and order.
+    - Whitespace-only input yields ``[]``.
+
+    Raises ``ValueError`` unless ``0 < target <= ceiling``.
+    """
+    if not 0 < target <= ceiling:
+        raise ValueError(
+            f"target must satisfy 0 < target <= ceiling, got {target}/{ceiling}"
+        )
     units: list[tuple[str, str]] = []  # (separator before unit, unit text)
     for paragraph in _PARAGRAPH_BREAK.split(text):
         paragraph = paragraph.strip()
@@ -42,7 +59,8 @@ def chunk_text(
             current = unit
     if current:
         chunks.append(current)
-    assert all(len(c) <= ceiling for c in chunks)
+    if any(len(c) > ceiling for c in chunks):  # backstop; survives python -O
+        raise RuntimeError(f"chunker produced a chunk over the {ceiling}-char ceiling")
     return chunks
 
 
