@@ -101,3 +101,24 @@ def _block_real_article_fetches(request):
         ),
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _block_real_openai_tts(request):
+    """No test may build a real OpenAI client (a real TTS call costs money).
+
+    Tests exercising the provider patch ``pipeline.tts.providers._make_openai_client``
+    themselves; their patch nests inside this one and wins.
+    """
+    if request.node.get_closest_marker("allow_network"):
+        yield
+        return
+
+    def _refuse(timeout: float):
+        raise AssertionError(
+            "A test tried to build a real OpenAI client. Patch "
+            "pipeline.tts.providers._make_openai_client or pipeline.tts.render_episode."
+        )
+
+    with patch("pipeline.tts.providers._make_openai_client", _refuse):
+        yield
