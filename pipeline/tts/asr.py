@@ -49,9 +49,41 @@ ASR_POLICY = (
     f"{ASR_MODEL}|prompt-v{ASR_PROMPT_VERSION}|temp{ASR_TEMPERATURE}|thinking-default"
 )
 
+# "default" sends no thinking config (the model's own default applies); "low"
+# sends ThinkingLevel.LOW. gemini-3.8-flash rejects MINIMAL (HTTP 400).
+THINKING_SETTINGS = ("default", "low")
 
-def _generation_config() -> types.GenerateContentConfig:
+
+def _check_thinking(thinking: str) -> str:
+    if thinking not in THINKING_SETTINGS:
+        raise ValueError(
+            f"thinking must be one of {THINKING_SETTINGS}, got {thinking!r}"
+        )
+    return thinking
+
+
+def policy_for(model: str = ASR_MODEL, thinking: str = "default") -> str:
+    """The ASR policy string for a model and thinking setting.
+
+    ``policy_for()`` is exactly ``ASR_POLICY``.
+    """
+    _check_thinking(thinking)
+    return (
+        f"{model}|prompt-v{ASR_PROMPT_VERSION}|temp{ASR_TEMPERATURE}"
+        f"|thinking-{thinking}"
+    )
+
+
+def _generation_config(thinking: str = "default") -> types.GenerateContentConfig:
     """The one place the request's generation config is built (see ASR_POLICY)."""
+    _check_thinking(thinking)
+    if thinking == "low":
+        return types.GenerateContentConfig(
+            temperature=ASR_TEMPERATURE,
+            thinking_config=types.ThinkingConfig(
+                thinking_level=types.ThinkingLevel.LOW
+            ),
+        )
     return types.GenerateContentConfig(temperature=ASR_TEMPERATURE)
 
 
@@ -107,12 +139,22 @@ class GeminiTranscriber:
     """
 
     def __init__(
-        self, *, model: str = ASR_MODEL, timeout_s: float = DEFAULT_ASR_TIMEOUT_SECONDS
+        self,
+        *,
+        model: str = ASR_MODEL,
+        timeout_s: float = DEFAULT_ASR_TIMEOUT_SECONDS,
+        thinking: str = "default",
     ) -> None:
         self.model = model
         self.timeout_s = timeout_s
+        self.thinking = _check_thinking(thinking)
         self._client: genai.Client | None = None
         self._lock = threading.Lock()
+
+    @property
+    def policy(self) -> str:
+        """ASR policy string for this instance's model and thinking setting."""
+        return policy_for(self.model, self.thinking)
 
     def __enter__(self) -> GeminiTranscriber:
         return self
@@ -144,7 +186,7 @@ class GeminiTranscriber:
                     types.Part.from_bytes(data=audio, mime_type=mime_type),
                     ASR_PROMPT,
                 ],
-                config=_generation_config(),
+                config=_generation_config(self.thinking),
             )
         except (httpx.TimeoutException, TimeoutError) as exc:
             raise TranscriptionUnavailable("asr_timeout", repr(exc)) from exc

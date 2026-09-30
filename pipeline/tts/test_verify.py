@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from pipeline.tts.asr import Transcription, TranscriptionUnavailable
+from pipeline.tts.normalize import normalize_tokens
 from pipeline.tts.verify import (
     DEFAULT_THRESHOLDS,
     VERIFIER_POLICY,
@@ -115,6 +116,8 @@ def test_span_coordinates_are_normalized_token_indices():
 @pytest.mark.parametrize(
     "kwargs",
     [
+        {"net_deficit_min": 0},
+        {"net_deficit_min": -5},
         {"anchor_min": 0},
         {"min_span_words": 0},
         {"max_span_ratio": -0.1},
@@ -268,3 +271,69 @@ def test_unavailable_verdict_also_carries_policy():
     t, _ = fake_transcriber(exc=TranscriptionUnavailable("asr_timeout", "slow"))
     v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
     assert v.verifier_policy == VERIFIER_POLICY
+
+
+def _t2_blind_spot_transcript() -> str:
+    """40 tokens cut, then every 3rd of the next 45 substituted.
+
+    No 3-token anchor survives, so the cut and the noise merge into one span of
+    85 script tokens against 45 transcript tokens: net_missing 40, but the
+    transcript side is over half the script side, so the ratio test misses it.
+    """
+    toks = normalize_tokens(SCRIPT)
+    mid = len(toks) // 2
+    noisy = [
+        "xyzzy" if i % 3 == 2 else t for i, t in enumerate(toks[mid + 40 : mid + 85])
+    ]
+    return " ".join(toks[:mid] + noisy + toks[mid + 85 :])
+
+
+def test_net_deficit_defaults_to_off_and_keeps_the_t2_blind_spot():
+    assert DEFAULT_THRESHOLDS.net_deficit_min is None
+    a = analyze(SCRIPT, _t2_blind_spot_transcript())
+    assert a.status == "pass"
+    blind = [s for s in a.spans if s.script_words > 40]
+    assert [(s.script_words, s.transcript_words, s.net_missing) for s in blind] == [
+        (85, 45, 40)
+    ]
+
+
+@pytest.mark.parametrize("m", [12, 24, 40])
+def test_net_deficit_rule_flags_the_t2_blind_spot(m):
+    th = replace(DEFAULT_THRESHOLDS, net_deficit_min=m)
+    a = analyze(SCRIPT, _t2_blind_spot_transcript(), th)
+    assert a.status == "omission"
+    assert a.reasons == ("long_unmatched_span",)
+    assert [s.net_missing for s in a.spans if s.flagged] == [40]
+
+
+def test_net_deficit_above_the_deficit_does_not_flag():
+    th = replace(DEFAULT_THRESHOLDS, net_deficit_min=41)
+    assert analyze(SCRIPT, _t2_blind_spot_transcript(), th).status == "pass"
+
+
+def test_net_deficit_is_about_missing_tokens_not_substitutions():
+    # Substitutions keep net_missing near zero (a substituted word is still a
+    # transcript token), so the rule leaves a noisy but complete control alone.
+    words = as_asr(SCRIPT).split()
+    noisy = " ".join("xyzzy" if i % 3 == 2 else w for i, w in enumerate(words))
+    th = replace(DEFAULT_THRESHOLDS, net_deficit_min=12)
+    a = analyze(SCRIPT, noisy, th)
+    assert not any(s.flagged for s in a.spans)
+    assert "long_unmatched_span" not in a.reasons
+
+
+def test_net_deficit_does_not_change_the_clean_control():
+    th = replace(DEFAULT_THRESHOLDS, net_deficit_min=12)
+    assert analyze(SCRIPT, as_asr(SCRIPT), th).status == "pass"
+
+
+def test_net_deficit_off_is_identical_to_before_on_a_plain_skip():
+    base = analyze(SCRIPT, drop_words(as_asr(SCRIPT), 300, 40))
+    same = analyze(
+        SCRIPT,
+        drop_words(as_asr(SCRIPT), 300, 40),
+        replace(DEFAULT_THRESHOLDS, net_deficit_min=None),
+    )
+    assert base == same
+    assert VERIFIER_VERSION == "1"

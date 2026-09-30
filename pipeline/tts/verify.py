@@ -13,9 +13,10 @@ Alignment: difflib matching blocks over normalized tokens. Blocks of at least
 ``anchor_min`` tokens are anchors; the script-side gaps between consecutive
 anchors (and before the first / after the last) are candidate spans. A span is
 flagged when it is long (>= min_span_words script tokens) and the transcript
-side is much shorter (<= max_span_ratio of it). Recall counts ALL matched
-script tokens, not only anchored ones. Coordinates are indices into the
-normalized token lists, not characters or seconds.
+side is much shorter (<= max_span_ratio of it), or, when ``net_deficit_min`` is
+set, when script tokens minus transcript tokens in the gap reach it. Recall
+counts ALL matched script tokens, not only anchored ones. Coordinates are
+indices into the normalized token lists, not characters or seconds.
 """
 
 from __future__ import annotations
@@ -42,6 +43,10 @@ class VerifyThresholds:
     min_span_words: int = 12
     max_span_ratio: float = 0.5
     recall_floor: float = 0.85
+    # Optional additive rule: also flag a span whose net_missing (script tokens
+    # minus transcript tokens in the gap) reaches this. None = off. It catches
+    # a cut merged with nearby substitution noise, where the ratio test misses.
+    net_deficit_min: int | None = None
 
     def __post_init__(self) -> None:
         if self.anchor_min < 1:
@@ -54,6 +59,10 @@ class VerifyThresholds:
             )
         if not 0.0 <= self.recall_floor <= 1.0:
             raise ValueError(f"recall_floor must be in [0, 1], got {self.recall_floor}")
+        if self.net_deficit_min is not None and self.net_deficit_min < 1:
+            raise ValueError(
+                f"net_deficit_min must be None or >= 1, got {self.net_deficit_min}"
+            )
 
 
 DEFAULT_THRESHOLDS = VerifyThresholds()
@@ -146,6 +155,10 @@ def _align(
                     flagged=(
                         s_words >= th.min_span_words
                         and t_words <= th.max_span_ratio * s_words
+                    )
+                    or (
+                        th.net_deficit_min is not None
+                        and s_words - t_words >= th.net_deficit_min
                     ),
                     excerpt=" ".join(script[prev_a : min(a, prev_a + _EXCERPT_TOKENS)]),
                 )
