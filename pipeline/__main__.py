@@ -1134,6 +1134,258 @@ def run_stats_command(work_dir: Path, send: bool) -> None:
         click.echo("sent" if send_alert(report) else "send failed")
 
 
+def _load_saved_transcript(path: Path, audio_sha: str) -> tuple[str, dict]:
+    """Read a ``--transcript`` file; returns ``(text, asr_info)``.
+
+    A ``.json`` file must be one written by ``--save-transcript`` AND belong to
+    the ``--audio`` file (checked by sha256), so calibration can never run
+    against the wrong transcript. Anything else is plain external text.
+    """
+    if path.suffix.lower() != ".json":
+        return path.read_text(), {
+            "source": "external",
+            "model": None,
+            "prompt_version": None,
+            "segments": [],
+        }
+    hint = "expected a file written by --save-transcript"
+    try:
+        data = json.loads(path.read_text())
+        segments = data["segments"]
+        texts = [s["text"] for s in segments]
+        saved_sha = data["audio_sha256"]
+        if not (isinstance(saved_sha, str) and all(isinstance(t, str) for t in texts)):
+            raise TypeError("bad field types")
+    except (ValueError, KeyError, TypeError) as exc:
+        raise click.UsageError(
+            f"{path} is not a saved transcript ({hint}): {exc!r}"
+        ) from exc
+    if saved_sha != audio_sha:
+        raise click.UsageError(
+            f"{path} was made from different audio: its audio_sha256 is "
+            f"{saved_sha}, --audio hashes to {audio_sha}"
+        )
+    return "\n".join(texts), {
+        "source": "saved",
+        "model": data.get("model"),
+        "prompt_version": data.get("prompt_version"),
+        "segments": [{k: v for k, v in s.items() if k != "text"} for s in segments],
+    }
+
+
+@cli.command("tts-verify")
+@click.option(
+    "--audio",
+    "audio_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Rendered episode audio (mp3 or wav).",
+)
+@click.option(
+    "--script",
+    "script_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="The exact text that was sent to TTS.",
+)
+@click.option(
+    "--transcript",
+    "transcript_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Reuse a transcript instead of calling ASR "
+    "(.json from --save-transcript, or plain text).",
+)
+@click.option(
+    "--save-transcript",
+    "save_transcript",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write the ASR transcript (replayable evidence) after a complete run.",
+)
+@click.option(
+    "--json",
+    "json_out",
+    default=None,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write the JSON report here instead of stdout.",
+)
+@click.option(
+    "--timeout",
+    "timeout_s",
+    default=120.0,
+    show_default=True,
+    type=float,
+    help="Seconds per ASR request.",
+)
+@click.option("--anchor-min", default=None, type=int)
+@click.option("--min-span-words", default=None, type=int)
+@click.option("--max-span-ratio", default=None, type=float)
+@click.option("--recall-floor", default=None, type=float)
+def tts_verify_command(
+    audio_path: Path,
+    script_path: Path,
+    transcript_path: Path | None,
+    save_transcript: Path | None,
+    json_out: Path | None,
+    timeout_s: float,
+    anchor_min: int | None,
+    min_span_words: int | None,
+    max_span_ratio: float | None,
+    recall_floor: float | None,
+) -> None:
+    """Check rendered audio for large omissions against its script (offline).
+
+    Transcribes the audio with Gemini (audio only) in ~5-minute pieces, aligns
+    the transcript against the whole script once, and reports spans plus
+    per-chunk recall PROJECTED from that whole-episode alignment. Projected
+    numbers are diagnostic; production-equivalent checks verify each
+    synthesized chunk on its own (see T5 / my-podcasts-9p3.5).
+
+    Exit status: 0 pass, 1 omission, 3 verification unavailable.
+    """
+    import dataclasses
+    import hashlib
+
+    from pipeline.tts import asr, segment, verify
+    from pipeline.tts.chunker import chunk_text
+    from pipeline.tts.config import PCM_BYTES_PER_SECOND
+    from pipeline.tts.normalize import normalize_tokens
+
+    if transcript_path is not None and save_transcript is not None:
+        raise click.UsageError(
+            "--save-transcript only applies to a fresh ASR run; "
+            "it cannot be combined with --transcript"
+        )
+
+    overrides = {
+        "anchor_min": anchor_min,
+        "min_span_words": min_span_words,
+        "max_span_ratio": max_span_ratio,
+        "recall_floor": recall_floor,
+    }
+    try:
+        thresholds = dataclasses.replace(
+            verify.DEFAULT_THRESHOLDS,
+            **{k: v for k, v in overrides.items() if v is not None},
+        )
+    except ValueError as exc:
+        raise click.BadParameter(str(exc)) from exc
+
+    audio_bytes = audio_path.read_bytes()
+    audio_sha = hashlib.sha256(audio_bytes).hexdigest()
+    script_text = script_path.read_text()
+    script_sha = hashlib.sha256(script_text.encode()).hexdigest()
+
+    unavailable: tuple[str, str] | None = None
+    asr_info: dict
+    transcript_text = ""
+    saved_payload: dict | None = None
+
+    if transcript_path is not None:
+        transcript_text, asr_info = _load_saved_transcript(transcript_path, audio_sha)
+    else:
+        asr_info = {
+            "source": "asr",
+            "model": None,
+            "prompt_version": None,
+            "segments": [],
+        }
+        texts: list[str] = []
+        saved_segments: list[dict] = []
+        try:
+            pcm = segment.decode_to_pcm(audio_path)
+            if not pcm:
+                raise RuntimeError(f"ffmpeg decoded no audio from {audio_path}")
+        except RuntimeError as exc:
+            unavailable = ("audio_decode_error", str(exc))
+        else:
+            ranges = segment.split_pcm(pcm)
+            with asr.GeminiTranscriber(timeout_s=timeout_s) as transcriber:
+                for i, (lo, hi) in enumerate(ranges):
+                    try:
+                        tr = transcriber(asr.pcm_to_wav(pcm[lo:hi]), "audio/wav")
+                    except asr.TranscriptionUnavailable as exc:
+                        unavailable = (
+                            exc.reason,
+                            f"segment {i + 1} of {len(ranges)}: {exc}",
+                        )
+                        break
+                    asr_info["model"] = tr.model
+                    asr_info["prompt_version"] = tr.prompt_version
+                    record = {
+                        "start_s": lo / PCM_BYTES_PER_SECOND,
+                        "end_s": hi / PCM_BYTES_PER_SECOND,
+                        "finish_reason": tr.finish_reason,
+                        "elapsed_s": tr.elapsed_s,
+                        "input_tokens": tr.input_tokens,
+                        "output_tokens": tr.output_tokens,
+                        "thinking_tokens": tr.thinking_tokens,
+                    }
+                    asr_info["segments"].append(record)
+                    saved_segments.append({**record, "text": tr.text})
+                    texts.append(tr.text)
+            if unavailable is None:
+                transcript_text = "\n".join(texts)
+                saved_payload = {
+                    "audio_sha256": audio_sha,
+                    "model": asr_info["model"],
+                    "prompt_version": asr_info["prompt_version"],
+                    "segments": saved_segments,
+                }
+
+    if unavailable is None and not normalize_tokens(transcript_text):
+        # Explicit evidence, like verify_audio's asr_empty: an empty transcript
+        # says nothing about the audio, and must not read as "all omitted".
+        unavailable = ("asr_empty", "transcript has no word tokens")
+
+    report: dict = {
+        "verifier_version": verify.VERIFIER_VERSION,
+        "mode": "projected",
+        "thresholds": dataclasses.asdict(thresholds),
+        "audio_sha256": audio_sha,
+        "script_sha256": script_sha,
+        "asr": asr_info,
+    }
+    if unavailable is not None:
+        reason, detail = unavailable
+        report.update(
+            status="unavailable",
+            reasons=[reason],
+            detail=detail,
+            analysis=None,
+            chunks=[],
+        )
+        code, recall = 3, None
+    else:
+        chunks = chunk_text(script_text)
+        whole, per_chunk = verify.project_chunks(chunks, transcript_text, thresholds)
+        report.update(
+            status=whole.status,
+            reasons=list(whole.reasons),
+            detail="",
+            analysis=whole.to_dict(),
+            chunks=[dataclasses.asdict(p) for p in per_chunk],
+        )
+        code = 0 if whole.status == "pass" else 1
+        recall = whole.recall
+        if saved_payload is not None and save_transcript is not None:
+            save_transcript.write_text(json.dumps(saved_payload, indent=2))
+
+    text = json.dumps(report, indent=2)
+    if json_out is not None:
+        json_out.write_text(text)
+    else:
+        click.echo(text)
+    summary = f"tts-verify: {report['status']} ({', '.join(report['reasons'])})"
+    if recall is not None:
+        summary += f", recall {recall:.3f}"
+    summary += " [per-chunk numbers are projected]"
+    click.echo(summary, err=True)
+    if code:
+        raise SystemExit(code)
+
+
 @cli.command("sync-sources")
 def sync_sources_command() -> None:
     """Sync all source caches (Zvi, Semafor, Antiwar RSS, Antiwar homepage)."""
