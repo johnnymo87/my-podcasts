@@ -433,7 +433,7 @@ def test_atomic_write_never_exposes_a_partial_file(tmp_path, monkeypatch):
     def boom(src, dst):
         raise OSError("replace failed")
 
-    monkeypatch.setattr(gp.os, "replace", boom)
+    monkeypatch.setattr(gp, "_replace", boom)
     with pytest.raises(OSError):
         gp._atomic_write(target, b"new")
     assert target.read_bytes() == b"old"
@@ -613,21 +613,76 @@ def child_env(monkeypatch):
     return watchdogs
 
 
-def test_child_main_writes_result_then_exits_zero(scratch, child_env):
+def test_child_main_runs_watchdog_then_bootstrap_then_factories(
+    scratch, child_env, monkeypatch
+):
     order: list[str] = []
+    monkeypatch.setattr(gp, "_start_watchdog", lambda *a, **k: order.append("watchdog"))
 
-    def bootstrap():
-        order.append("bootstrap")
+    def make_provider():
+        order.append("factory")
+        return Provider([PCM])
 
     with pytest.raises(_Exited) as info:
         gp._child_main(
-            [TEXT], LEAF, _far(), str(scratch), 4242, factories("ok"), bootstrap
+            [TEXT],
+            LEAF,
+            _far(),
+            str(scratch),
+            4242,
+            (make_provider, Asr([TEXT]).make),
+            lambda: order.append("bootstrap"),
         )
     assert info.value.code == 0
-    assert order == ["bootstrap"]
-    assert child_env[0][0] == 4242  # parent pid handed to the watchdog
-    result = json.loads((scratch / gp.RESULT_NAME).read_text())
-    assert result["status"] == "ok"
+    # The bootstrap (network denial) must precede anything that could build a
+    # client; the watchdog precedes both so a hung bootstrap is bounded.
+    assert order == ["watchdog", "bootstrap", "factory"]
+    assert json.loads((scratch / gp.RESULT_NAME).read_text())["status"] == "ok"
+
+
+def test_child_main_hands_the_parent_pid_to_the_watchdog(scratch, child_env):
+    with pytest.raises(_Exited):
+        gp._child_main([TEXT], LEAF, _far(), str(scratch), 4242, factories("ok"), None)
+    assert child_env[0][0] == 4242
+
+
+def test_child_main_exits_even_on_a_base_exception(scratch, child_env):
+    def bootstrap():
+        raise KeyboardInterrupt
+
+    with pytest.raises(_Exited) as info:
+        gp._child_main(
+            [TEXT], LEAF, _far(), str(scratch), 1, factories("ok"), bootstrap
+        )
+    assert info.value.code == 1  # no result was written: the parent sees no_result
+    assert not (scratch / gp.RESULT_NAME).exists()
+
+
+def test_child_main_flushes_std_streams_before_exiting(scratch, child_env, monkeypatch):
+    events: list[str] = []
+
+    class Stream:
+        def __init__(self, name):
+            self.name = name
+
+        def write(self, text):
+            return len(text)
+
+        def flush(self):
+            events.append(f"flush-{self.name}")
+
+    monkeypatch.setattr(gp.sys, "stdout", Stream("out"))
+    monkeypatch.setattr(gp.sys, "stderr", Stream("err"))
+    real_exit = gp._hard_exit
+
+    def recording_exit(code):
+        events.append("exit")
+        real_exit(code)
+
+    monkeypatch.setattr(gp, "_hard_exit", recording_exit)
+    with pytest.raises(_Exited):
+        gp._child_main([TEXT], LEAF, _far(), str(scratch), 1, factories("ok"), None)
+    assert events[-3:] == ["flush-out", "flush-err", "exit"]
 
 
 def test_child_main_bootstrap_failure_is_child_error(scratch, child_env):
@@ -707,3 +762,127 @@ def test_watchdog_leaves_a_healthy_child_alone():
         return 100
 
     assert _watch(getppid=getppid, stop=stop) == []
+
+
+# --- review follow-ups ---------------------------------------------------------
+
+
+def test_a_siblings_failure_beats_a_spurious_deadline_in_the_backoff_branch(scratch):
+    # Chunk fails transiently with 1 s left (< the 2 s backoff), but a sibling
+    # has already failed: this chunk must yield, not report its own "deadline".
+    abort = threading.Event()
+    provider = Provider([_err("infra")], on_call=lambda n: abort.set())
+    with pytest.raises(gp._ChunkAborted):
+        _run(
+            provider,
+            Asr([]),
+            scratch,
+            abort=abort,
+            deadline=time.monotonic() + 1.0,
+        )
+
+
+def test_a_siblings_failure_beats_exhausted(scratch):
+    abort = threading.Event()
+    provider = Provider(
+        [_err("infra")] * 3, on_call=lambda n: abort.set() if n == 3 else None
+    )
+    with pytest.raises(gp._ChunkAborted):
+        _run(provider, Asr([]), scratch, abort=abort)
+
+
+def test_a_worker_base_exception_is_child_error_not_a_full_budget_deadline(scratch):
+    class Hard(BaseException):
+        pass
+
+    class Broken:
+        def synthesize_detailed(self, text, cfg, *, timeout=None):
+            raise Hard("worker died")
+
+    started = time.monotonic()
+    # A short deadline, so a regression fails in seconds rather than hanging.
+    result = gp._run_child(
+        [TEXT, fake_chunk_text(1)],
+        LEAF,
+        time.monotonic() + 5.0,
+        scratch,
+        (Broken, Asr([]).make),
+    )
+    assert time.monotonic() - started < 3.0
+    assert result["reason"] == gp.REASON_CHILD_ERROR
+    assert "Hard" in result["detail"] and "worker died" in result["detail"]
+
+
+def test_progress_is_persisted_before_the_chunk_pcm(scratch, monkeypatch):
+    seen: list[dict] = []
+    real = gp._atomic_write
+
+    def spy(path, data):
+        if Path(path).name == gp.chunk_name(0):
+            seen.append(_progress(scratch))
+        real(path, data)
+
+    monkeypatch.setattr(gp, "_atomic_write", spy)
+    _run(Provider([PCM]), Asr([TEXT]), scratch)
+    (during,) = seen
+    (attempt,) = during["attempts"]
+    assert attempt["outcome"] == "verified"
+    assert attempt["asr"]["status"] == "pass"
+
+
+def test_a_progress_write_failure_does_not_fail_the_chunk(scratch, monkeypatch, capsys):
+    real = gp._atomic_write_json
+
+    def flaky(path, obj):
+        if Path(path).name.startswith("progress-"):
+            raise OSError("progress disk hiccup")
+        real(path, obj)
+
+    monkeypatch.setattr(gp, "_atomic_write_json", flaky)
+    rec, _, _ = _run(Provider([PCM]), Asr([TEXT]), scratch)
+    assert (scratch / rec["file"]).read_bytes() == PCM
+    assert "progress disk hiccup" in capsys.readouterr().err
+
+
+def test_a_chunk_pcm_write_failure_is_not_swallowed(scratch, monkeypatch):
+    real = gp._atomic_write
+
+    def flaky(path, data):
+        if Path(path).suffix == ".pcm":
+            raise OSError("pcm disk full")
+        real(path, data)
+
+    monkeypatch.setattr(gp, "_atomic_write", flaky)
+    with pytest.raises(OSError, match="pcm disk full"):
+        _run(Provider([PCM]), Asr([TEXT]), scratch)
+
+
+def test_child_error_detail_carries_the_traceback_and_is_logged(scratch, capsys):
+    class Broken:
+        def synthesize_detailed(self, text, cfg, *, timeout=None):
+            raise RuntimeError("kaboom")
+
+    result = gp._run_child([TEXT], LEAF, _far(), scratch, (Broken, Asr([]).make))
+    assert "Traceback" in result["detail"]
+    assert "synthesize_detailed" in result["detail"]
+    assert result["detail"].rstrip().endswith("RuntimeError: kaboom")
+    assert "RuntimeError: kaboom" in capsys.readouterr().err
+
+
+def test_child_error_detail_is_capped_but_keeps_the_exception_line(scratch):
+    class Broken:
+        def synthesize_detailed(self, text, cfg, *, timeout=None):
+            raise RuntimeError("x" * 6000 + " the-end")
+
+    result = gp._run_child([TEXT], LEAF, _far(), scratch, (Broken, Asr([]).make))
+    detail = result["detail"]
+    assert len(detail) <= gp.ERROR_DETAIL_CHARS + 50
+    assert detail.endswith("the-end")
+
+
+def test_traceback_keeps_the_exception_line_when_capped():
+    try:
+        raise ValueError("the important message")
+    except ValueError as exc:
+        detail = gp._describe(exc)
+    assert detail.rstrip().endswith("ValueError: the important message")

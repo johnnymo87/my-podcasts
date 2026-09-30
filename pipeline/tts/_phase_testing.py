@@ -28,6 +28,7 @@ from __future__ import annotations
 import functools
 import io
 import json
+import multiprocessing
 import os
 import re
 import socket
@@ -55,13 +56,29 @@ _OMISSION_KEEP_WORDS = 8
 _CHUNK_RE = re.compile(r"^Chunk (\d+)\b")
 
 
+def _require_child(what: str) -> None:
+    """Refuse to run in the top-level (pytest) process.
+
+    ``deny_network`` patches ``socket`` globally and ``exit_on_build`` calls
+    ``os._exit``: run in the test runner, either would wreck the whole session.
+    ``multiprocessing.parent_process()`` is None exactly in a process that was
+    not started by ``multiprocessing``.
+    """
+    if multiprocessing.parent_process() is None:
+        raise RuntimeError(
+            f"{what} must only run in a spawned child, never in the test process"
+        )
+
+
 def deny_network() -> None:
     """Child bootstrap: make any outbound IP connect raise, and set a dummy key.
 
     Unix-domain connects are left alone (they are local, and some stdlib
     machinery uses them). The key is a dummy so a code path that checks for one
-    does not fail before it reaches the fake.
+    does not fail before it reaches the fake. Refuses to run outside a
+    ``multiprocessing`` child (see ``_require_child``).
     """
+    _require_child("deny_network")
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
 
@@ -181,6 +198,7 @@ class FakeTranscriber:
 def make_fake_provider(spec_json: str) -> FakeProvider:
     spec = json.loads(spec_json)
     if spec["behavior"] == "exit_on_build":
+        _require_child("the exit_on_build fake")
         os._exit(1)
     return FakeProvider(spec)
 
@@ -213,3 +231,24 @@ def factories(
         functools.partial(make_fake_provider, spec),
         functools.partial(make_fake_transcriber, spec),
     )
+
+
+def _selftest_deny_network(results) -> None:
+    """Spawn target for this module's own test: run ``deny_network`` in a child.
+
+    Reports through ``results`` (a ``multiprocessing`` queue) what the child saw.
+    """
+    deny_network()
+    outcome: dict[str, object] = {"key_set": bool(os.environ.get("GEMINI_API_KEY"))}
+    for name, call in (
+        ("create_connection", lambda: socket.create_connection(("127.0.0.1", 9))),
+        ("connect", lambda: socket.socket().connect(("127.0.0.1", 9))),
+        ("connect_ex", lambda: socket.socket().connect_ex(("127.0.0.1", 9))),
+    ):
+        try:
+            call()
+        except OSError as exc:
+            outcome[name] = str(exc)
+        else:
+            outcome[name] = "NOT DENIED"
+    results.put(outcome)

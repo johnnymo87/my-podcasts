@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
+import multiprocessing
 import pickle
-import subprocess
-import sys
-import textwrap
 
 import pytest
 
@@ -69,31 +67,30 @@ def test_blocking_behavior_leaves_a_marker_before_blocking(tmp_path, monkeypatch
     assert (tmp_path / "entered-synth-1").exists()
 
 
-def test_deny_network_blocks_ip_connects_and_sets_a_dummy_key():
-    """Run in a subprocess: the patch is global and must not leak into the suite."""
-    code = textwrap.dedent(
-        """
-        import os, socket
-        from pipeline.tts import _phase_testing as pt
-        os.environ.pop("GEMINI_API_KEY", None)
+def test_deny_network_refuses_to_run_in_the_test_process():
+    with pytest.raises(RuntimeError, match="spawned child"):
         pt.deny_network()
-        assert os.environ["GEMINI_API_KEY"]
-        for call in (
-            lambda: socket.create_connection(("127.0.0.1", 9)),
-            lambda: socket.socket().connect(("127.0.0.1", 9)),
-            lambda: socket.socket().connect_ex(("127.0.0.1", 9)),
-        ):
-            try:
-                call()
-            except OSError as exc:
-                assert "network denied" in str(exc), exc
-            else:
-                raise SystemExit("connect was not denied")
-        print("denied")
-        """
-    )
-    out = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, timeout=60
-    )
-    assert out.returncode == 0, out.stderr
-    assert out.stdout.strip() == "denied"
+
+
+def test_exit_on_build_refuses_to_run_in_the_test_process():
+    make_provider, _ = pt.factories("exit_on_build")
+    with pytest.raises(RuntimeError, match="spawned child"):
+        make_provider()
+
+
+def test_deny_network_blocks_ip_connects_in_a_spawned_child():
+    """A real spawn: the patch is global and must never reach the suite."""
+    ctx = multiprocessing.get_context("spawn")
+    results = ctx.Queue()
+    proc = ctx.Process(target=pt._selftest_deny_network, args=(results,))
+    proc.start()
+    try:
+        outcome = results.get(timeout=60)
+    finally:
+        proc.join(10)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(5)
+    assert outcome["key_set"] is True
+    for name in ("create_connection", "connect", "connect_ex"):
+        assert "network denied" in outcome[name], outcome

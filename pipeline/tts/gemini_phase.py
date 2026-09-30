@@ -52,8 +52,10 @@ import hashlib
 import json
 import os
 import queue
+import sys
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -77,6 +79,7 @@ REQUEST_TIMEOUT_CAP_SECONDS = 90.0  # per synth / per ASR request
 MAX_TTS_CALLS = 3  # one counter: transient retries AND the omission re-render
 BACKOFF_SECONDS = (2.0, 8.0)  # before TTS call 2, before TTS call 3
 MAX_WORKERS = 4
+ERROR_DETAIL_CHARS = 2000  # cap on a child_error traceback in result.json
 WATCHDOG_POLL_SECONDS = 0.25
 # The parent kills at the deadline anyway. The grace only lets the main thread
 # write a terminal ``deadline`` result first, so the watchdog is a backstop and
@@ -122,8 +125,10 @@ def progress_name(i: int) -> str:
     return f"progress-{i:04d}.json"
 
 
-# A child calls these (module attributes, so in-process tests can replace them).
+# Module attributes, so in-process tests can replace them without patching the
+# shared ``os`` module for everything else in the process.
 _hard_exit = os._exit
+_replace = os.replace
 
 
 class _ChunkFailure(Exception):
@@ -147,15 +152,19 @@ def _atomic_write(path: Path | str, data: bytes) -> None:
 
     The temp file sits in the same directory (``os.replace`` is only atomic
     within a filesystem) and is removed if anything fails.
+
+    There is deliberately no ``fsync``. The threat model is the child being
+    SIGKILLed (by the parent's deadline, or by the OOM killer): the kernel page
+    cache survives that, so a completed ``write`` + ``replace`` is visible to the
+    parent. A machine crash would lose the scratch dir anyway -- it is deleted
+    after every phase and never read across boots.
     """
     path = Path(path)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         with open(tmp, "wb") as f:
             f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
+        _replace(tmp, path)
     except BaseException:
         try:
             tmp.unlink()
@@ -252,10 +261,18 @@ def _render_chunk_inner(
     attempts: list[dict[str, Any]] = []
 
     def save() -> None:
-        _atomic_write_json(
-            scratch / progress_name(i),
-            {"schema": SCHEMA, "index": i, "attempts": attempts},
-        )
+        # Best effort: progress is telemetry. A failed write must not fail a
+        # chunk whose audio is fine. (The chunk PCM and result.json are strict.)
+        try:
+            _atomic_write_json(
+                scratch / progress_name(i),
+                {"schema": SCHEMA, "index": i, "attempts": attempts},
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"gemini-phase: progress-{i:04d}.json not saved: {exc!r}",
+                file=sys.stderr,
+            )
 
     def remaining() -> float:
         return deadline - time.monotonic()
@@ -272,6 +289,10 @@ def _render_chunk_inner(
     last_problem = "no attempt made"
 
     while True:
+        # First, so a sibling's failure is never overtaken by a consequence of
+        # the same failure (a spurious "deadline" or "exhausted" of our own).
+        if abort.is_set():
+            raise _ChunkAborted()
         if tts_calls >= MAX_TTS_CALLS:
             raise _ChunkFailure(
                 REASON_EXHAUSTED,
@@ -349,8 +370,8 @@ def _render_chunk_inner(
 
         if verdict.status == "pass":
             attempt["outcome"] = "verified"
+            save()  # the ASR record first: it must survive a kill during the PCM write
             _atomic_write(scratch / chunk_name(i), pcm)
-            save()
             return {
                 "index": i,
                 "file": chunk_name(i),
@@ -411,7 +432,16 @@ def _result_failed(
 
 
 def _describe(exc: BaseException) -> str:
-    return f"{type(exc).__name__}: {exc}"
+    """``exc`` with its traceback, capped at ``ERROR_DETAIL_CHARS``; also logged.
+
+    The tail is kept when capping: a traceback ends with the exception line,
+    which is the part that names the problem.
+    """
+    text = "".join(traceback.format_exception(exc)).rstrip()
+    print(f"gemini-phase child error:\n{text}", file=sys.stderr, flush=True)
+    if len(text) > ERROR_DETAIL_CHARS:
+        text = "...[truncated]\n" + text[-ERROR_DETAIL_CHARS:]
+    return text
 
 
 def _execute(
@@ -438,7 +468,9 @@ def _execute(
             events.put(("aborted", i, None))
         except _ChunkFailure as exc:
             events.put(("failed", i, exc))
-        except Exception as exc:  # noqa: BLE001 -- a bug in a chunk job
+        except BaseException as exc:  # noqa: BLE001 -- a bug in a chunk job
+            # BaseException too: a worker that dies must surface as child_error
+            # now, not leave the main thread waiting out the whole budget.
             abort.set()
             events.put(("error", i, exc))
 
@@ -550,23 +582,35 @@ def _child_main(
     """Spawn target. Module-level, with only picklable arguments.
 
     Starts the watchdog (before the bootstrap, so a hung bootstrap is bounded
-    too), runs the bootstrap, then ``_run_child``, then exits with ``os._exit``:
+    too), runs the bootstrap, then ``_run_child``, then exits with ``os._exit``
+    from a ``finally`` (so also after ``KeyboardInterrupt``/``SystemExit``):
     exit code 0 once a result is on disk, 1 if not even a ``child_error`` result
     could be written (the parent then reports ``child_no_result``). Code 3 is
-    the watchdog's.
+    the watchdog's. stdout/stderr are flushed first, since ``os._exit`` skips it.
     """
-    code = 0
+    code = 1  # until a result is on disk
     try:
-        _start_watchdog(parent_pid, deadline)
-        if bootstrap is not None:
-            bootstrap()
-        _run_child(chunks, leaf, deadline, scratch, factories)
-    except Exception as exc:  # noqa: BLE001
         try:
-            _atomic_write_json(
-                Path(scratch) / RESULT_NAME,
-                _result_failed(REASON_CHILD_ERROR, _describe(exc)),
-            )
-        except Exception:  # noqa: BLE001
-            code = 1
-    _hard_exit(code)
+            _start_watchdog(parent_pid, deadline)
+            if bootstrap is not None:
+                bootstrap()
+            _run_child(chunks, leaf, deadline, scratch, factories)
+            code = 0
+        except Exception as exc:  # noqa: BLE001
+            try:
+                _atomic_write_json(
+                    Path(scratch) / RESULT_NAME,
+                    _result_failed(REASON_CHILD_ERROR, _describe(exc)),
+                )
+                code = 0
+            except Exception:  # noqa: BLE001
+                code = 1
+    finally:
+        # Always exit, whatever was raised: a child that falls out of here would
+        # run the spawn machinery's own teardown and could hang on a stuck thread.
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:  # noqa: BLE001
+                pass
+        _hard_exit(code)
