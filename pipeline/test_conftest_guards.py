@@ -127,10 +127,14 @@ def test_state_db_env_is_redirected_off_persist(tmp_path):
     assert _default_state_db_path() == tmp_path / "state.sqlite3"
 
 
-def test_api_keys_in_the_environment_are_harmless_dummies():
-    assert os.environ["GEMINI_API_KEY"].startswith("dummy")
-    assert os.environ["OPENAI_API_KEY"].startswith("dummy")
-    assert "GOOGLE_API_KEY" not in os.environ
+def test_no_api_key_is_in_the_environment():
+    for var in (
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_GENERATIVE_AI_API_KEY",
+        "OPENAI_API_KEY",
+    ):
+        assert var not in os.environ, var
 
 
 # --- the _block_real_* guards record, so a swallowed refusal still fails -------
@@ -168,6 +172,12 @@ def _telegram():
     alerts.requests.post("http://127.0.0.1:1/")
 
 
+def _genai_client():
+    from google import genai
+
+    genai.Client(api_key="k")
+
+
 def _article_fetch():
     from pipeline import fp_collector
 
@@ -176,7 +186,7 @@ def _article_fetch():
 
 @pytest.mark.parametrize(
     "call",
-    [_openai, _gemini_tts, _gemini_asr, _telegram, _article_fetch],
+    [_openai, _gemini_tts, _gemini_asr, _telegram, _article_fetch, _genai_client],
     ids=lambda f: f.__name__.strip("_"),
 )
 def test_a_swallowed_guard_refusal_is_still_recorded(call, _guard_violations):
@@ -206,3 +216,24 @@ def test_recorded_guard_violation_fails_the_test_at_teardown(tmp_path):
     assert out.returncode != 0
     assert "1 passed" in out.stdout and "1 error" in out.stdout
     assert "1 guarded call(s)" in out.stdout and "boom" in out.stdout
+
+
+def test_genai_client_aimed_at_loopback_is_let_through():
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(
+        api_key="k", http_options=types.HttpOptions(base_url="http://127.0.0.1:9")
+    )
+    client.close()
+
+
+def test_genai_client_stub_by_a_test_wins_over_the_guard(_guard_violations):
+    from unittest.mock import patch
+
+    with patch("google.genai.Client") as stub:
+        from google import genai
+
+        genai.Client(api_key="k")
+    assert stub.called
+    assert _guard_violations == []

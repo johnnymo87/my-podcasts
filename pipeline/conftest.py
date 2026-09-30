@@ -52,7 +52,10 @@ def persist_write_guard():
     ``//persist/...`` (POSIX keeps two leading slashes distinct, ``abspath``
     does not collapse them); a relative path resolved against a cwd under
     /persist; a path reached through a symlink (``..`` is resolved lexically,
-    symlinks are not); and a ``TMPDIR`` that points under /persist. It is a
+    symlinks are not); a ``TMPDIR`` that points under /persist; a ``sqlite3``
+    URI (``file:/persist/x?mode=rwc`` with ``uri=True``, which is not a path);
+    and any call that takes ``dir_fd=`` (the path is then relative to a
+    descriptor, not to a location this check can see). It is a
     tripwire for the ordinary accidents (an unredirected archive root, a
     default cache dir, a state DB), not a defence against a hostile test.
     """
@@ -425,16 +428,80 @@ def _isolate_state_db(tmp_path, monkeypatch):
     monkeypatch.setenv("MY_PODCASTS_STATE_DB", str(tmp_path / "state.sqlite3"))
 
 
-@pytest.fixture(autouse=True)
-def _harmless_api_keys(monkeypatch):
-    """No test process, nor any child it spawns, holds a real API key.
+_API_KEY_VARS = (
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_GENERATIVE_AI_API_KEY",
+    "OPENAI_API_KEY",
+)
 
-    A spawned child inherits ``os.environ``; if the developer's shell exports a
-    real ``GEMINI_API_KEY`` (or ``GOOGLE_API_KEY``, which the genai SDK also
-    reads), a child whose fake is bypassed by a bug could spend money. Dummies
-    make that request fail authentication instead. Tests that need a specific
-    value set it themselves; their setenv wins.
+
+@pytest.fixture(autouse=True)
+def _no_api_keys(monkeypatch):
+    """No test, nor any child it spawns, holds an API key.
+
+    Two failures this prevents, both seen on this suite:
+
+    - On a developer box the real ``GEMINI_API_KEY`` is exported, so a test that
+      reaches a Gemini helper without stubbing it makes a real, billable call.
+    - A *dummy* key is worse than none: code that early-exits on a missing key
+      (``freshness``, ``source_cache``) stops early on a host with no key but
+      proceeds to a real request with a dummy one, so the suite's behaviour
+      would differ between a laptop and CI.
+
+    Deleting them makes "no key" the one state every host shares. A test that
+    needs a key sets its own (``monkeypatch.setenv``); its setenv wins. The
+    spawned child of the Gemini-phase tests gets a dummy from ``deny_network``.
     """
-    monkeypatch.setenv("GEMINI_API_KEY", "dummy-gemini-key-for-tests")
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "dummy-openai-key-for-tests")
+    for var in _API_KEY_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+def _loopback_client(kwargs: dict) -> bool:
+    """Is this ``genai.Client(...)`` aimed at a local test server?"""
+    options = kwargs.get("http_options")
+    base = getattr(options, "base_url", None) or (
+        options.get("base_url") if isinstance(options, dict) else None
+    )
+    if not isinstance(base, str):
+        return False
+    from urllib.parse import urlsplit
+
+    return urlsplit(base).hostname in ("127.0.0.1", "localhost", "::1")
+
+
+@pytest.fixture(autouse=True)
+def _block_real_genai_clients(request, _guard_violations):
+    """No test may construct a real ``google.genai.Client`` (every call is billable).
+
+    Six pipeline modules build one inline (``freshness``, ``source_cache``,
+    ``fp_editor``, ``things_happen_editor``, ``blog_poller``, ``tts.asr``), each
+    inside a ``try/except Exception`` that degrades quietly -- which is how the
+    suite came to make ~80 real HTTPS calls to Google per run without a single
+    failure. Patched at ``google.genai.Client`` itself, so every module is
+    covered, and recorded so a swallowed refusal still fails the test.
+
+    A client aimed at a loopback ``base_url`` (the local ASR test server) is let
+    through. Tests that stub the client themselves (``patch("...genai.Client")``)
+    nest inside this and win.
+    """
+    if request.node.get_closest_marker("allow_network"):
+        yield
+        return
+    from google import genai
+
+    real = genai.Client
+    refuse = _refusal(
+        _guard_violations,
+        "A test tried to build a real google.genai Client (a billable call). "
+        "Stub the Gemini-calling helper of the code under test, or patch "
+        "<module>.genai.Client.",
+    )
+
+    def guarded(*args, **kwargs):
+        if _loopback_client(kwargs):
+            return real(*args, **kwargs)
+        return refuse(*args, **kwargs)
+
+    with patch.object(genai, "Client", guarded):
+        yield

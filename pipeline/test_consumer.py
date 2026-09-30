@@ -22,6 +22,9 @@ def _no_outbound_side_channels(monkeypatch):
     ``pipeline.alerts.send_alert`` themselves; that patch nests inside this one.
     """
     monkeypatch.setattr("pipeline.blog_poller.poll_all_blogs", lambda store, r2: None)
+    # consume_forever records the poll time in a module global; monkeypatch puts
+    # it back, so the stub cannot change what a later test in the session sees.
+    monkeypatch.setattr("pipeline.consumer._last_blog_poll", 0.0)
     monkeypatch.setattr("pipeline.alerts.send_alert", lambda *a, **k: True)
 
 
