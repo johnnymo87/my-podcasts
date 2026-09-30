@@ -22,7 +22,7 @@
    - Writes the finished briefing script to `<work_dir>/script.txt`
    - Session is deleted on completion or failure
 
-5. **TTS + publish** (`pipeline/things_happen_processor.py`): Reads script from `/tmp/things-happen-<job_id>.txt`, runs `ttsjoin` (model: tts-1-hd, voice: nova), uploads MP3 to `episodes/things-happen/<date>-things-happen.mp3`, inserts episode, regenerates feeds.
+5. **TTS + publish** (`pipeline/things_happen_processor.py`): Reads script from `/tmp/things-happen-<job_id>.txt`, renders via `pipeline.tts.render_episode` (OpenAI model: tts-1-hd, voice: nova), uploads MP3 to `episodes/things-happen/<date>-things-happen.mp3`, inserts episode, regenerates feeds.
 
 ## Key modules
 
