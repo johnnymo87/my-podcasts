@@ -128,8 +128,12 @@ The inline text above stays; where it disagrees with these, these win.
   counter: at most 3 TTS calls and 2 ASR calls per chunk.
 - **429 is fatal only with confirmed daily/billing `QuotaFailure` detail.** `RESOURCE_EXHAUSTED`
   alone is transient.
-- **The bound** is the 6-minute Gemini budget plus a reap margin (time to kill and join the
-  child). `send_alert` is synchronous, so it counts against the caller, not the budget.
+- **The bound** is the 6-minute Gemini budget plus one poll interval (0.2 s) plus ONE bounded reap
+  (5 s, shared by the deadline path and the cleanup, never paid twice). Child startup (about 1.4 s
+  to import `google.genai`, several times that on a loaded host) is *inside* the budget, because
+  the deadline is one absolute `time.monotonic()` value taken before the child starts. A
+  per-render worst case is therefore about 6 minutes 6 seconds of Gemini phase, then the OpenAI
+  fallback (itself bounded by its per-chunk retries) and the alert wait below.
 - **Config shape** is the `primary`/`fallback` pair of typed leaves, not flat provider fields.
 - **Gemini WAVs carry a trailing C2PA chunk** after `data` (about 6 KB, RIFF size covers it), so
   the audio is the declared frames read via `wave`, never "everything after 44 bytes".
@@ -144,6 +148,32 @@ The inline text above stays; where it disagrees with these, these win.
   alerts.
 - **Manual-publish defaults stay `nova`** (`publish_script`, CLI `--voice`) on every feed until
   T6 (`my-podcasts-9p3.7`) makes them fall through to `FEED_VOICES`.
+
+#### Amendments (T3b implementation, 2026-09-30)
+
+- **The alert is bounded.** `send_alert` has a 10 s timeout per read, not a wall-clock bound, so
+  the parent runs it in a daemon thread and `join`s for at most `ALERT_WAIT_SECONDS = 12.0`; after
+  that it moves on and the thread is abandoned. The manifest's `alert_sent` records `true`,
+  `false` or `"timeout"` (`null` = no alert attempted). This replaces the earlier "synchronous,
+  counts against the caller" wording. The alert is sent by the parent only, after the fallback
+  attempt (also when that attempt fails), never on a cache hit, never when there is no fallback,
+  and not at all with `notify_fallback=False` (local tools and `publish-script --dry-run`).
+- **The fallback-reason set is closed:** `fatal`, `exhausted`, `deadline`, `asr_unavailable`,
+  `second_omission`, `child_error`, `child_no_result`, `invalid_result`, `spawn_failed`. The
+  parent rejects any other value the child reports as `invalid_result`.
+- **The parent validates before it uses any audio.** The child's `result.json` is a claim. On
+  `ok` the parent requires indices exactly `0..n-1` in order, the canonical file name for each,
+  every file present, byte counts matching, non-empty and even (whole 16-bit samples), and the
+  sha256 matching. Any mismatch is `invalid_result` and no Gemini audio is used. A result that
+  lands as the deadline expires is still read (once, after the kill) and still validated.
+- **`RENDERER_VERSION` stays `"2"`.** The OpenAI path is byte-identical and no Gemini cache
+  entries exist yet, so nothing needed invalidating.
+- **Re-chunking for the fallback yields the same boundaries.** `chunk_text`'s 3000-character
+  target is fixed; the `ceiling` argument (3000 for Gemini, 4096 for OpenAI) is only a backstop.
+  The fallback still chunks afresh from the whole text and reuses no Gemini chunk or audio.
+- **Cache entries carry the fallback.** A fallback render is stored as `provider=openai`,
+  `verification=not_run_openai`, `fallback_reason=<reason>`; a replay returns it (with the stored
+  `fallback_reason` on `RenderResult`) without running the phase or alerting again.
 
 ### Completed-render reuse
 
