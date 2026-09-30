@@ -841,9 +841,9 @@ def publish_script_command(
         date_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
 
     if dry_run:
-        import subprocess
         import tempfile
 
+        from pipeline import tts
         from pipeline.script_processor import (
             TTS_MODEL,
             apply_title_prelude,
@@ -858,23 +858,19 @@ def publish_script_command(
 
         with tempfile.TemporaryDirectory(prefix="publish-script-dry-") as tmp_dir:
             tmp = Path(tmp_dir)
-            input_txt = tmp / "dry-run.txt"
             output_mp3 = tmp / "dry-run.mp3"
-            input_txt.write_text(tts_text, encoding="utf-8")
 
-            cmd = [
-                "ttsjoin",
-                "--input-file",
-                str(input_txt),
-                "--output-file",
-                str(output_mp3),
-                "--model",
-                TTS_MODEL,
-                "--voice",
-                voice,
-            ]
             click.echo(f"Running TTS (dry run, voice={voice})...")
-            subprocess.run(cmd, check=True)
+            # A dry run touches no state: no manifest, no completed-render cache.
+            tts.render_episode(
+                tts_text,
+                tts.openai_config(model=TTS_MODEL, voice=voice),
+                output_mp3,
+                feed_slug=feed_slug,
+                episode_id="dry-run",
+                manifest_dir=None,
+                cache_dir=None,
+            )
             size = output_mp3.stat().st_size
             click.echo(f"MP3 generated: {output_mp3} ({size} bytes)")
             click.echo("Dry run complete. No episode published.")

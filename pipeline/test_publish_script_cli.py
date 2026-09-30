@@ -1,35 +1,9 @@
 from __future__ import annotations
 
-import subprocess
-from pathlib import Path
-
-import pytest
 from click.testing import CliRunner
 
 from pipeline.__main__ import cli
-
-
-@pytest.fixture
-def captured_tts_input(monkeypatch) -> list[str]:
-    """Stub ttsjoin; return the list its captured input file lands in.
-
-    Reads ``--input-file`` before the CLI's tempdir is torn down, and looks
-    up flags by name rather than position, matching the fixture pattern in
-    ``pipeline/test_processor_prelude.py``.
-    """
-    captured: list[str] = []
-
-    def fake_subprocess_run(cmd, **kwargs):
-        if cmd[0] == "ttsjoin":
-            input_file = Path(cmd[cmd.index("--input-file") + 1])
-            captured.append(input_file.read_text(encoding="utf-8"))
-            output_file = Path(cmd[cmd.index("--output-file") + 1])
-            output_file.write_bytes(b"\xff\xfb\x90\x00" * 100)
-            return subprocess.CompletedProcess(cmd, 0)
-        return subprocess.CompletedProcess(cmd, 0)
-
-    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
-    return captured
+from pipeline.tts import openai_config
 
 
 def test_dry_run_tts_input_opens_with_title(
@@ -83,3 +57,35 @@ def test_dry_run_skips_prelude_for_daily_digests(
     assert res.exit_code == 0, res.output
     assert len(captured_tts_input) == 1
     assert captured_tts_input[0] == body
+
+
+def test_dry_run_renders_with_voice_and_touches_no_state(
+    tmp_path, fake_tts_render
+) -> None:
+    """--voice reaches the renderer; a dry run writes no manifest or cache."""
+    script_file = tmp_path / "script.md"
+    script_file.write_text("This is the episode body.", encoding="utf-8")
+
+    res = CliRunner().invoke(
+        cli,
+        [
+            "publish-script",
+            "--script-file",
+            str(script_file),
+            "--title",
+            "Great Interview",
+            "--feed-slug",
+            "deep-dives",
+            "--voice",
+            "ash",
+            "--dry-run",
+        ],
+    )
+
+    assert res.exit_code == 0, res.output
+    [call] = fake_tts_render
+    assert call["config"] == openai_config(model="tts-1-hd", voice="ash")
+    assert call["feed_slug"] == "deep-dives"
+    assert call["episode_id"] == "dry-run"
+    assert call["manifest_dir"] is None
+    assert call["cache_dir"] is None
