@@ -44,14 +44,22 @@ Quick start and incident-response guide for the two daily podcasts: The Rundown 
 
 `pipeline/tts/` (`render_episode`) replaced `ttsjoin`: chunk the text, fetch OpenAI PCM per chunk, one mp3 encode. Used by every processor, `publish-script`, and the blog poller.
 
-- **Completed renders are cached 14 days** under `/persist/my-podcasts/tts-cache/<key>/`, keyed by exact TTS text + voice/model + `RENDERER_VERSION`. So `jobs reset` on an unchanged script **replays the cached audio**. To force a fresh render of a bad episode, delete that cache entry — its key is the manifest's `cache_key` field.
+- **Completed renders are cached 14 days** under `/persist/my-podcasts/tts-cache/<key>/`, keyed by exact TTS text + the primary/fallback config + `RENDERER_VERSION` (+ `verify.VERIFIER_POLICY` for a Gemini primary). So `jobs reset` on an unchanged script **replays the cached audio**. To force a fresh render of a bad episode, delete that cache entry — its key is the manifest's `cache_key` field.
 - **Per-attempt manifests** at `/persist/my-podcasts/tts-renders/<feed>/<episode_id>-<timestamp>.json` (feed and id sanitized to `[A-Za-z0-9._-]` in the filename; the raw id is in the manifest's `episode_id` field): `status` is `rendered`/`cache_hit`/`failed`, with per-chunk attempts and errors. 60-day retention. Manifest/cache failures never fail a render.
 - **Retries:** up to 3 attempts per chunk (sleeping 2s, then 8s between them) on retryable OpenAI errors; SDK retries are off. A failed render raises into the existing job retry/backoff path unchanged.
+- **`FEED_VOICES` in `pipeline/tts/config.py` is the only place a feed's voice lives.** Presets, blog sources and the daily processors carry none; every call site asks `tts.resolve_render_config(feed_slug, ...)`. An unknown slug gets `nova`. A test (`pipeline/test_feed_voices.py`) pins that every routable slug is a key.
+- **Overrides force OpenAI:** `TTS_VOICE`/`TTS_MODEL` env on the email path, `publish_script(voice=)`, and the CLI `--voice` flags. A field the override leaves out comes from the feed's OpenAI config. An explicitly empty override is a `ValueError`.
+- **`publish_script` and the CLI still default to `nova` on every feed** (fp-digest included), exactly as before, until `my-podcasts-9p3.7` changes the default to fall through to `FEED_VOICES`.
+- **Every feed is OpenAI today.** `GeminiProvider` exists (`providers.py`) but `render_episode` refuses a Gemini primary (`ValueError`, before any cache or manifest work) until `my-podcasts-9p3.11`.
+- **Cache entries carry provenance:** `result.json` is schema 2 (`requested`, `rendered`, `verification`, `fallback_reason`). An entry that fails validation is a miss, and a hit whose `rendered` leaf is neither the request's primary nor its fallback is purged and re-rendered. The manifest's `rendered_config` records what actually produced the audio (`null` on a failed render).
+- **`RENDERER_VERSION` 2 made the cache cold on deploy.** A `jobs reset` right after that deploy re-buys the audio once; later resets replay the cache as before.
+- **Gemini errors (for when it is wired):** an invalid key is HTTP 400 `API_KEY_INVALID`, not 401, so any 400 is fatal (not retried). `GEMINI_API_KEY` is stripped and must be ASCII-printable, else the provider fails fatal without echoing it. A 429 is fatal only with a daily-quota `QuotaFailure`; anything else is retried.
+- **Tests never spend money:** the autouse `_block_real_openai_tts` and `_block_real_gemini_tts` guards in `pipeline/conftest.py` fail any test that builds a real client/session.
 - **Known gap:** a render that fails partway re-buys the earlier chunks on retry (only completed renders are cached) — bead `my-podcasts-9p3.10`.
 
 ### Verifier (T2)
 
-Offline large-omission detector for rendered audio: ASR the audio, align the transcript against the script, report long unmatched spans and recall. **Not wired into `render_episode` yet** (T3 does that); today it is the `tts-verify` CLI and a library.
+Offline large-omission detector for rendered audio: ASR the audio, align the transcript against the script, report long unmatched spans and recall. **Not wired into `render_episode` yet** (T3b, `my-podcasts-9p3.11`, does that); today it is the `tts-verify` CLI and a library.
 
 - **Claimed scope: large omissions only.** It does not detect changed numbers, negations, repetitions, or added speech.
 - **Modules** (`pipeline/tts/`):
@@ -64,7 +72,7 @@ Offline large-omission detector for rendered audio: ASR the audio, align the tra
 - **Saved transcripts are replayable evidence** (audio sha256, script sha256, model, prompt version, per-segment bounds/finish reason/tokens/text). The write happens as soon as ASR completes, atomically, and refuses to overwrite an existing file without `--force`. On replay the `audio_sha256` must match `--audio` (hard error); a `script_sha256` mismatch only prints a WARNING, since replaying against an edited script is a legitimate calibration trick. A plain-text `--transcript` is accepted and reported as `asr.source: external`.
 - **Per-chunk numbers are projected** from one whole-episode alignment; they are diagnostic and differ from what T3 sees when it verifies each synthesized chunk alone (the production-equivalent check is T5's). `est_start_s` is a token-proportional estimate of where a chunk starts in the audio, not a timestamp; it drifts after an omission or a long pause.
 - **Thresholds are placeholders** until T5 calibrates them on real audio-level cuts (`my-podcasts-9p3.5`). Reports echo the thresholds used.
-- **`VERIFIER_VERSION` must be bumped** on any change to normalization, alignment, or default thresholds. The ASR half is `asr.ASR_POLICY` (model, prompt version, generation config); bump `ASR_PROMPT_VERSION` on any prompt text change. T3 must fold `verify.VERIFIER_POLICY` (both halves, also in every verdict and report as `verifier_policy`), not just the version, into the render cache key.
+- **`VERIFIER_VERSION` must be bumped** on any change to normalization, alignment, or default thresholds. The ASR half is `asr.ASR_POLICY` (model, prompt version, generation config); bump `ASR_PROMPT_VERSION` on any prompt text change. `cache.cache_key` folds `verify.VERIFIER_POLICY` (both halves, also in every verdict and report as `verifier_policy`), not just the version, for a Gemini primary; an OpenAI primary never imports it.
 - **ASR costs money** (Gemini audio input). Tests run offline: the autouse `_block_real_gemini_asr` guard in `pipeline/conftest.py` fails any test that builds a real Gemini client.
 - **The SDK timeout is per-read, not wall-clock.** A server that trickles bytes can exceed it many times over; the real bound has to be a kill at the caller (T3's child process).
 
