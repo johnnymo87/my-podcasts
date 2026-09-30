@@ -85,7 +85,6 @@ def render_show_notes_html(show_notes_md: str) -> str:
     )
 
 
-TTS_MODEL = "tts-1-hd"
 DEFAULT_VOICE = "nova"
 DEFAULT_CATEGORY = "Technology"
 SCRIPT_ARCHIVE_ROOT = Path("/persist/my-podcasts/scripts")
@@ -219,7 +218,7 @@ def publish_script(
 
         tts.render_episode(
             tts_text,
-            tts.openai_config(model=TTS_MODEL, voice=voice),
+            tts.resolve_render_config(feed_slug, voice_override=voice),
             output_mp3,
             feed_slug=feed_slug,
             episode_id=episode_slug,

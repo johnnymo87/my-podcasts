@@ -107,8 +107,13 @@ def process_email_bytes(
 
     preset = resolve_preset(route_tag)
     adapter = get_source_adapter(preset.feed_slug)
-    tts_model = os.getenv("TTS_MODEL", preset.tts_model)
-    tts_voice = os.getenv("TTS_VOICE", preset.tts_voice)
+    # Raw env (None when unset): resolve_render_config owns defaults, and an
+    # explicitly empty override is an error rather than "unset".
+    render_config = tts.resolve_render_config(
+        preset.feed_slug,
+        voice_override=os.getenv("TTS_VOICE"),
+        model_override=os.getenv("TTS_MODEL"),
+    )
 
     episode_slug = f"{date_str}-{subject_slug}"
     episode_r2_key = f"episodes/{preset.feed_slug}/{episode_slug}.mp3"
@@ -143,7 +148,7 @@ def process_email_bytes(
 
         tts.render_episode(
             body,
-            tts.openai_config(model=tts_model, voice=tts_voice),
+            render_config,
             output_mp3,
             feed_slug=preset.feed_slug,
             episode_id=episode_slug,
