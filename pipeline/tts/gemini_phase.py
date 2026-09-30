@@ -126,8 +126,12 @@ SCHEMA = 1
 RESULT_NAME = "result.json"
 STARTED_NAME = "started.json"
 POLL_SECONDS = 0.2  # parent: how often to look for result.json
-STALE_SCRATCH_SECONDS = 6 * 3600  # older gemini-phase-* dirs are swept
+# Older gemini-phase-* dirs are swept. Must dwarf GEMINI_BUDGET_SECONDS, or the
+# sweep could delete a live phase's scratch dir (asserted just below).
+STALE_SCRATCH_SECONDS = 6 * 3600
 SCRATCH_PREFIX = "gemini-phase-"
+if STALE_SCRATCH_SECONDS < 10 * GEMINI_BUDGET_SECONDS:  # survives python -O
+    raise RuntimeError("the stale-scratch sweep could delete a live phase's dir")
 
 
 def chunk_name(i: int) -> str:
@@ -1005,6 +1009,13 @@ def run_gemini_phase(
     finally:
         # The child is dead before the scratch dir goes: a live child writing
         # into a deleted directory is how a stray file would outlive a phase.
+        #
+        # By design, a KeyboardInterrupt that lands inside ``proc.start()`` leaves
+        # ``started`` False, so the child is not reaped here. If the fork did
+        # happen, that child is a self-terminating orphan: its watchdog sees the
+        # parent gone (or the deadline pass) and exits, and the next phase's
+        # stale sweep removes its scratch dir. Reaping a process whose start
+        # never returned would mean guessing at a half-built Process object.
         child_dead = True
         if started:  # a process whose start() never returned is not reaped
             try:

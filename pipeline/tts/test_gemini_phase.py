@@ -1402,31 +1402,29 @@ def _old(path: Path, age_s: float) -> None:
 
 
 def test_stale_scratch_dirs_are_swept_but_fresh_and_foreign_ones_are_not(phase):
-    roots_holder = {}
-
     def make(a):
         return FakeProc(a, on_start=run_child_inline, exits=True)
 
-    # Pre-create the root with stale/fresh/foreign entries, via a first phase.
-    outcome, _, roots = phase(make)
-    roots.mkdir(exist_ok=True)
+    _, _, roots = phase(make)  # creates the (empty) scratch root
     stale = roots / "gemini-phase-stale"
     fresh = roots / "gemini-phase-fresh"
     foreign = roots / "someone-elses-dir"
-    foreign_old_file = roots / "gemini-phase-but-a-file"
+    a_file = roots / "gemini-phase-but-a-file"
     for d in (stale, fresh, foreign):
         d.mkdir()
         (d / "chunk-0000.pcm").write_bytes(b"\x00\x00")
-    foreign_old_file.write_text("x")
-    _old(stale, gp.STALE_SCRATCH_SECONDS + 60)
-    _old(foreign, gp.STALE_SCRATCH_SECONDS + 60)
-    _old(foreign_old_file, gp.STALE_SCRATCH_SECONDS + 60)
-    roots_holder["roots"] = roots
+    a_file.write_text("x")
+    for old in (stale, foreign, a_file):
+        _old(old, gp.STALE_SCRATCH_SECONDS + 60)
 
     outcome, _, _ = phase(make)
     assert outcome.ok
     assert not stale.exists()
-    assert fresh.exists() and foreign.exists() and foreign_old_file.exists()
+    assert fresh.exists() and foreign.exists() and a_file.exists()
+
+
+def test_the_stale_threshold_dwarfs_the_phase_budget():
+    assert gp.STALE_SCRATCH_SECONDS >= 10 * gp.GEMINI_BUDGET_SECONDS
 
 
 def test_sweeping_never_raises(tmp_path, monkeypatch):
