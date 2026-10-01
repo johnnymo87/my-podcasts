@@ -58,7 +58,8 @@ _EXCERPT_TOKENS = 30
 
 @dataclass(frozen=True)
 class VerifyThresholds:
-    """Calibrated in T5 (``DEFAULT_THRESHOLDS``, verifier v2).
+    """The T5-calibrated thresholds (verifier v2) plus the v3 ``recall_min_tokens``
+    padding described below (``DEFAULT_THRESHOLDS``).
 
     Chosen on labeled audio-level evidence, not guessed; the evidence, its
     scope and its limits are in ``docs/plans/2026-09-30-gemini-tts-t5-evidence.md``.
@@ -120,7 +121,14 @@ def _recall_fails(matched: int, total: int, th: VerifyThresholds) -> bool:
     ``recall_min_tokens``. For ``total >= recall_min_tokens`` this is exactly
     ``matched / total < recall_floor`` (the v2 rule, same float expression),
     so long-chunk verdicts are unchanged; below it the floor is an absolute
-    bound of ``(1 - recall_floor) * recall_min_tokens`` unmatched tokens."""
+    bound of ``(1 - recall_floor) * recall_min_tokens`` unmatched tokens.
+
+    Documented limit: with the defaults this can never fire on a chunk of 15
+    tokens or fewer (unmatched <= total <= 15). A wholly dropped chunk of 6-15
+    tokens is still caught by the net-deficit span rule (net_missing >= 6), but
+    a wholly dropped chunk of 5 or fewer tokens, which v2 flagged, now passes at
+    chunk level. That needs a tiny ``chunk_text`` tail, and 5 tokens is below
+    the span rule's own floor anyway."""
     if total <= 0:
         return False
     padded = max(total, th.recall_min_tokens)

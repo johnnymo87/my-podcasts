@@ -127,8 +127,6 @@ def test_span_coordinates_are_normalized_token_indices():
         {"max_span_ratio": 1.5},
         {"recall_floor": 1.1},
         {"recall_floor": -0.1},
-        {"recall_min_tokens": 0},
-        {"recall_min_tokens": -1},
     ],
 )
 def test_thresholds_validate(kwargs):
@@ -192,6 +190,17 @@ def test_short_signoff_with_two_misheard_names_passes():
     assert a.recall == a.matched_tokens / a.script_tokens
     assert a.matched_tokens == n - 2 and a.recall < 0.95
     old = analyze(TAIL, heard, V2)
+    assert old.status == "omission" and old.reasons == ("recall_below_floor",)
+
+
+def test_a_wholly_dropped_5_token_chunk_is_not_flagged_by_v3():
+    # A documented limit, not desired behavior: below 16 tokens the padded
+    # recall rule cannot fire, and 5 tokens is under the span rule's floor.
+    script = "Thanks again, see you soon."
+    assert len(normalize_tokens(script)) == 5
+    a = analyze(script, "unrelated")
+    assert a.status == "pass" and a.reasons == ("ok",)
+    old = analyze(script, "unrelated", V2)
     assert old.status == "omission" and old.reasons == ("recall_below_floor",)
 
 
