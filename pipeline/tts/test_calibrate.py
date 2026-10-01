@@ -3,6 +3,7 @@ import json
 import random
 import struct
 import sys
+from array import array
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,13 +17,16 @@ from pipeline.tts.calibrate import (
     MULTI_MIN_GAP_TOKENS,
     MULTI_TOTAL,
     BaseLabel,
+    CutInterval,
     CutSpec,
     EvalRecord,
     SimSpec,
+    boundary_eligibility,
     choose_cuts,
     cut_pcm,
     default_grid,
     evaluate,
+    finalize_cut,
     map_words_to_script,
     read_wav,
     reconstruction,
@@ -30,6 +34,7 @@ from pipeline.tts.calibrate import (
     replay,
     screen_base,
     simulate,
+    verify_cut_audio,
 )
 from pipeline.tts.config import PCM_SAMPLE_RATE
 from pipeline.tts.normalize import normalize_tokens
@@ -71,8 +76,17 @@ def ramp_pcm(n_samples: int) -> bytes:
     return b"".join(struct.pack("<h", i % 30000) for i in range(n_samples))
 
 
+def ts(whisper: dict) -> int:
+    """The sample count of the audio a fake whisper response describes."""
+    return round(whisper["duration"] * RATE)
+
+
+def screen(text, whisper, **kw) -> BaseLabel:
+    return screen_base(text, whisper, total_samples=ts(whisper), **kw)
+
+
 def faithful(text=SCRIPT, base_id="b0", **kw) -> BaseLabel:
-    lab = screen_base(text, fake_whisper(text, **kw), base_id=base_id)
+    lab = screen(text, fake_whisper(text, **kw), base_id=base_id)
     assert lab.label == "faithful", lab.reasons
     return lab
 
@@ -240,7 +254,7 @@ def test_faithful_base(base):
 
 def test_dropped_stretch_is_suspect_with_a_clip_window():
     drop = range(300, 330)
-    lab = screen_base(SCRIPT, fake_whisper(SCRIPT, drop=drop), base_id="x")
+    lab = screen(SCRIPT, fake_whisper(SCRIPT, drop=drop), base_id="x")
     assert lab.label == "suspect"
     assert "net_missing_span" in lab.reasons
     (span,) = lab.suspect_spans
@@ -254,8 +268,8 @@ def test_dropped_stretch_is_suspect_with_a_clip_window():
 
 
 def test_net_missing_5_is_faithful_6_is_suspect():
-    five = screen_base(SCRIPT, fake_whisper(SCRIPT, drop=range(300, 305)))
-    six = screen_base(SCRIPT, fake_whisper(SCRIPT, drop=range(300, 306)))
+    five = screen(SCRIPT, fake_whisper(SCRIPT, drop=range(300, 305)))
+    six = screen(SCRIPT, fake_whisper(SCRIPT, drop=range(300, 306)))
     assert five.label == "faithful"
     assert six.label == "suspect"
 
@@ -263,27 +277,38 @@ def test_net_missing_5_is_faithful_6_is_suspect():
 def test_low_recall_alone_is_suspect():
     # one garbled word in 12: spans stay short but recall falls under 0.95
     sub = range(5, 800, 12)
-    lab = screen_base(SCRIPT, fake_whisper(SCRIPT, substitute=sub))
+    lab = screen(SCRIPT, fake_whisper(SCRIPT, substitute=sub))
     assert lab.label == "suspect"
     assert lab.reasons == ("recall_below_0.95",)
     assert lab.suspect_spans == ()
 
 
 def test_empty_script_and_empty_whisper_are_suspect():
-    assert screen_base("... --", fake_whisper("hello there")).reasons == (
-        "empty_script",
-    )
-    lab = screen_base("hello there my friend", {"words": [], "duration": 1.0})
+    assert screen("... --", fake_whisper("hello there")).reasons == ("empty_script",)
+    lab = screen_base("hello there my friend", {"words": []}, total_samples=RATE)
     assert lab.label == "suspect" and lab.recall == 0.0
 
 
-def test_total_samples_default_and_override():
+def test_total_samples_is_required_and_comes_from_the_caller():
     w = fake_whisper("alpha beta gamma delta")
-    assert screen_base("alpha beta gamma delta", w).total_samples == round(
-        w["duration"] * RATE
-    )
-    lab = screen_base("alpha beta gamma delta", w, total_samples=12345)
-    assert lab.total_samples == 12345
+    with pytest.raises(TypeError):
+        screen_base("alpha beta gamma delta", w)  # type: ignore[call-arg]
+    lab = screen_base("alpha beta gamma delta", w, total_samples=ts(w) + 777)
+    assert lab.total_samples == ts(w) + 777
+
+
+def test_bare_words_list_works():
+    w = fake_whisper("alpha beta gamma delta")
+    lab = screen_base("alpha beta gamma delta", w["words"], total_samples=ts(w))
+    assert lab.label == "faithful" and lab.total_samples == ts(w)
+
+
+def test_whisper_that_outruns_the_pcm_is_rejected():
+    w = fake_whisper("alpha beta gamma delta")
+    with pytest.raises(ValueError, match="longer than"):
+        screen_base("alpha beta gamma delta", w, total_samples=RATE // 4)
+    with pytest.raises(ValueError):
+        screen_base("alpha", w, total_samples=0)
 
 
 def test_base_label_roundtrips_through_json(base):
@@ -298,8 +323,13 @@ def test_base_label_roundtrips_through_json(base):
 ST = calibrate._structure(SCRIPT)
 
 
-def _check_invariants(spec: CutSpec, base: BaseLabel):
+def _mid(w) -> int:
+    return round((w.start + w.end) / 2 * RATE)
+
+
+def _check_invariants(spec: CutSpec, base: BaseLabel, *, finalized=False):
     assert spec.base_id == base.base_id and spec.base_samples == base.total_samples
+    assert spec.sample_rate == base.sample_rate
     last_end = 0
     for iv in spec.intervals:
         # boundary tokens are exactly matched
@@ -307,17 +337,39 @@ def _check_invariants(spec: CutSpec, base: BaseLabel):
         assert base.word_map[iv.script_end - 1].exact
         # label text is the literal script text and its normalized length
         assert iv.literal
-        assert iv.removed_text in SCRIPT
+        assert iv.removed_text in base.script_text
         assert (
-            normalize_tokens(iv.removed_text) == TOKENS[iv.script_start : iv.script_end]
+            tuple(normalize_tokens(iv.removed_text))
+            == base.script_tokens[iv.script_start : iv.script_end]
         )
         assert iv.normalized_tokens == iv.script_end - iv.script_start
-        # cut points sit in the gaps next to the first/last word, never inside one
-        w0, w1 = base.words[iv.first_word], base.words[iv.last_word]
-        assert iv.sample_start <= round(w0.start * RATE)
-        assert iv.sample_end >= round(w1.end * RATE)
-        prev_end = base.words[iv.first_word - 1].end if iv.first_word else 0.0
-        assert iv.sample_start >= round(prev_end * RATE)
+        # Every cut point (nominal AND snapped) lies between the nominal
+        # midpoints of the adjacent words: the cut never removes a sample from
+        # inside the first half of the kept word before it, nor the second
+        # half of the one after, and never keeps the boundary word's far half.
+        w = base.words
+        first, last = w[iv.first_word], w[iv.last_word]
+        lo0 = _mid(w[iv.first_word - 1]) if iv.first_word else 0
+        hi0 = _mid(first)
+        lo1 = _mid(last)
+        hi1 = (
+            _mid(w[iv.last_word + 1])
+            if iv.last_word + 1 < len(w)
+            else base.total_samples
+        )
+        assert (iv.start_bounds, iv.end_bounds) == ((lo0, hi0), (lo1, hi1))
+        for point in (iv.nominal_start, iv.sample_start):
+            assert lo0 <= point <= hi0
+        for point in (iv.nominal_end, iv.sample_end):
+            assert lo1 <= point <= hi1
+        assert iv.nominal_start <= round(first.start * RATE)
+        assert iv.nominal_end >= round(last.end * RATE)
+        assert iv.snapped is finalized
+        if not finalized:
+            assert (iv.sample_start, iv.sample_end) == (
+                iv.nominal_start,
+                iv.nominal_end,
+            )
         assert iv.sample_start < iv.sample_end <= base.total_samples
         assert iv.sample_start >= last_end
         last_end = iv.sample_end
@@ -474,7 +526,7 @@ def test_boundaries_avoid_inexact_tokens():
     # whisper garbles every other word in 100..299: nothing there may bound a cut
     bad = range(100, 300, 2)
     lab = replace(
-        screen_base(SCRIPT, fake_whisper(SCRIPT, substitute=bad), base_id="g"),
+        screen(SCRIPT, fake_whisper(SCRIPT, substitute=bad), base_id="g"),
         label="faithful",
     )
     for seed in range(40):
@@ -485,7 +537,7 @@ def test_boundaries_avoid_inexact_tokens():
 
 
 def test_choose_cuts_rejects_bad_requests_and_reports_impossible(base):
-    suspect = screen_base(SCRIPT, fake_whisper(SCRIPT, drop=range(300, 330)))
+    suspect = screen(SCRIPT, fake_whisper(SCRIPT, drop=range(300, 330)))
     with pytest.raises(ValueError, match="faithful"):
         choose_cuts(suspect, "start", 10, rng())
     with pytest.raises(ValueError, match="family"):
@@ -519,6 +571,9 @@ def test_number_tokens_never_bound_a_cut():
 def test_cut_spec_apply_matches_its_labels(base):
     spec = choose_cuts(base, "sentence", 20, rng(5))
     pcm = ramp_pcm(base.total_samples)
+    with pytest.raises(ValueError, match="finalize_cut"):
+        spec.apply(pcm)
+    spec = finalize_cut(spec, pcm)
     remaining, clips = spec.apply(pcm)
     assert len(remaining) == 2 * (base.total_samples - spec.removed_samples)
     assert len(clips) == len(spec.intervals)
@@ -647,10 +702,22 @@ R_TOKENS = normalize_tokens(R_TEXT)
 
 
 def _label(intervals):
-    from pipeline.tts.calibrate import CutInterval
-
     ivs = tuple(
-        CutInterval(s, e, e - s, 0, 0, 0, 1, " ".join(R_TOKENS[s:e]), True)
+        CutInterval(
+            script_start=s,
+            script_end=e,
+            normalized_tokens=e - s,
+            first_word=0,
+            last_word=0,
+            sample_start=0,
+            sample_end=1,
+            removed_text=" ".join(R_TOKENS[s:e]),
+            literal=True,
+            nominal_start=0,
+            nominal_end=1,
+            start_bounds=(0, 1),
+            end_bounds=(0, 1),
+        )
         for s, e in intervals
     )
     return CutSpec(
@@ -803,8 +870,8 @@ def test_evaluate_counts_detection_false_alarms_and_availability_separately():
         "n": 3,
         "caught": 1,
         "missed": 1,
+        "caught_localized": 1,
         "unavailable": 1,
-        "localized": 1,
     }
     assert cuts["missed"] == ["c2"]
     assert cuts["by_split"]["dev"]["caught"] == 1
@@ -813,7 +880,7 @@ def test_evaluate_counts_detection_false_alarms_and_availability_separately():
         "caught": 0,
         "missed": 0,
         "unavailable": 1,
-        "localized": 0,
+        "caught_localized": 0,
     }
     assert cuts["by_family"]["mid_fluent"]["n"] == 3
     assert cuts["by_family_size"]["mid_fluent/40"]["n"] == 3
@@ -856,13 +923,91 @@ def test_unavailable_is_never_counted_as_a_catch():
         "caught": 0,
         "missed": 0,
         "unavailable": 1,
-        "localized": 0,
+        "caught_localized": 0,
     }
 
 
 def test_evaluate_with_no_records_is_all_zero():
     (res,) = evaluate([], [DEFAULT_THRESHOLDS])
     assert res["cuts"]["overall"]["n"] == 0 and res["bases"]["overall"]["bases"] == 0
+
+
+def _good_records():
+    mid = (len(TOKENS) - 40) // 2
+    cut = {"family": "mid_fluent", "size_bin": 40, "removed": ((mid, mid + 40),)}
+    return [
+        _rec("b1:r0", "base", " ".join(TOKENS)),
+        _rec("b1:r1", "base", " ".join(TOKENS), repeat=1),
+        _rec("c1", "cut", _SIM_PLAIN.text, **cut),
+    ]
+
+
+def _acceptance(records, th=DEFAULT_THRESHOLDS):
+    (res,) = evaluate(records, [th])
+    return res["acceptance_ok"], res["acceptance"], res
+
+
+def test_acceptance_needs_every_base_to_pass_every_repeat_and_every_cut_localized():
+    ok, detail, res = _acceptance(_good_records())
+    assert ok is True and res["cuts"]["overall"]["caught_localized"] == 1
+    assert detail == {
+        "base_false_alarms": 0,
+        "base_unavailable": 0,
+        "cuts_not_caught_localized": 0,
+        "cut_unavailable": 0,
+    }
+    # one repeat of one base false-alarms
+    bad = [
+        *_good_records(),
+        _rec("b1:r2", "base", " ".join(TOKENS[100:400]), base_id="b1", repeat=2),
+    ]
+    ok, detail, _ = _acceptance(bad)
+    assert not ok and detail["base_false_alarms"] == 1
+    # an unavailable base, or an unavailable cut, is reported on its own and fails
+    ok, detail, _ = _acceptance(
+        [*_good_records(), _rec("b9", "base", None, unavailable="asr_timeout")]
+    )
+    assert (
+        not ok and detail["base_unavailable"] == 1 and detail["base_false_alarms"] == 0
+    )
+    cut = {"family": "end", "size_bin": 10, "removed": ((0, 10),)}
+    ok, detail, _ = _acceptance(
+        [*_good_records(), _rec("c9", "cut", None, unavailable="asr_error", **cut)]
+    )
+    assert not ok and detail["cut_unavailable"] == 1
+    assert detail["cuts_not_caught_localized"] == 1
+
+
+def test_a_catch_by_recall_alone_is_caught_but_not_localized_and_fails_acceptance():
+    # the flagged span is real but far from where the cut was declared
+    elsewhere = {"family": "start", "size_bin": 40, "removed": ((0, 40),)}
+    recs = [
+        _rec("b", "base", " ".join(TOKENS)),
+        _rec("c", "cut", _SIM_PLAIN.text, **elsewhere),
+    ]
+    ok, detail, res = _acceptance(recs)
+    assert res["cuts"]["overall"]["caught"] == 1
+    assert res["cuts"]["overall"]["caught_localized"] == 0
+    assert res["cuts"]["unlocalized"] == ["c"]
+    assert not ok and detail["cuts_not_caught_localized"] == 1
+
+
+def test_acceptance_depends_on_the_thresholds_and_is_never_vacuous():
+    blind = _rec(
+        "cb",
+        "cut",
+        _SIM_BLIND.text,
+        family="mid_fluent",
+        size_bin=40,
+        removed=((_SIM_BLIND.deleted[0]),),
+    )
+    recs = [_rec("b", "base", " ".join(TOKENS)), blind]
+    off, on = (replace(DEFAULT_THRESHOLDS, net_deficit_min=m) for m in (None, 40))
+    r_off, r_on = evaluate(recs, [off, on])
+    assert r_off["acceptance_ok"] is False and r_on["acceptance_ok"] is True
+    assert evaluate([], [DEFAULT_THRESHOLDS])[0]["acceptance_ok"] is False
+    only_bases = [_rec("b", "base", " ".join(TOKENS))]
+    assert evaluate(only_bases, [DEFAULT_THRESHOLDS])[0]["acceptance_ok"] is False
 
 
 def test_default_grid_is_the_declared_rule_space():
@@ -878,6 +1023,466 @@ def test_eval_record_roundtrips_through_json():
     for r in _records():
         again = EvalRecord.from_dict(json.loads(json.dumps(r.to_dict())))
         assert again == r
+
+
+# --------------------------------------------------------------------------- #
+# real-shaped timings: abutting words, zero-length words, inflated neighbours
+# --------------------------------------------------------------------------- #
+
+REAL = json.loads(
+    (Path(__file__).parent / "fixtures" / "whisper_real_timing.json").read_text()
+)
+REAL_SCRIPT = " ".join(SCRIPT.split()[:195])
+
+
+@pytest.fixture(scope="module")
+def real_base() -> BaseLabel:
+    lab = screen(REAL_SCRIPT, REAL, base_id="real")
+    assert lab.recall is not None and lab.recall > 0.95
+    return replace(lab, label="faithful")  # a trimmed excerpt: faithful for cutting
+
+
+def _timing_ok(words, k: int) -> bool:
+    for j in (k - 1, k, k + 1):
+        if 0 <= j < len(words) and words[j].end - words[j].start < 0.05:
+            return False
+    if k > 0 and words[k].start < words[k - 1].end - 0.001:
+        return False
+    return not (k + 1 < len(words) and words[k].end > words[k + 1].start + 0.001)
+
+
+def test_the_fixture_really_has_zero_length_abutting_words(real_base):
+    w = real_base.words
+    zero = [i for i, x in enumerate(w) if x.end - x.start < 0.05]
+    assert len(zero) >= 10
+    abutting = sum(1 for a, b in zip(w, w[1:], strict=False) if a.end == b.start)
+    assert abutting > 0.8 * len(w)
+
+
+def test_boundary_eligibility_excludes_zero_length_words_and_their_neighbours(
+    real_base,
+):
+    el = boundary_eligibility(real_base)
+    assert len(el) == len(real_base.script_tokens)
+    w = real_base.words
+    for i, wm in enumerate(real_base.word_map):
+        if el[i]:
+            assert wm.exact and wm.word_index is not None
+            assert _timing_ok(w, wm.word_index)
+    # "failed" (word 21, zero-length) and its neighbours "it" and "safety"
+    assert [w[k].word for k in (20, 21, 22)] == ["it", "failed", "safety"]
+    for i, wm in enumerate(real_base.word_map):
+        if wm.word_index in (20, 21, 22):
+            assert not el[i]
+    assert sum(el) < sum(m.exact for m in real_base.word_map)
+
+
+def test_overlapping_words_are_ineligible_like_zero_length_ones():
+    words = [
+        {"word": f"tok{chr(97 + i)}", "start": i * 0.4, "end": i * 0.4 + 0.4}
+        for i in range(20)
+    ]
+    words[10]["start"] -= 0.2  # overlaps word 9
+    text = " ".join(w["word"] for w in words)
+    lab = screen_base(text, {"words": words}, total_samples=9 * RATE)
+    el = boundary_eligibility(lab)
+    ineligible = [i for i, ok in enumerate(el) if not ok]
+    assert ineligible == [9, 10]  # the overlapping pair; word 11 does not overlap
+    assert all(el[i] for i in range(20) if i not in (9, 10))
+
+
+@pytest.mark.parametrize("family", FAMILIES)
+def test_real_timed_cuts_never_use_an_ineligible_boundary(real_base, family):
+    size = {"multi": 24, "paragraph": 80, "sentence": 20}.get(family, 10)
+    el = boundary_eligibility(real_base)
+    found = 0
+    for seed in range(40):
+        spec = choose_cuts(real_base, family, size, rng(seed))
+        if spec is None:
+            continue
+        found += 1
+        _check_invariants(spec, real_base)
+        for iv in spec.intervals:
+            assert el[iv.script_start] and el[iv.script_end - 1]
+            for k in (iv.first_word, iv.last_word):
+                assert _timing_ok(real_base.words, k)
+    assert found or family in ("paragraph", "end")  # one paragraph / ragged tail
+
+
+def test_real_timed_finalized_cuts_stay_between_adjacent_word_midpoints(real_base):
+    pcm = noisy_pcm(real_base.total_samples)
+    for seed in range(30):
+        spec = choose_cuts(real_base, "mid_fluent", 10, rng(seed))
+        done = finalize_cut(spec, pcm)
+        _check_invariants(done, real_base, finalized=True)
+
+
+# --------------------------------------------------------------------------- #
+# energy snapping
+# --------------------------------------------------------------------------- #
+
+FRAME = RATE // 100  # 10 ms
+
+
+def loud_pcm(n_samples: int, silent=()) -> bytes:
+    """Constant-amplitude "speech" with silent (zero) stretches at [a, b)."""
+    a = array("h", [8000]) * n_samples
+    for lo, hi in silent:
+        a[lo:hi] = array("h", [0]) * (hi - lo)
+    return a.tobytes()
+
+
+def noisy_pcm(n_samples: int) -> bytes:
+    r = random.Random(0)
+    return array("h", (r.randint(-9000, 9000) for _ in range(n_samples))).tobytes()
+
+
+def abutting(n: int, dur: float):
+    """n unique abutting words of ``dur`` seconds, and the matching script text."""
+    words = [
+        {
+            "word": f"tok{chr(97 + i // 26)}{chr(97 + i % 26)}",
+            "start": i * dur,
+            "end": (i + 1) * dur,
+        }
+        for i in range(n)
+    ]
+    text = " ".join(w["word"] for w in words)
+    total = round((n * dur + 0.5) * RATE)
+    return text, {"words": words}, total
+
+
+def _mid_cut(dur: float):
+    text, whisper, total = abutting(40, dur)
+    lab = screen_base(text, whisper, total_samples=total, base_id="s")
+    assert lab.label == "faithful"
+    spec = choose_cuts(lab, "mid_fluent", 6, rng(3))
+    assert spec is not None
+    return lab, spec
+
+
+def test_snap_moves_each_cut_point_to_the_quietest_frame_and_records_both():
+    lab, spec = _mid_cut(0.3)  # words 300 ms: midpoints +/-150 ms, past the radius
+    (iv,) = spec.intervals
+    n0, n1 = iv.nominal_start, iv.nominal_end
+    silent = [(n0 + 4 * FRAME, n0 + 7 * FRAME), (n1 - 8 * FRAME, n1 - 5 * FRAME)]
+    pcm = loud_pcm(lab.total_samples, silent)
+    (done_iv,) = finalize_cut(spec, pcm).intervals
+    assert done_iv.snapped
+    assert (done_iv.nominal_start, done_iv.nominal_end) == (n0, n1)  # recorded
+    # a frame centred c spans [c - 5 ms, c + 5 ms): fully silent for 5ms inside
+    (a0, b0), (a1, b1) = silent
+    assert a0 + FRAME // 2 <= done_iv.sample_start <= b0 - FRAME // 2
+    assert a1 + FRAME // 2 <= done_iv.sample_end <= b1 - FRAME // 2
+    assert done_iv.sample_start != n0 and done_iv.sample_end != n1
+    assert abs(done_iv.sample_start - n0) <= RATE // 10
+    assert abs(done_iv.sample_end - n1) <= RATE // 10
+
+
+def test_snap_is_clamped_to_the_adjacent_word_midpoints():
+    lab, spec = _mid_cut(0.12)  # 120 ms words: midpoints only 60 ms away
+    (iv,) = spec.intervals
+    n0, n1 = iv.nominal_start, iv.nominal_end
+    # silence reaches 5 ms past the previous word's midpoint (60 ms before)
+    # and 5 ms past the following word's midpoint
+    silent = [
+        (n0 - 95 * RATE // 1000, n0 - 55 * RATE // 1000),
+        (n1 + 55 * RATE // 1000, n1 + 95 * RATE // 1000),
+    ]
+    (done,) = finalize_cut(spec, loud_pcm(lab.total_samples, silent)).intervals
+    assert done.sample_start == done.start_bounds[0] == n0 - 60 * RATE // 1000
+    assert done.sample_end == done.end_bounds[1] == n1 + 60 * RATE // 1000
+    _check_invariants(
+        finalize_cut(spec, loud_pcm(lab.total_samples, silent)), lab, finalized=True
+    )
+
+
+def test_snap_on_flat_audio_keeps_the_nominal_point_and_is_idempotent():
+    lab, spec = _mid_cut(0.3)
+    pcm = loud_pcm(lab.total_samples)
+    done = finalize_cut(spec, pcm)
+    assert done.sample_intervals == spec.sample_intervals
+    assert all(i.snapped for i in done.intervals)
+    assert finalize_cut(done, pcm) == done
+
+
+def test_snap_rejects_the_wrong_pcm_and_survives_json():
+    lab, spec = _mid_cut(0.3)
+    pcm = loud_pcm(
+        lab.total_samples,
+        [
+            (
+                spec.intervals[0].nominal_start + 2400,
+                spec.intervals[0].nominal_start + 3000,
+            )
+        ],
+    )
+    with pytest.raises(ValueError):
+        finalize_cut(spec, pcm[:-2])
+    done = finalize_cut(spec, pcm)
+    assert CutSpec.from_dict(json.loads(json.dumps(done.to_dict()))) == done
+    remaining, clips = done.apply(pcm)
+    assert len(remaining) + sum(map(len, clips)) == len(pcm)
+
+
+# --------------------------------------------------------------------------- #
+# verify_cut_audio: whisper on the CUT audio
+# --------------------------------------------------------------------------- #
+
+
+def words_of(tokens):
+    return {
+        "words": [
+            {"word": t, "start": i * 0.3, "end": (i + 1) * 0.3}
+            for i, t in enumerate(tokens)
+        ]
+    }
+
+
+def _kept(intervals):
+    return [
+        t for i, t in enumerate(R_TOKENS) if not any(s <= i < e for s, e in intervals)
+    ]
+
+
+def test_verify_cut_audio_passes_a_clean_cut():
+    label = _label([(20, 40)])
+    out = verify_cut_audio(label, R_TEXT, words_of(_kept([(20, 40)])))
+    assert (
+        out["ok"] and out["leftover_tokens"] == 0 and out["extra_missing_tokens"] == 0
+    )
+    assert out["intervals"][0]["script_start"] == 20
+    json.dumps(out)
+
+
+@pytest.mark.parametrize("leak", [20, 21, 38, 39])
+def test_verify_cut_audio_catches_a_leaked_removed_word(leak):
+    kept = _kept([(20, 40)])
+    heard = kept[:20] + [R_TOKENS[leak]] + kept[20:]
+    out = verify_cut_audio(_label([(20, 40)]), R_TEXT, words_of(heard))
+    assert (
+        not out["ok"]
+        and out["leftover_tokens"] == 1
+        and out["extra_missing_tokens"] == 0
+    )
+    assert out["intervals"][0]["leftover_text"] == [R_TOKENS[leak]]
+
+
+def test_verify_cut_audio_catches_removed_text_heard_elsewhere():
+    heard = _kept([(20, 40)]) + R_TOKENS[22:26]
+    out = verify_cut_audio(_label([(20, 40)]), R_TEXT, words_of(heard))
+    assert not out["ok"] and out["leftover_tokens"] == 4
+
+
+@pytest.mark.parametrize("gone", [19, 20, 15, 24])  # kept tokens within +/-5 of the cut
+def test_verify_cut_audio_catches_a_kept_boundary_word_that_went_missing(gone):
+    kept = _kept([(20, 40)])
+    heard = kept[:gone] + kept[gone + 1 :]
+    out = verify_cut_audio(_label([(20, 40)]), R_TEXT, words_of(heard))
+    assert (
+        not out["ok"]
+        and out["extra_missing_tokens"] == 1
+        and out["leftover_tokens"] == 0
+    )
+    assert out["intervals"][0]["missing_text"] == [kept[gone]]
+
+
+def test_verify_cut_audio_ignores_noise_outside_the_boundary_window():
+    kept = _kept([(20, 40)])
+    for gone in (0, 5, 14, 25, 30):  # whisper noise nowhere near the cut
+        out = verify_cut_audio(
+            _label([(20, 40)]), R_TEXT, words_of(kept[:gone] + kept[gone + 1 :])
+        )
+        assert out["ok"], gone
+
+
+def test_verify_cut_audio_does_not_blame_the_cut_for_what_the_base_already_missed():
+    label = _label([(20, 40)])
+    base = faithful(R_TEXT, base_id="r")
+    kept = _kept([(20, 40)])
+    heard = kept[:19] + kept[20:]  # whisper loses kept token 19 ...
+    assert not verify_cut_audio(label, R_TEXT, words_of(heard))["ok"]
+    missed_in_base = replace(
+        base,
+        word_map=tuple(
+            replace(m, word_index=None, start=None, end=None, exact=False)
+            if i == 19
+            else m
+            for i, m in enumerate(base.word_map)
+        ),
+    )
+    # ... but it also lost it in the uncut base, so it is not the cut's fault
+    assert verify_cut_audio(label, R_TEXT, words_of(heard), base=missed_in_base)["ok"]
+    # a token the base DID hear is still the cut's fault
+    other = kept[:18] + kept[19:]
+    assert not verify_cut_audio(label, R_TEXT, words_of(other), base=missed_in_base)[
+        "ok"
+    ]
+
+
+def test_verify_cut_audio_multi_interval_reports_each_and_dedupes_windows():
+    label = _label([(10, 18), (22, 30)])  # windows overlap in expected coordinates
+    kept = _kept([(10, 18), (22, 30)])
+    ok = verify_cut_audio(label, R_TEXT, words_of(kept))
+    assert ok["ok"] and len(ok["intervals"]) == 2
+    heard = kept[:14] + [R_TOKENS[29]] + kept[14:]  # leaks the second cut's last word
+    bad = verify_cut_audio(label, R_TEXT, words_of(heard))
+    assert not bad["ok"]
+    assert bad["intervals"][0]["leftover"] + bad["intervals"][1]["leftover"] == 1
+    gone = kept[:11] + kept[12:]
+    out = verify_cut_audio(label, R_TEXT, words_of(gone))
+    assert out["extra_missing_tokens"] == 1  # one token, counted once
+
+
+def test_verify_cut_audio_accepts_a_bare_word_list_and_text_script_edges():
+    label = _label([(0, 10)])  # a cut at the very start of the chunk
+    kept = _kept([(0, 10)])
+    assert verify_cut_audio(label, R_TEXT, words_of(kept)["words"])["ok"]
+    label = _label([(50, 60)])  # ... and at the very end
+    assert verify_cut_audio(label, R_TEXT, words_of(_kept([(50, 60)])))["ok"]
+
+
+# --------------------------------------------------------------------------- #
+# reconstruction: audio residue, per-interval levels, repeated phrase
+# --------------------------------------------------------------------------- #
+
+
+def test_reconstruction_subtracts_what_whisper_hears_in_the_cut_audio():
+    label = _label([(20, 40)])
+    kept = _kept([(20, 40)])
+    residue_audio = kept[:20] + R_TOKENS[20:25] + kept[20:]  # 5 tokens leaked
+    gemini = " ".join(residue_audio)
+    plain = reconstruction(label, R_TEXT, R_TEXT, gemini)
+    assert plain["level"] == "partial" and plain["cut_hits"] == 5
+    out = reconstruction(
+        label, R_TEXT, R_TEXT, gemini, audio_residue=" ".join(residue_audio)
+    )
+    assert out["cut_hits"] == 0 and out["level"] == "none"
+    assert out["raw_cut_hits"] == 5 and out["audio_residue_tokens"] == 5
+    # a token list and a whisper dict are accepted too
+    assert (
+        reconstruction(label, R_TEXT, R_TEXT, gemini, audio_residue=residue_audio)[
+            "cut_hits"
+        ]
+        == 0
+    )
+    assert (
+        reconstruction(
+            label, R_TEXT, R_TEXT, gemini, audio_residue=words_of(residue_audio)
+        )["cut_hits"]
+        == 0
+    )
+    # residue does not excuse text Gemini produced BEYOND what the audio holds
+    more = kept[:20] + R_TOKENS[20:36] + kept[20:]
+    out = reconstruction(
+        label, R_TEXT, R_TEXT, " ".join(more), audio_residue=" ".join(residue_audio)
+    )
+    assert (
+        out["raw_cut_hits"] == 16
+        and out["cut_hits"] == 11
+        and out["level"] == "confirmed"
+    )
+    assert plain["audio_residue_tokens"] is None
+
+
+def test_reconstruction_levels_are_per_interval_and_overall_is_the_max():
+    label = _label([(0, 10), (30, 50)])
+    kept = _kept([(0, 10), (30, 50)])
+    # 5 of 10 back in the first (>= half: confirmed), 8 of 20 in the second (partial)
+    heard = R_TOKENS[0:5] + kept[:20] + R_TOKENS[30:38] + kept[20:]
+    out = reconstruction(label, R_TEXT, R_TEXT, " ".join(heard))
+    assert [i["level"] for i in out["intervals"]] == ["confirmed", "partial"]
+    assert out["level"] == "confirmed"  # 13 of 30 overall would have read "partial"
+    assert out["cut_hits"] == 13
+
+
+def test_reconstruction_paraphrase_without_a_run_reads_as_none():
+    label = _label([(20, 40)])
+    kept = _kept([(20, 40)])
+    # the ASR "reconstructs" by paraphrase: every other removed word reappears,
+    # so no block reaches min_run. This is a known blind spot, by design.
+    para = [t for i, t in enumerate(R_TOKENS[20:40]) if i % 2 == 0]
+    out = reconstruction(label, R_TEXT, R_TEXT, " ".join(kept[:20] + para + kept[20:]))
+    assert out["level"] == "none" and out["cut_hits"] == 0
+
+
+A_, B_, C_ = (
+    "aaaa aaab aaac aaad aaae",
+    "bbba bbbb bbbc bbbd bbbe",
+    "ccca cccb cccc cccd ccce",
+)
+P_ = "alpha bravo charlie delta"
+
+
+@pytest.mark.parametrize("which", ["first", "second"])
+def test_reconstruction_of_a_repeated_phrase_is_told_from_the_surviving_copy(which):
+    # script A P B P C; one copy of P is cut. The other survives in the audio.
+    text = f"{A_} {P_} {B_} {P_} {C_}"
+    toks = normalize_tokens(text)
+    p = len(normalize_tokens(A_))
+    first, second = (p, p + 4), (p + 4 + 5, p + 4 + 5 + 4)
+    iv = first if which == "first" else second
+    label = _label_for(toks, [iv])
+    kept = [t for i, t in enumerate(toks) if not iv[0] <= i < iv[1]]
+    faithful_cut = " ".join(kept)
+    out = reconstruction(label, text, text, faithful_cut)
+    assert out["level"] == "none" and out["cut_hits"] == 0
+    assert out["clean_hits"] == 4
+    # the model "hears" the cut copy back: the text of the full script
+    out = reconstruction(label, text, text, text)
+    assert out["level"] == "confirmed" and out["cut_hits"] == 4
+    assert out["matched_text"] == [P_]
+
+
+def _label_for(tokens, intervals):
+    base = _label(intervals)
+    return replace(
+        base,
+        intervals=tuple(
+            replace(iv, removed_text=" ".join(tokens[iv.script_start : iv.script_end]))
+            for iv in base.intervals
+        ),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# sentence structure and number grouping
+# --------------------------------------------------------------------------- #
+
+
+def test_abbreviations_and_initials_do_not_end_sentences():
+    text = (
+        "Dr. Jones met J. P. Morgan at Acme Inc. in the U.S. on Tuesday. "
+        "Then he left! Why? Mr. Smith stayed."
+    )
+    st = calibrate._structure(text)
+    toks = list(st.tokens)
+    assert st.sentence_starts == (
+        0,
+        toks.index("then"),
+        toks.index("why"),
+        toks.index("mr"),
+    )
+
+
+def test_ordinary_sentence_ends_still_split():
+    st = calibrate._structure("He left. She stayed. Then it rained.")
+    assert len(st.sentence_starts) == 3
+
+
+def test_a_dollar_sign_word_then_the_number_then_the_magnitude_group_together():
+    script = normalize_tokens("It cost $1.5 billion in total.")
+    words = [
+        {"word": w, "start": i * 0.5, "end": i * 0.5 + 0.5}
+        for i, w in enumerate(["It", "cost", "$", "1.5", "billion", "in", "total"])
+    ]
+    wm = map_words_to_script(script, words)
+    by_token = {m.token: m for m in wm}
+    for tok in ("one", "point", "five", "billion", "dollars"):
+        assert by_token[tok].word_index == 2 and not by_token[tok].exact
+    assert by_token["in"].word_index == 5 and by_token["in"].exact
+    assert by_token["total"].word_index == 6 and by_token["total"].exact
+    assert all(m.word_index is not None for m in wm)
 
 
 # --------------------------------------------------------------------------- #

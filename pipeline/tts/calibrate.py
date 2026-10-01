@@ -27,6 +27,7 @@ import math
 import operator
 import random
 import re
+import struct
 import wave
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field, replace
@@ -74,6 +75,20 @@ EDGE_TOKENS = 6
 SIZE_TOLERANCE = 0.4
 # A repeated 3-gram only counts as "predictable" with at least this many letters.
 MIN_GRAM_CHARS = 12
+# Real whisper-1 word timestamps are not boundaries: ~90% of inter-word gaps are
+# exactly 0, and ~4% of words are zero-length with the previous word inflated
+# over them. A token may bound a cut only when its word and both neighbours last
+# at least this long and nothing overlaps.
+MIN_BOUNDARY_WORD_S = 0.05
+OVERLAP_TOLERANCE_S = 0.001
+# Each cut point moves to the lowest-energy 10 ms frame within this radius of the
+# nominal point, but never past the midpoint of either adjacent word.
+SNAP_RADIUS_S = 0.1
+SNAP_FRAME_S = 0.01
+# verify_cut_audio looks at this many tokens either side of each cut.
+BOUNDARY_WINDOW = 5
+# whisper may report words slightly past the end of the PCM; more means the wrong audio.
+MAX_WHISPER_OVERRUN_S = 1.0
 # decision 3: removed-clip whisper token count must be within 25 percent.
 REMOVED_SANITY_TOLERANCE = 0.25
 RECON_MIN_RUN = 3
@@ -176,7 +191,7 @@ class Word:
 def parse_words(whisper: dict | Sequence[dict]) -> list[Word]:
     """Words from a whisper ``verbose_json`` dict (or from the bare words list)."""
     raw = whisper["words"] if isinstance(whisper, dict) else whisper
-    return [Word.from_dict(w) for w in raw]
+    return [w if isinstance(w, Word) else Word.from_dict(w) for w in raw]
 
 
 @dataclass(frozen=True)
@@ -221,18 +236,30 @@ def _differs(units: Sequence[str], i: int, size: int) -> bool:
 
 
 def _group_len(units: Sequence[str], i: int) -> int:
-    """How many units starting at ``i`` normalize only TOGETHER ("$1.5" "billion").
+    """How many units starting at ``i`` normalize only TOGETHER ("$" "1.5" "billion").
 
-    Normalizing words one at a time loses constructs that span words, so a window
-    whose joined normalization differs from the per-unit one becomes one group.
-    A 3-window that differs only because of units ``i+1..i+2`` leaves ``i`` alone.
+    Normalizing words one at a time loses constructs that span words. The group
+    is the smallest window whose joined normalization differs from the per-unit
+    one (a 3-window counts only when the difference is not just units ``i+1..``),
+    extended by one more unit when that unit changes the group's reading rather
+    than merely following it: "$" "1.5" groups with "billion" (one point five
+    billion dollars), "$1.5" "billion" does not swallow the "in" after it.
     """
     n = len(units)
     if i + 2 <= n and _differs(units, i, 2):
-        return 2
-    if i + 3 <= n and _differs(units, i, 3):
-        return 1 if _differs(units, i + 1, 2) else 3
-    return 1
+        k = 2
+    elif i + 3 <= n and _differs(units, i, 3) and not _differs(units, i + 1, 2):
+        k = 3
+    else:
+        return 1
+    if k == 2 and i + 3 <= n:
+        grown = normalize_tokens(" ".join(units[i : i + 3]))
+        alone = normalize_tokens(" ".join(units[i : i + 2])) + normalize_tokens(
+            units[i + 2]
+        )
+        if grown != alone:
+            k = 3
+    return k
 
 
 def _tokenize_units(units: Sequence[str]) -> _Tokenized:
@@ -308,6 +335,13 @@ def map_words_to_script(
 
 _SENT_RE = re.compile(r"(?<=[.!?])\s+|(?<=[.!?][\"'’”)\]])\s+")
 _PARA_RE = re.compile(r"\n\s*\n")
+# A "." after one of these is not a sentence end ("Mr. Smith", "Acme Inc. said").
+# Dotted initialisms (U.S., e.g.) and single capital initials ("J. P. Morgan")
+# are guarded too, except "I". A real sentence ending in one of them is missed:
+# fewer boundaries, never an invented one.
+_ABBREVIATIONS = frozenset(
+    "mr mrs ms dr prof sen rep gov st jr sr vs inc corp ltd co etc".split()
+)
 _QUOTE_RE = re.compile(r'"[^"\n]+"|“[^”\n]+”')
 
 
@@ -321,6 +355,20 @@ class _Structure:
     sentence_starts: tuple[int, ...]  # token index of each sentence start; [0] == 0
     paragraph_starts: tuple[int, ...]
     quotes: tuple[tuple[int, int], ...]  # token intervals of quotations (>= 3 tokens)
+
+
+def _ends_in_abbreviation(text: str, end: int) -> bool:
+    """Does the whitespace at ``end`` follow an abbreviation's period?"""
+    words = text[:end].split()
+    core = words[-1].rstrip("\"'’”)]") if words else ""
+    if not core.endswith("."):
+        return False
+    stem = core[:-1]
+    return (
+        stem.lower() in _ABBREVIATIONS
+        or (len(stem) == 1 and stem.isupper() and stem != "I")
+        or re.fullmatch(r"(?:[A-Za-z]\.)+[A-Za-z]", stem) is not None
+    )
 
 
 @lru_cache(maxsize=256)
@@ -350,6 +398,8 @@ def _structure(text: str) -> _Structure:
         idx = {0}
         for rx in regexes:
             for m in rx.finditer(text):
+                if rx is _SENT_RE and _ends_in_abbreviation(text, m.start()):
+                    continue
                 idx.add(token_at(m.end()))
         return tuple(sorted(i for i in idx if 0 <= i < n)) or ((0,) if n else ())
 
@@ -463,10 +513,10 @@ class BaseLabel:
 
 def screen_base(
     script_text: str,
-    whisper: dict,
+    whisper: dict | Sequence[dict],
     *,
+    total_samples: int,
     base_id: str = "",
-    total_samples: int | None = None,
     sample_rate: int = PCM_SAMPLE_RATE,
 ) -> BaseLabel:
     """Label a base ``faithful`` or ``suspect`` from an independent ASR.
@@ -474,14 +524,23 @@ def screen_base(
     Faithful: no span with ``net_missing >= 6`` and whisper recall >= 0.95, using
     the production normalizer and aligner (``verify._align``, anchor_min 3).
     Anything else is ``suspect`` and carries the suspect spans with owner-clip
-    windows. ``total_samples`` defaults to whisper's ``duration`` at ``sample_rate``.
+    windows. ``total_samples`` is REQUIRED and must be the sample count of the PCM
+    the label will cut (not whisper's rounded ``duration``): cut points are
+    clamped against it. ``whisper`` may be a verbose_json dict or a bare words
+    list. Whisper words running more than MAX_WHISPER_OVERRUN_S past the end of
+    the PCM mean it was shown different audio and raise ``ValueError``.
     """
+    if total_samples <= 0:
+        raise ValueError(f"total_samples must be positive, got {total_samples}")
     words = parse_words(whisper)
+    duration = total_samples / sample_rate
+    if words and words[-1].end > duration + MAX_WHISPER_OVERRUN_S:
+        raise ValueError(
+            f"whisper words run to {words[-1].end:.2f}s, longer than the "
+            f"{duration:.2f}s of PCM: not the same audio"
+        )
     script = normalize_tokens(script_text)
     tk = _tokenize_units([w.word for w in words])
-    duration = float(whisper.get("duration") or (words[-1].end if words else 0.0))
-    if total_samples is None:
-        total_samples = round(duration * sample_rate)
     word_map = map_words_to_script(script, words)
 
     reasons: list[str] = []
@@ -554,16 +613,28 @@ class CutInterval:
     normalized_tokens: int  # script_end - script_start
     first_word: int  # whisper word indices, inclusive
     last_word: int
-    sample_start: int  # [start, end) in samples
+    sample_start: int  # [start, end) in samples: where the audio is ACTUALLY cut
     sample_end: int
     removed_text: str  # the literal script text of the interval
     literal: bool  # False: removed_text is the normalized tokens joined
+    # The gap-midpoint cut points ``choose_cuts`` picked, and the ranges
+    # (between the nominal midpoints of the adjacent words) that snapping may
+    # never leave. ``finalize_cut`` moves ``sample_*`` to the quietest frame
+    # inside them and sets ``snapped``; until then sample_* == nominal_*.
+    nominal_start: int
+    nominal_end: int
+    start_bounds: tuple[int, int]
+    end_bounds: tuple[int, int]
+    snapped: bool = False
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        return _jsonable(asdict(self))
 
     @classmethod
     def from_dict(cls, d: dict) -> CutInterval:
+        d = dict(d)
+        d["start_bounds"] = tuple(d["start_bounds"])
+        d["end_bounds"] = tuple(d["end_bounds"])
         return cls(**d)
 
 
@@ -580,6 +651,12 @@ class CutSpec:
     base_samples: int
     seed: str | int | None
     notes: dict = field(default_factory=dict)
+    sample_rate: int = PCM_SAMPLE_RATE
+
+    @property
+    def snapped(self) -> bool:
+        """Has ``finalize_cut`` placed every cut point on the audio?"""
+        return bool(self.intervals) and all(i.snapped for i in self.intervals)
 
     @property
     def sample_intervals(self) -> list[tuple[int, int]]:
@@ -594,7 +671,15 @@ class CutSpec:
         return sum(e - s for s, e in self.sample_intervals)
 
     def apply(self, pcm: bytes) -> tuple[bytes, list[bytes]]:
-        """Cut ``pcm`` (the base's PCM) per this spec; checks the sample count."""
+        """Cut ``pcm`` (the base's PCM) per this spec; checks the sample count.
+
+        Refuses a spec that ``finalize_cut`` has not snapped: shipping the
+        nominal gap midpoints is the label error snapping exists to prevent.
+        """
+        if not self.snapped:
+            raise ValueError(
+                f"cut {self.cut_id} is not snapped; call finalize_cut(spec, pcm) first"
+            )
         if len(pcm) != 2 * self.base_samples:
             raise ValueError(
                 f"PCM has {len(pcm) // 2} samples, cut {self.cut_id} was "
@@ -620,33 +705,54 @@ class CutSpec:
             base_samples=d["base_samples"],
             seed=d["seed"],
             notes=dict(d.get("notes") or {}),
+            sample_rate=d.get("sample_rate", PCM_SAMPLE_RATE),
         )
 
 
 def _build_interval(
     base: BaseLabel, st: _Structure, s: int, e: int
 ) -> CutInterval | None:
-    """Cut ``[s, e)`` from the midpoint of the gap before its first word to the
-    midpoint of the gap after its last; never inside a boundary word."""
+    """Cut ``[s, e)`` at the midpoint of the gap before its first word and the
+    gap after its last (the nominal points), never inside a boundary word, with
+    the ranges snapping may use: between the midpoints of the adjacent words."""
     first, last = base.word_map[s].word_index, base.word_map[e - 1].word_index
     if first is None or last is None or last < first:
         return None
-    words, rate = base.words, base.sample_rate
+    words, rate, total = base.words, base.sample_rate, base.total_samples
+
+    def mid(k: int) -> int:
+        return round((words[k].start + words[k].end) / 2 * rate)
+
+    start_bounds = (mid(first - 1) if first > 0 else 0, mid(first))
+    end_bounds = (mid(last), mid(last + 1) if last + 1 < len(words) else total)
+    end_bounds = (end_bounds[0], min(end_bounds[1], total))
     prev_end = words[first - 1].end if first > 0 else 0.0
-    next_start = (
-        words[last + 1].start if last + 1 < len(words) else base.total_samples / rate
-    )
+    next_start = words[last + 1].start if last + 1 < len(words) else total / rate
     t0 = min((prev_end + words[first].start) / 2, words[first].start)
     t1 = max((words[last].end + next_start) / 2, words[last].end)
-    s0 = max(0, round(t0 * rate))
-    s1 = min(base.total_samples, round(t1 * rate))
-    if s1 <= s0:
+    s0 = min(max(round(t0 * rate), start_bounds[0]), start_bounds[1])
+    s1 = min(max(round(t1 * rate), end_bounds[0]), end_bounds[1])
+    if s1 <= s0 or start_bounds[0] > start_bounds[1] or end_bounds[0] > end_bounds[1]:
         return None
     if st.literal_ok:
         text = base.script_text[st.char_span[s][0] : st.char_span[e - 1][1]]
     else:
         text = " ".join(base.script_tokens[s:e])
-    return CutInterval(s, e, e - s, first, last, s0, s1, text, st.literal_ok)
+    return CutInterval(
+        script_start=s,
+        script_end=e,
+        normalized_tokens=e - s,
+        first_word=first,
+        last_word=last,
+        sample_start=s0,
+        sample_end=s1,
+        removed_text=text,
+        literal=st.literal_ok,
+        nominal_start=s0,
+        nominal_end=s1,
+        start_bounds=start_bounds,
+        end_bounds=end_bounds,
+    )
 
 
 def _finalize(
@@ -677,7 +783,36 @@ def _finalize(
         base_samples=base.total_samples,
         seed=seed,
         notes=notes,
+        sample_rate=base.sample_rate,
     )
+
+
+def _word_timing_ok(words: Sequence[Word], k: int) -> bool:
+    """Can word ``k`` bound a cut? Real whisper timings often have abutting
+    words, zero-length words and an inflated neighbour; a boundary word must
+    last >= MIN_BOUNDARY_WORD_S, so must both neighbours, and nothing overlaps."""
+    for j in (k - 1, k, k + 1):
+        if 0 <= j < len(words) and words[j].end - words[j].start < MIN_BOUNDARY_WORD_S:
+            return False
+    if k > 0 and words[k].start < words[k - 1].end - OVERLAP_TOLERANCE_S:
+        return False
+    return not (
+        k + 1 < len(words) and words[k].end > words[k + 1].start + OVERLAP_TOLERANCE_S
+    )
+
+
+def boundary_eligibility(base: BaseLabel) -> list[bool]:
+    """Per script token: may it be the first or last token of a cut?
+
+    Exact (``WordMap.exact``) AND timed well enough to place a boundary next to
+    (``_word_timing_ok``). ``choose_cuts`` additionally needs the token to sit
+    on a whole script word.
+    """
+    timing = [_word_timing_ok(base.words, k) for k in range(len(base.words))]
+    return [
+        wm.exact and wm.word_index is not None and timing[wm.word_index]
+        for wm in base.word_map
+    ]
 
 
 def _aligned_windows(
@@ -714,8 +849,10 @@ def choose_cuts(
 ) -> CutSpec | None:
     """Pick one cut of ``family`` and ``size`` normalized tokens from a faithful base.
 
-    Only intervals whose boundary tokens are exactly matched (``WordMap.exact``)
-    and sit on whole script words are considered. Returns ``None`` when no
+    Only intervals whose boundary tokens are eligible (``boundary_eligibility``:
+    exactly matched with trustworthy word timing) and sit on whole script words
+    are considered. The spec carries NOMINAL cut points; ``finalize_cut`` snaps
+    them to the audio. Returns ``None`` when no
     interval satisfies the family's constraints (reported, never relaxed).
     ``seed`` is recorded in the spec only; reproducibility comes from ``rng``.
 
@@ -740,8 +877,9 @@ def choose_cuts(
     if st.tokens != tokens:
         raise ValueError("script_text and script_tokens disagree")
     n = len(tokens)
-    ok_start = [base.word_map[i].exact and st.first_of_group[i] for i in range(n)]
-    ok_end = [base.word_map[i].exact and st.last_of_group[i] for i in range(n)]
+    eligible = boundary_eligibility(base)
+    ok_start = [eligible[i] and st.first_of_group[i] for i in range(n)]
+    ok_end = [eligible[i] and st.last_of_group[i] for i in range(n)]
 
     def fixed(sz: int) -> list[int]:
         return [s for s in range(n - sz + 1) if ok_start[s] and ok_end[s + sz - 1]]
@@ -843,6 +981,62 @@ def _predictable_why(
     return None
 
 
+def _snap(
+    pcm: bytes, nominal: int, bounds: tuple[int, int], radius: int, half: int
+) -> int:
+    """The sample in ``[nominal-radius, nominal+radius]`` (and within ``bounds``)
+    whose 2*half-sample window has the lowest mean energy; ties go to the point
+    nearest ``nominal``."""
+    total = len(pcm) // 2
+    lo, hi = max(nominal - radius, bounds[0]), min(nominal + radius, bounds[1])
+    if lo > hi:
+        return min(max(nominal, bounds[0]), bounds[1])
+    seg_lo, seg_hi = max(0, lo - half), min(total, hi + half)
+    samples = struct.unpack_from(f"<{seg_hi - seg_lo}h", pcm, 2 * seg_lo)
+    prefix = [0]
+    for v in samples:
+        prefix.append(prefix[-1] + v * v)
+    best: tuple[float, int, int] | None = None
+    for c in range(lo, hi + 1):
+        a, b = max(seg_lo, c - half), min(seg_hi, c + half)
+        if b <= a:
+            continue
+        key = ((prefix[b - seg_lo] - prefix[a - seg_lo]) / (b - a), abs(c - nominal), c)
+        if best is None or key < best:
+            best = key
+    return nominal if best is None else best[2]
+
+
+def finalize_cut(spec: CutSpec, pcm: bytes) -> CutSpec:
+    """Snap every cut point of ``spec`` to the audio in ``pcm`` (the base's PCM).
+
+    Each point moves to the lowest-energy 10 ms frame within +/-100 ms of its
+    NOMINAL point, clamped to the range between the nominal midpoints of the
+    adjacent words (``start_bounds``/``end_bounds``), so no cut removes the
+    near half of a kept word or keeps the far half of a removed one. The result
+    records both nominal and snapped points and is the only kind ``apply`` takes.
+    Always snaps from nominal, so it is idempotent. Falls back to the nominal
+    points of an interval if snapping would collide with its neighbour.
+    """
+    if len(pcm) != 2 * spec.base_samples:
+        raise ValueError(
+            f"PCM has {len(pcm) // 2} samples, cut {spec.cut_id} was chosen for "
+            f"{spec.base_samples}"
+        )
+    radius = round(SNAP_RADIUS_S * spec.sample_rate)
+    half = round(SNAP_FRAME_S * spec.sample_rate / 2)
+    out: list[CutInterval] = []
+    prev_end = 0
+    for iv in spec.intervals:
+        a = _snap(pcm, iv.nominal_start, iv.start_bounds, radius, half)
+        b = _snap(pcm, iv.nominal_end, iv.end_bounds, radius, half)
+        if not prev_end <= a < b <= spec.base_samples:
+            a, b = iv.nominal_start, iv.nominal_end
+        out.append(replace(iv, sample_start=a, sample_end=b, snapped=True))
+        prev_end = b
+    return replace(spec, intervals=tuple(out))
+
+
 def removed_sanity(expected_tokens: int, whisper_removed: dict) -> dict:
     """Decision 3's sanity check: whisper's transcript of the removed clip should
     have a token count within 25 percent of the script interval's. A failure
@@ -860,29 +1054,45 @@ def removed_sanity(expected_tokens: int, whisper_removed: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Reconstruction check (decision 6)
+# Whisper on the cut audio, and the reconstruction check (decision 6)
 # --------------------------------------------------------------------------- #
 
 
-def _unexplained_runs(expected: Sequence[str], transcript: Sequence[str]):
-    """Maximal runs of transcript tokens the diff does not match to ``expected``."""
+def _heard_tokens(heard: Any) -> list[str]:
+    """Normalized tokens of a whisper dict/words list, plain text, or token list."""
+    if isinstance(heard, str):
+        return normalize_tokens(heard)
+    if isinstance(heard, dict) or (heard and isinstance(heard[0], (dict, Word))):
+        return _tokenize_units([w.word for w in parse_words(heard)]).tokens
+    return list(heard)
+
+
+def _unexplained_spans(
+    expected: Sequence[str], transcript: Sequence[str]
+) -> list[tuple[int, list[str]]]:
+    """Maximal runs of transcript tokens the diff does not match to ``expected``,
+    each with its start index in the transcript."""
     sm = difflib.SequenceMatcher(a=expected, b=transcript, autojunk=False)
     matched = [False] * len(transcript)
     for b in sm.get_matching_blocks():
         for k in range(b.size):
             matched[b.b + k] = True
-    runs: list[list[str]] = []
-    cur: list[str] = []
-    for tok, m in zip(transcript, matched, strict=True):
+    runs: list[tuple[int, list[str]]] = []
+    start = None
+    for j, m in enumerate(matched + [True]):
         if m:
-            if cur:
-                runs.append(cur)
-            cur = []
-        else:
-            cur.append(tok)
-    if cur:
-        runs.append(cur)
+            if start is not None:
+                runs.append((start, list(transcript[start:j])))
+            start = None
+        elif start is None:
+            start = j
     return runs
+
+
+def _unexplained_runs(
+    expected: Sequence[str], transcript: Sequence[str]
+) -> list[list[str]]:
+    return [run for _, run in _unexplained_spans(expected, transcript)]
 
 
 def _hits(
@@ -898,6 +1108,121 @@ def _hits(
     return hit
 
 
+def _removed_mask(spec: CutSpec, script: Sequence[str]) -> list[bool]:
+    removed = [False] * len(script)
+    for s, e in spec.token_intervals:
+        if not 0 <= s < e <= len(script):
+            raise ValueError(
+                f"interval ({s}, {e}) outside the {len(script)}-token script"
+            )
+        for i in range(s, e):
+            removed[i] = True
+    return removed
+
+
+def verify_cut_audio(
+    spec: CutSpec,
+    script_text: str,
+    whisper_cut: dict | Sequence[dict] | str,
+    *,
+    base: BaseLabel | None = None,
+    window: int = BOUNDARY_WINDOW,
+    min_run: int = RECON_MIN_RUN,
+) -> dict:
+    """Post-cut check: does whisper's transcript of the CUT audio match the label?
+
+    The cut audio should read as ``expected``, the script minus the removed
+    intervals. Two ways the cut can be off by a word, which timestamps alone
+    cannot rule out:
+
+    - **leftover**: removed text is still audible. Counted for tokens of a
+      removed interval that appear in transcript the diff cannot match to
+      ``expected``, either at the cut point itself (the first/last ``window``
+      tokens of the interval, any length: a single leaked word counts) or
+      anywhere as a run of >= ``min_run`` tokens.
+    - **extra_missing**: kept text next to a cut is gone. Counted for tokens of
+      ``expected`` within ``window`` of each cut point that whisper did not
+      hear. With ``base`` given, a token whisper also missed in the UNCUT base is
+      whisper noise, not the cut's fault, and is not counted.
+
+    ``ok`` requires both to be zero; Task 3 discards cuts that fail. Whisper
+    noise next to a cut makes this conservative (it discards), never lenient.
+    ``whisper_cut`` may be a verbose_json dict, a words list, or text.
+    """
+    script = normalize_tokens(script_text)
+    removed = _removed_mask(spec, script)
+    kept_idx = [i for i, r in enumerate(removed) if not r]
+    expected = [script[i] for i in kept_idx]
+    heard = _heard_tokens(whisper_cut)
+    match_b, _ = _match(expected, heard)
+    spans = _unexplained_spans(expected, heard)
+    runs = [run for _, run in spans]
+
+    missing_all: set[int] = set()
+    per_interval = []
+    leftover_total = 0
+    for s, e in spec.token_intervals:
+        interval = script[s:e]
+        p = bisect.bisect_left(kept_idx, s)  # kept tokens before the cut
+        lo, hi = max(0, p - window), min(len(expected), p + window)
+        missing = []
+        for x in range(lo, hi):
+            if match_b[x] is not None:
+                continue
+            if base is not None and base.word_map[kept_idx[x]].word_index is None:
+                continue  # whisper missed it in the uncut base too
+            missing.append(x)
+        missing_all.update(missing)
+
+        left = next(
+            (match_b[x] for x in range(p - 1, -1, -1) if match_b[x] is not None), None
+        )
+        right = next(
+            (match_b[x] for x in range(p, len(expected)) if match_b[x] is not None),
+            None,
+        )
+        between = heard[
+            (-1 if left is None else left) + 1 : len(heard) if right is None else right
+        ]
+        hit = _hits(runs, interval, min_run)
+        edge = set(range(min(window, len(interval)))) | set(
+            range(max(0, len(interval) - window), len(interval))
+        )
+        for blk in difflib.SequenceMatcher(
+            a=interval, b=between, autojunk=False
+        ).get_matching_blocks():
+            for k in range(blk.size):
+                if blk.a + k in edge:
+                    hit[blk.a + k] = True
+        leftover_total += sum(hit)
+        per_interval.append(
+            {
+                "script_start": s,
+                "script_end": e,
+                "cut_position": p,  # index into ``expected``
+                "leftover": sum(hit),
+                "leftover_text": [t for t, h in zip(interval, hit, strict=True) if h],
+                "missing": len(missing),
+                "missing_text": [expected[x] for x in missing],
+            }
+        )
+    return {
+        "ok": leftover_total == 0 and not missing_all,
+        "leftover_tokens": leftover_total,
+        "extra_missing_tokens": len(missing_all),
+        "window": window,
+        "expected_tokens": len(expected),
+        "heard_tokens": len(heard),
+        "intervals": per_interval,
+    }
+
+
+def _level(hits: int, tokens: int, min_run: int) -> str:
+    if hits >= max(min_run, math.ceil(tokens / 2)):
+        return "confirmed"
+    return "partial" if hits >= min_run else "none"
+
+
 def reconstruction(
     label: CutSpec,
     script_text: str,
@@ -905,6 +1230,7 @@ def reconstruction(
     cut_transcript: str,
     *,
     min_run: int = RECON_MIN_RUN,
+    audio_residue: Any = None,
 ) -> dict:
     """Did the ASR transcribe removed text that is not in the cut audio?
 
@@ -912,24 +1238,31 @@ def reconstruction(
     transcript of the cut audio says. Transcript tokens the diff cannot match to
     it are *unexplained*; a removed interval is *hit* where runs of >= ``min_run``
     of its tokens appear inside unexplained transcript. Short matches are
-    ignored, so a stray "the" is not a reconstruction.
+    ignored, so a stray "the" is not a reconstruction. A repeated phrase whose
+    other copy survives in the audio is told apart naturally: the surviving copy
+    is matched to ``expected``, so only an EXTRA copy is unexplained.
+
+    ``audio_residue`` (optional) is an independent ASR's transcript of the cut
+    audio (a whisper dict/words list, text, or token list). Removed tokens it
+    hears in the cut audio are residue (a cut a word late), not Gemini
+    reconstruction, and are subtracted from ``cut_hits``; ``raw_cut_hits`` keeps
+    the unsubtracted count.
 
     The same measure on the ASR's transcript of the UNCUT base (``clean_hits``)
-    is the ceiling: it is what the ASR produces when the text really is there.
+    is the ceiling: what the ASR produces when the text really is there.
 
-    ``level``: ``confirmed`` when at least half the removed tokens (and at least
-    ``min_run``) reappear, ``partial`` for ``min_run`` or more, else ``none``.
-    A confirmed reconstruction that the verifier passed stops the calibration.
+    Levels are per interval: ``confirmed`` when at least half its tokens (and at
+    least ``min_run``) reappear, ``partial`` for ``min_run`` or more, else
+    ``none``. The overall ``level`` is the maximum, so one fully reconstructed
+    cut among several is not diluted. A confirmed reconstruction that the
+    verifier passed stops the calibration.
+
+    Blind spot, by design: a *paraphrased* reconstruction (the right content in
+    other words, or with no block of ``min_run`` original tokens) reads as
+    ``none``. This check finds verbatim reappearance only.
     """
     script = normalize_tokens(script_text)
-    removed = [False] * len(script)
-    for s, e in label.token_intervals:
-        if not 0 <= s < e <= len(script):
-            raise ValueError(
-                f"interval ({s}, {e}) outside the {len(script)}-token script"
-            )
-        for i in range(s, e):
-            removed[i] = True
+    removed = _removed_mask(label, script)
     expected = [t for t, r in zip(script, removed, strict=True) if not r]
     cut_runs = _unexplained_runs(expected, normalize_tokens(cut_transcript))
     clean_runs = (
@@ -937,17 +1270,32 @@ def reconstruction(
         if clean_transcript
         else None
     )
+    residue_runs = (
+        _unexplained_runs(expected, _heard_tokens(audio_residue))
+        if audio_residue is not None
+        else None
+    )
     per_interval = []
-    cut_total = clean_total = removed_total = 0
+    cut_total = raw_total = clean_total = residue_total = removed_total = 0
     matched_text: list[str] = []
+    rank = {"none": 0, "partial": 1, "confirmed": 2}
+    level = "none"
     for s, e in label.token_intervals:
         interval = script[s:e]
-        cut_hit = _hits(cut_runs, interval, min_run)
+        raw_hit = _hits(cut_runs, interval, min_run)
+        residue_hit = (
+            _hits(residue_runs, interval, min_run)
+            if residue_runs is not None
+            else [False] * len(interval)
+        )
+        cut_hit = [h and not r for h, r in zip(raw_hit, residue_hit, strict=True)]
         clean_hit = (
             _hits(clean_runs, interval, min_run) if clean_runs is not None else None
         )
         removed_total += e - s
+        raw_total += sum(raw_hit)
         cut_total += sum(cut_hit)
+        residue_total += sum(r and h for r, h in zip(residue_hit, raw_hit, strict=True))
         clean_total += sum(clean_hit) if clean_hit is not None else 0
         # contiguous hit runs, for reading
         run: list[str] = []
@@ -959,6 +1307,9 @@ def reconstruction(
                 run = []
         if run:
             matched_text.append(" ".join(run))
+        lv = _level(sum(cut_hit), e - s, min_run)
+        if rank[lv] > rank[level]:
+            level = lv
         per_interval.append(
             {
                 "script_start": s,
@@ -966,16 +1317,14 @@ def reconstruction(
                 "tokens": e - s,
                 "cut_hits": sum(cut_hit),
                 "clean_hits": sum(clean_hit) if clean_hit is not None else None,
+                "level": lv,
             }
-        )
-    level = "none"
-    if cut_total >= min_run:
-        level = (
-            "confirmed" if cut_total >= max(min_run, removed_total / 2) else "partial"
         )
     return {
         "removed_tokens": removed_total,
         "cut_hits": cut_total,
+        "raw_cut_hits": raw_total,
+        "audio_residue_tokens": residue_total if residue_runs is not None else None,
         "clean_hits": clean_total if clean_runs is not None else None,
         "fraction": cut_total / removed_total if removed_total else 0.0,
         "fraction_of_clean": (
@@ -1265,10 +1614,20 @@ def evaluate(
          "bases": {"overall": B, "by_split": {k: B}, ..., "false_alarms": [record_id],
                    "false_alarm_bases": [base_id]}}
 
-    where ``C = {n, caught, missed, unavailable, localized}`` (``n == caught +
-    missed + unavailable``; an unavailable record is NEVER counted caught) and
+    where ``C = {n, caught, caught_localized, missed, unavailable}`` (``n ==
+    caught + missed + unavailable``; an unavailable record is NEVER counted
+    caught; ``caught_localized`` is the caught cuts whose flagged span overlaps
+    the removed interval, and is the selection metric: a catch by recall alone,
+    far from the cut, is not evidence the cut was found) and
     ``B = {n, passed, false_alarms, unavailable, bases, bases_with_false_alarm}``
     (``n`` counts ASR repeats; ``bases`` distinct base ids).
+
+    Each result also carries ``acceptance_ok`` and the numbers behind it,
+    ``acceptance = {base_false_alarms, base_unavailable,
+    cuts_not_caught_localized, cut_unavailable}``. ``acceptance_ok`` is true
+    only when there is at least one base and one cut, every faithful base
+    passed on every ASR repeat, every cut was caught AND localized, and nothing
+    was unavailable. It is never vacuously true.
     """
     records = list(records)
     results = []
@@ -1291,7 +1650,7 @@ def evaluate(
                 }[o.status]
                 fields = ["n", outcome]
                 if outcome == "caught" and o.localized:
-                    fields.append("localized")
+                    fields.append("caught_localized")
                 if outcome == "missed":
                     missed.append(r.record_id)
                 if outcome == "caught" and not o.localized:
@@ -1331,15 +1690,33 @@ def evaluate(
         cuts["unlocalized"] = unlocalized
         bases["false_alarms"] = false_alarms
         bases["false_alarm_bases"] = sorted(fa_bases)
+        acceptance = {
+            "base_false_alarms": bases["overall"]["false_alarms"],
+            "base_unavailable": bases["overall"]["unavailable"],
+            "cuts_not_caught_localized": (
+                cuts["overall"]["n"] - cuts["overall"]["caught_localized"]
+            ),
+            "cut_unavailable": cuts["overall"]["unavailable"],
+        }
         results.append(
-            {"thresholds": _jsonable(asdict(th)), "cuts": cuts, "bases": bases}
+            {
+                "thresholds": _jsonable(asdict(th)),
+                "acceptance_ok": (
+                    cuts["overall"]["n"] > 0
+                    and bases["overall"]["n"] > 0
+                    and not any(acceptance.values())
+                ),
+                "acceptance": acceptance,
+                "cuts": cuts,
+                "bases": bases,
+            }
         )
     return results
 
 
 def _complete(row: dict, is_cut: bool) -> dict:
     names = (
-        ("n", "caught", "missed", "unavailable", "localized")
+        ("n", "caught", "caught_localized", "missed", "unavailable")
         if is_cut
         else ("n", "passed", "false_alarms", "unavailable")
     )
