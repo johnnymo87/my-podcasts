@@ -297,7 +297,7 @@ def test_both_failing_names_both_reasons_alerts_failed_and_writes_a_failed_manif
     (alert,) = env.alerts
     assert alert.startswith(
         "TTS fallback: fp-digest 2026-09-30-fp: Gemini gemini-3.8-flash-lite-tts/Kore "
-        "second_omission -> OpenAI nova FAILED: "
+        "second_omission (chunk 1: the budget ran out) -> OpenAI nova FAILED: "
     )
     assert "401 bad key" in alert
     [m] = env.manifests()
@@ -910,3 +910,98 @@ def test_a_slow_alert_that_completes_late_does_not_break_the_next(env, monkeypat
     assert by_episode["slow"]["alert_sent"] == "timeout"
     assert by_episode["next"]["alert_sent"] is True
     assert len(calls) == 2  # the slow one was still sent, late; then the next
+
+
+# --- the alert names what was skipped (second_omission only) ---------------------
+
+OMISSION_DETAIL = (
+    "omission (long_unmatched_span) recall 0.912, max net 24: "
+    'script "the first twelve tokens of the largest flagged span here" '
+    'heard "something else entirely"'
+)
+ALERT_HEAD = (
+    "TTS fallback: fp-digest 2026-09-30-fp: Gemini gemini-3.8-flash-lite-tts/Kore "
+)
+
+
+def test_second_omission_alert_names_the_chunk_and_what_was_dropped(env):
+    env.outcome = failed_outcome("second_omission", detail=OMISSION_DETAIL)
+    env.render()
+    assert env.alerts == [
+        ALERT_HEAD + f"second_omission (chunk 1: {OMISSION_DETAIL}) "
+        "-> OpenAI nova rendered"
+    ]
+    # the manifest carries the same detail, untruncated
+    m = env.manifests()[0]
+    assert m["gemini_phase"]["detail"] == OMISSION_DETAIL
+    assert m["gemini_phase"]["failed_chunk"] == 1
+
+
+@pytest.mark.parametrize("reason", ["deadline", "fatal", "child_error", "exhausted"])
+def test_other_reasons_keep_todays_alert_text_exactly(env, reason):
+    # Their details are tracebacks or SDK errors; the manifest has them.
+    env.outcome = failed_outcome(reason, detail="Traceback (most recent call last): x")
+    env.render()
+    assert env.alerts == [ALERT_HEAD + f"{reason} -> OpenAI nova rendered"]
+
+
+def test_a_long_omission_detail_is_cut_to_240_characters(env):
+    detail = "omission " + "x" * 1000
+    env.outcome = failed_outcome("second_omission", detail=detail)
+    env.render()
+    (alert,) = env.alerts
+    assert f"(chunk 1: {detail[:240]})" in alert
+    assert detail[:241] not in alert
+
+
+def test_the_omission_detail_is_whitespace_collapsed(env):
+    env.outcome = failed_outcome("second_omission", detail="omission\n  (a,b)\t recall")
+    env.render()
+    (alert,) = env.alerts
+    assert "(chunk 1: omission (a,b) recall)" in alert
+
+
+def test_an_omission_without_a_chunk_or_detail_degrades_cleanly():
+    kw = (render.GeminiConfig("m", "Kore"), "second_omission", FALLBACK, None)
+
+    def text(**extra):
+        return render._fallback_alert_text("f", "e", *kw, **extra)
+
+    base = "TTS fallback: f e: Gemini m/Kore second_omission -> OpenAI nova rendered"
+    assert text() == base
+    assert text(detail="") == base
+    assert text(detail="   ") == base
+    assert text(detail="d") == base.replace("second_omission", "second_omission (d)")
+    assert text(detail="d", failed_chunk=2) == base.replace(
+        "second_omission", "second_omission (chunk 2: d)"
+    )
+
+
+def test_a_detail_that_cannot_be_stringified_never_breaks_the_alert(env):
+    class BadDetail:
+        def __str__(self):
+            raise RuntimeError("no string for you")
+
+    sent = render._deliver_alert(
+        "fp-digest",
+        "2026-09-30-fp",
+        GEMINI,
+        "second_omission",
+        FALLBACK,
+        None,
+        detail=BadDetail(),
+        failed_chunk=1,
+    )
+    assert sent is True
+    assert env.alerts == [ALERT_HEAD + "second_omission -> OpenAI nova rendered"]
+
+
+def test_a_failed_fallback_still_names_the_dropped_passage(env):
+    env.outcome = failed_outcome("second_omission", detail=OMISSION_DETAIL)
+    env.openai.script = [TTSProviderError("401 bad key", retryable=False)]
+    with pytest.raises(render.TTSRenderError):
+        env.render()
+    (alert,) = env.alerts
+    assert (
+        f"second_omission (chunk 1: {OMISSION_DETAIL}) -> OpenAI nova FAILED: " in alert
+    )

@@ -494,7 +494,14 @@ def _stop_alert_worker(timeout: float = 5.0) -> None:
 
 
 def _deliver_alert(
-    feed_slug, episode_id, primary, reason, fallback, error
+    feed_slug,
+    episode_id,
+    primary,
+    reason,
+    fallback,
+    error,
+    detail="",
+    failed_chunk=None,
 ) -> bool | str:
     """Alert that a render fell back, without letting anything about it reach the
     caller: an episode that has been rendered must not be lost to its own report.
@@ -510,7 +517,14 @@ def _deliver_alert(
     text = None
     try:
         text = _fallback_alert_text(
-            feed_slug, episode_id, primary, reason, fallback, error
+            feed_slug,
+            episode_id,
+            primary,
+            reason,
+            fallback,
+            error,
+            detail=detail,
+            failed_chunk=failed_chunk,
         )
         job = _enqueue_alert(text)
         if job is None:
@@ -538,21 +552,49 @@ def _fallback_alert_text(
     reason: str,
     fallback: OpenAIConfig,
     error: BaseException | None,
+    detail: object = "",
+    failed_chunk: int | None = None,
 ) -> str:
     if error is None:
         outcome = "rendered"
     else:
         try:
-            detail = str(error)
+            error_text = str(error)
         except Exception:  # noqa: BLE001 -- a broken __str__: name the type instead
-            detail = ""
-        message = " ".join(detail.split())[:200] if detail else type(error).__name__
+            error_text = ""
+        message = (
+            " ".join(error_text.split())[:200] if error_text else type(error).__name__
+        )
         outcome = f"FAILED: {message}"
     return (
         f"TTS fallback: {feed_slug} {episode_id}: "
-        f"Gemini {primary.model}/{primary.voice} {reason} -> "
+        f"Gemini {primary.model}/{primary.voice} {reason}"
+        f"{_omission_note(reason, detail, failed_chunk)} -> "
         f"OpenAI {fallback.voice} {outcome}"
     )
+
+
+ALERT_DETAIL_CHARS = 240
+
+
+def _omission_note(reason: str, detail: object, failed_chunk: int | None) -> str:
+    """`` (chunk <n>: <detail>)`` for a ``second_omission`` only, else "".
+
+    Only that reason's detail is a one-line summary of what the model dropped;
+    the others are tracebacks or SDK errors, and the manifest has them. Diagnostic
+    text must never cost the alert: anything wrong degrades to today's text.
+    """
+    if reason != "second_omission":
+        return ""
+    try:
+        text = " ".join(str(detail).split())[:ALERT_DETAIL_CHARS]
+    except Exception:  # noqa: BLE001 -- a broken __str__
+        return ""
+    if not text:
+        return ""
+    if isinstance(failed_chunk, int) and not isinstance(failed_chunk, bool):
+        return f" (chunk {failed_chunk}: {text})"
+    return f" ({text})"
 
 
 def _render_gemini_primary(
@@ -636,7 +678,14 @@ def _render_gemini_primary(
     if notify_fallback:
         # After the attempt, so the alert can say how it ended; also when it failed.
         record["alert_sent"] = _deliver_alert(
-            feed_slug, episode_id, primary, reason, fallback, error
+            feed_slug,
+            episode_id,
+            primary,
+            reason,
+            fallback,
+            error,
+            detail=outcome.detail,
+            failed_chunk=outcome.failed_chunk,
         )
     if error is not None:
         if isinstance(error, TTSRenderError):
