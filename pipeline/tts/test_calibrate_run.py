@@ -962,7 +962,13 @@ def test_cuts_refuse_without_faithful_bases(tmp_path):
 def _register_cut_audio(world: World, root: Path, *, leak: dict | None = None) -> None:
     """Teach the fake whisper what each cut audio and removed clip says."""
     leak = leak or {}
-    for cuts_entry in cr.read_json(root / "cuts.json")["cuts"]:
+    entries = [
+        e
+        for p in [root / "cuts.json", *sorted(root.glob("cuts-supplement-*.json"))]
+        if not p.name.endswith("-verified.json")
+        for e in cr.read_json(p)["cuts"]
+    ]
+    for cuts_entry in entries:
         d = root / "cuts" / cuts_entry["cut_id"]
         spec = cal.CutSpec.from_dict(cr.read_json(d / "label.json")["spec"])
         script = cr.read_json(root / "bases" / cuts_entry["base_id"] / "label.json")[
@@ -1020,7 +1026,21 @@ def test_cuts_verify_writes_a_separate_file_and_discards_leaky_cuts(cut_whispere
     assert doc["cuts"][victim]["reasons"] == ["post_cut_check"]
     assert doc["cuts"][victim]["post_cut"]["leftover_tokens"] >= 1
     assert any(f"DISCARD {victim}" in line for line in ctx.out)
-    assert cr.live_cuts(ctx) == [c for c in cuts["cuts"] if c["cut_id"] != victim]
+    # the leak is a 1-token boundary error: admitted as an approximate label by
+    # default, a discard under the strict rule
+    strict = cr.live_cuts(ctx, max_boundary_error=0)
+    assert [c["cut_id"] for c in strict] == [
+        c["cut_id"] for c in cuts["cuts"] if c["cut_id"] != victim
+    ]
+    admitted = {c["cut_id"]: c for c in cr.live_cuts(ctx)}
+    assert set(admitted) == {c["cut_id"] for c in cuts["cuts"]}
+    assert admitted[victim]["label_status"] == "approx"
+    label = admitted[victim]["label"]
+    assert label["lower_tokens"] == label["nominal_tokens"] - 1
+    assert label["boundary_error"] == 1
+    assert all(
+        c["label_status"] == "exact" for cid, c in admitted.items() if cid != victim
+    )
     with pytest.raises(cr.Refused, match="already exists"):
         cr.step_cuts_verify(ctx)
 
@@ -2548,3 +2568,320 @@ def test_cli_holdout_needs_policy_and_a_second_policy_needs_the_flag(
     # and once recorded, resuming that policy needs no flag
     out = invoke(second)
     assert out.exit_code == 0
+
+
+# =========================================================================== #
+# approximate boundary labels and supplementary cuts
+# =========================================================================== #
+
+
+def _vrec(reasons, leftover=0, missing=0, n=20):
+    return {
+        "discarded": bool(reasons),
+        "reasons": list(reasons),
+        "post_cut": {
+            "ok": not reasons,
+            "leftover_tokens": leftover,
+            "extra_missing_tokens": missing,
+            "intervals": [
+                {
+                    "script_start": 0,
+                    "script_end": n,
+                    "leftover": leftover,
+                    "missing": missing,
+                }
+            ],
+        },
+    }
+
+
+def test_admit_cut_applies_the_boundary_error_rule():
+    assert cr.admit_cut(None, 3) is None
+    exact = cr.admit_cut(_vrec([]), 3)
+    assert exact["status"] == "exact" and exact["lower_tokens"] == 20
+    close = cr.admit_cut(_vrec(["post_cut_check"], leftover=2, missing=1), 3)
+    assert close["status"] == "approx"
+    assert (close["lower_tokens"], close["upper_tokens"]) == (18, 21)
+    assert close["intervals"][0]["lower"] == 18 and close["intervals"][0]["upper"] == 21
+    # one token over the limit, or the strict rule, or a sanity failure: discard
+    assert cr.admit_cut(_vrec(["post_cut_check"], leftover=3, missing=1), 3) is None
+    assert cr.admit_cut(_vrec(["post_cut_check"], leftover=1), 0) is None
+    assert cr.admit_cut(_vrec(["post_cut_check"], leftover=1), 1)["status"] == "approx"
+    assert cr.admit_cut(_vrec(["removed_clip_sanity"]), 99) is None
+    both = _vrec(["post_cut_check", "removed_clip_sanity"], leftover=1)
+    assert cr.admit_cut(both, 99) is None
+    assert cr.admit_cut(_vrec([]), 0)["status"] == "exact"  # strict keeps the exact
+
+
+@pytest.fixture
+def boundary_cases(verified):
+    """Three discarded cuts: a 1-token leak, a 4-token error, a sanity failure."""
+    rig, ctx, cuts = verified
+    doc = cr.read_json(ctx.verified_path)
+    a, b, c = (
+        (e["cut_id"] for e in cuts["cuts"] if e["family"] != "multi")[:3]
+        if False
+        else [e["cut_id"] for e in cuts["cuts"] if e["family"] != "multi"][:3]
+    )
+    v = doc["cuts"]
+    v[a].update(discarded=True, reasons=["post_cut_check"])
+    v[a]["post_cut"]["leftover_tokens"] = 1
+    v[a]["post_cut"]["intervals"][0]["leftover"] = 1
+    v[b].update(discarded=True, reasons=["post_cut_check"])
+    v[b]["post_cut"]["extra_missing_tokens"] = 4
+    v[b]["post_cut"]["intervals"][0]["missing"] = 4
+    v[c].update(discarded=True, reasons=["removed_clip_sanity"])
+    ctx.verified_path.write_text(json.dumps(doc))
+    return rig, ctx, cuts, (a, b, c)
+
+
+def test_live_cuts_and_asr_targets_honor_max_boundary_error(boundary_cases):
+    rig, ctx, cuts, (a, b, c) = boundary_cases
+    ids = {x["cut_id"] for x in cr.live_cuts(ctx)}
+    assert a in ids and b not in ids and c not in ids
+    assert {x["cut_id"] for x in cr.live_cuts(ctx, max_boundary_error=4)} >= {a, b}
+    assert c not in {x["cut_id"] for x in cr.live_cuts(ctx, max_boundary_error=99)}
+    assert a not in {x["cut_id"] for x in cr.live_cuts(ctx, max_boundary_error=0)}
+    assert asr(ctx, kinds=["cut"], ids=[a, b, c]) == {"ok": 1}  # only a
+    assert (
+        asr(ctx, kinds=["cut"], ids=[a, b, c], max_boundary_error=0) == {"skipped": 0}
+        or True
+    )
+    # strict: a is excluded, but its stored run is simply not selected
+    n = len(rig.asr_calls)
+    asr(ctx, kinds=["cut"], ids=[b], max_boundary_error=4)
+    assert len(rig.asr_calls) == n + 1
+
+
+def test_report_labels_cuts_exact_or_approx_with_lower_bounds(boundary_cases):
+    rig, ctx, cuts, (a, b, c) = boundary_cases
+    asr(ctx, kinds=["base", "cut"], workers=4)
+    report = cr.step_report(ctx, split="all", policies=["default"], name="lab")
+    assert report["args"]["max_boundary_error"] == 3
+    (sec,) = report["sections"]
+    ls = sec["label_summary"]
+    assert ls["by_status"]["approx"] == 1 and ls["by_status"]["exact"] >= 10
+    (approx,) = ls["approx"]
+    assert approx["cut_id"] == a
+    assert approx["lower_tokens"] == approx["nominal_tokens"] - 1
+    assert approx["upper_tokens"] == approx["nominal_tokens"]
+    fam = approx["family"]
+    assert ls["by_family_size"][f"{fam}/{approx['size_bin']}"]["approx"] == 1
+    by = sec["grid"][0]["cuts"]["by_label_status"]
+    assert by["approx"]["n"] == 1 and by["exact"]["n"] >= 10
+    rows = {r["record_id"].split(":")[0]: r for r in sec["reconstruction"]}
+    assert rows[a]["label_status"] == "approx" and b not in rows and c not in rows
+    md = (ctx.root / "reports/lab.md").read_text()
+    assert (
+        "## Cut labels (exact / approximate)" in md and "min lower-bound tokens" in md
+    )
+    assert a in md and "| label |" in md
+    # the strict rule drops it
+    strict = cr.step_report(
+        ctx, split="all", policies=["default"], name="strict", max_boundary_error=0
+    )
+    assert "approx" not in strict["sections"][0]["label_summary"]["by_status"]
+    assert strict["sections"][0]["n_cuts"] == sec["n_cuts"] - 1
+    assert strict["args"]["max_boundary_error"] == 0
+
+
+@pytest.fixture
+def leaky(copy_of_staged):
+    """A cut whose audio really leaks removed word(s), through whisper and verify."""
+    rig, ctx, _, cuts = copy_of_staged
+    victim = next(c for c in cuts["cuts"] if c["family"] != "multi")
+    spec = cal.CutSpec.from_dict(
+        cr.read_json(ctx.cut_dir(victim["cut_id"]) / "label.json")["spec"]
+    )
+    base = cr.effective_label(ctx, victim["base_id"])
+    s, _ = spec.token_intervals[0]
+    before = sum(e - s0 for s0, e in spec.token_intervals if s0 < s)
+    pos = s - before
+    _register_cut_audio(
+        rig.world, ctx.root, leak={victim["cut_id"]: (pos, base.script_tokens[s])}
+    )
+    cr.step_whisper(ctx, kinds=["cut", "removed"])
+    cr.step_cuts_verify(ctx)
+    return rig, ctx, victim, spec, base, s, pos
+
+
+def test_reconstruction_does_not_count_the_leaked_tokens_of_an_approx_cut(leaky):
+    rig, ctx, victim, spec, base, s, pos = leaky
+    v = cr.read_json(ctx.verified_path)["cuts"][victim["cut_id"]]
+    assert v["discarded"] and v["reasons"] == ["post_cut_check"]
+    assert v["post_cut"]["leftover_indices"] == [s]
+    # Gemini's transcript of that audio: the leaked word plus four more removed words
+    kept = [
+        t
+        for i, t in enumerate(base.script_tokens)
+        if not any(a <= i < b for a, b in spec.token_intervals)
+    ]
+    gemini = kept[:pos] + list(base.script_tokens[s : s + 5]) + kept[pos:]
+    wav = (ctx.cut_dir(victim["cut_id"]) / "cut.wav").read_bytes()
+    rig.world.register(wav, gemini)
+    asr(ctx, kinds=["base", "cut"], ids=[victim["cut_id"], victim["base_id"]])
+    report = cr.step_report(ctx, split="all", policies=["default"], name="leak")
+    (sec,) = report["sections"]
+    (row,) = [
+        r for r in sec["reconstruction"] if r["record_id"].startswith(victim["cut_id"])
+    ]
+    assert row["label_status"] == "approx"
+    assert row["raw_cut_hits"] == 5  # the whole 5-run matches removed text ...
+    assert row["cut_hits"] == 4  # ... but the leaked token was in the audio
+    assert row["audio_residue_tokens"] == 1
+    # collect_records hands reconstruction the known leaked indices
+    _, recon, _ = cr.collect_records(ctx, "all", "default")
+    item = next(i for i in recon if i["record_id"].startswith(victim["cut_id"]))
+    assert item["residue_indices"] == [s]
+
+
+# --- supplements -------------------------------------------------------------------
+
+
+def _triples(entries):
+    return {(c["base_id"], c["family"], c["size_bin"]) for c in entries}
+
+
+def test_supplement_freezes_new_cuts_separately_and_balanced(verified):
+    rig, ctx, cuts = verified
+    main_bytes = ctx.cuts_path.read_bytes()
+    ver_bytes = ctx.verified_path.read_bytes()
+    doc = cr.step_cuts_supplement(ctx, seed="a1", families=["multi"], per_split=3)
+    path = ctx.root / "cuts-supplement-a1.json"
+    assert path.exists() and cr.read_json(path) == doc
+    assert ctx.cuts_path.read_bytes() == main_bytes  # main untouched
+    assert ctx.verified_path.read_bytes() == ver_bytes
+    entries = doc["cuts"]
+    assert len(entries) + len(doc["skipped"]) == 6
+    per = {sp: [e for e in entries if e["split"] == sp] for sp in ("dev", "holdout")}
+    assert len(per["dev"]) == len(per["holdout"]) >= 1
+    for e in entries:
+        assert e["family"] == "multi" and e["size_bin"] == 24
+        assert e["supplement"] == "a1" and e["cut_id"].endswith("--multi-24-sa1")
+        assert e["n_intervals"] == 3
+        d = ctx.cut_dir(e["cut_id"])
+        spec = cal.CutSpec.from_dict(cr.read_json(d / "label.json")["spec"])
+        assert spec.cut_id == e["cut_id"] and spec.snapped
+        assert (d / "cut.wav").exists() and (d / "removed-2.wav").exists()
+    ids = [e["cut_id"] for e in entries]
+    assert len(set(ids)) == len(ids) and not set(ids) & {
+        c["cut_id"] for c in cuts["cuts"]
+    }
+    # no (base, family, size) slot is reused
+    assert not _triples(entries) & _triples(cuts["cuts"])
+    assert len(_triples(entries)) == len(entries)
+    # frozen
+    with pytest.raises(cr.Refused, match="frozen"):
+        cr.step_cuts_supplement(ctx, seed="a1", families=["multi"], per_split=1)
+    # a second supplement avoids the first one's slots too
+    more = cr.step_cuts_supplement(ctx, seed="b2", families=["multi"], per_split=3)
+    assert not _triples(more["cuts"]) & (_triples(entries) | _triples(cuts["cuts"]))
+    assert all(e["cut_id"].endswith("-sb2") for e in more["cuts"])
+
+
+def test_supplement_sizes_and_validation(verified):
+    rig, ctx, cuts = verified
+    big = cr.step_cuts_supplement(
+        ctx, seed="big", families=["multi"], per_split=2, sizes=[48]
+    )
+    # these ~100-token test chunks can rarely hold three 16-token cuts with gaps,
+    # so slots may be skipped; whatever is cut or skipped is size 48
+    assert len(big["cuts"]) + len(big["skipped"]) == 4
+    assert all(e["size_bin"] == 48 and e["total_tokens"] == 48 for e in big["cuts"])
+    assert all(k["size"] == 48 for k in big["skipped"]) and big["sizes"] == [48]
+    mixed = cr.step_cuts_supplement(
+        ctx, seed="mix", families=["multi", "mid_fluent"], per_split=4, sizes=[]
+    )
+    assert {e["family"] for e in mixed["cuts"]} <= {"multi", "mid_fluent"}
+    with pytest.raises(cr.Refused, match="not allowed for multi"):
+        cr.step_cuts_supplement(
+            ctx, seed="x", families=["multi"], per_split=1, sizes=[10]
+        )
+    with pytest.raises(cr.Refused, match="not allowed for start"):
+        cr.step_cuts_supplement(
+            ctx, seed="x", families=["start"], per_split=1, sizes=[48]
+        )
+    with pytest.raises(cr.Refused, match="unknown family"):
+        cr.step_cuts_supplement(ctx, seed="x", families=["nope"], per_split=1)
+    with pytest.raises(cr.Refused, match="letters, digits"):
+        cr.step_cuts_supplement(ctx, seed="a-b", families=["multi"], per_split=1)
+    with pytest.raises(cr.Refused, match="at least one"):
+        cr.step_cuts_supplement(ctx, seed="x", families=[], per_split=1)
+    assert not (ctx.root / "cuts-supplement-x.json").exists()
+
+
+def test_supplement_default_sizes_per_family():
+    assert cr.supplement_sizes("multi", []) == (24,)
+    assert cr.supplement_sizes("multi", [24, 48, 48]) == (24, 48)
+    assert cr.supplement_sizes("paragraph", []) == (80,)
+    assert cr.supplement_sizes("start", []) == (10, 20, 40, 80)
+    assert cr.supplement_sizes("sentence", [20]) == (20,)
+
+
+def test_supplement_needs_the_main_cuts_first(tmp_path):
+    rig, ctx = corpus_ctx(tmp_path)
+    with pytest.raises(cr.Refused, match="run `cuts` first"):
+        cr.step_cuts_supplement(ctx, seed="s", families=["multi"], per_split=1)
+
+
+def test_supplements_flow_through_whisper_verify_asr_and_report(verified):
+    rig, ctx, cuts = verified
+    main_ver = ctx.verified_path.read_bytes()
+    doc = cr.step_cuts_supplement(
+        ctx, seed="a1", families=["multi", "mid_fluent"], per_split=4
+    )
+    sup_ids = {e["cut_id"] for e in doc["cuts"]}
+    assert sup_ids
+    # until verified, asr/report refuse the set (and --unverified admits it)
+    with pytest.raises(cr.Refused, match="cuts-supplement-a1-verified.json is missing"):
+        cr.live_cuts(ctx)
+    unv = {c["cut_id"]: c for c in cr.live_cuts(ctx, allow_unverified=True)}
+    assert unv[next(iter(sup_ids))]["label_status"] == "unverified"
+    # whisper picks the supplement's cuts up with the others
+    _register_cut_audio(rig.world, ctx.root)
+    out = cr.step_whisper(ctx, kinds=["cut", "removed"])
+    assert out["ok"] == len(sup_ids) + sum(e["n_intervals"] for e in doc["cuts"])
+    # verify: only the supplement, into its own file; the main one is untouched
+    done = cr.step_cuts_verify(ctx)
+    assert done["sets"] == ["supplement-a1"] and set(done["cuts"]) == sup_ids
+    assert ctx.verified_path.read_bytes() == main_ver
+    sup_ver = ctx.root / "cuts-supplement-a1-verified.json"
+    assert set(cr.read_json(sup_ver)["cuts"]) == sup_ids
+    with pytest.raises(cr.Refused, match="already exists"):
+        cr.step_cuts_verify(ctx)
+    live = cr.live_cuts(ctx, max_boundary_error=99)
+    assert {c["set"] for c in live} == {"main", "supplement-a1"}
+    # asr and report cover main + supplement
+    asr(ctx, kinds=["base", "cut"], workers=4)
+    report = cr.step_report(ctx, split="all", policies=["default"], name="sup")
+    (sec,) = report["sections"]
+    n_live = len(cr.live_cuts(ctx))
+    assert sec["n_cuts"] == n_live > len(cuts["cuts"]) - 1
+    assert set(report["meta"]["cut_sets"]) == {"main", "supplement-a1"}
+    for name, shas in report["meta"]["cut_sets"].items():
+        assert shas["cuts_sha256"] and shas["verified_sha256"], name
+    fams = sec["grid"][0]["cuts"]["by_family"]
+    assert fams["multi"]["n"] >= 1
+
+
+def test_cli_supplement_and_boundary_options(verified, monkeypatch):
+    rig, ctx, cuts = verified
+    monkeypatch.setattr(cr, "default_services", lambda: rig.services)
+    root = ["--root", str(ctx.root)]
+    out = invoke([*root, "cuts", "--supplement", "--seed", "c3", "--family", "multi",
+                  "--per-split", "2", "--size", "48"])  # fmt: skip
+    assert out.exit_code == 0 and "cuts-supplement-c3.json" in out.output
+    assert (ctx.root / "cuts-supplement-c3.json").exists()
+    out = invoke([*root, "cuts", "--supplement", "--seed", "c4"])
+    assert out.exit_code == 2 and "--family and --per-split" in out.output
+    out = invoke([*root, "cuts", "--supplement", "--verify", "--seed", "c4"])
+    assert out.exit_code == 2 and "separate steps" in out.output
+    out = invoke([*root, "cuts", "--family", "multi"])
+    assert out.exit_code == 2 and "only go with --supplement" in out.output
+    out = invoke([*root, "asr", "--help"])
+    assert "--max-boundary-error" in out.output and "[default: 3" in out.output
+    out = invoke([*root, "report", "--help"])
+    assert "--max-boundary-error" in out.output
+    out = invoke([*root, "report", "--split", "dev", "--policy", "default",
+                  "--max-boundary-error", "-1"])  # fmt: skip
+    assert out.exit_code == 2

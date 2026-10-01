@@ -1573,3 +1573,83 @@ def test_module_imports_only_stdlib_and_pipeline_tts():
         for name in names:
             top = name.split(".")[0]
             assert top in stdlib or name.startswith("pipeline.tts"), name
+
+
+# --- approximate boundary labels ----------------------------------------------
+
+
+def test_verify_cut_audio_reports_which_removed_tokens_are_still_audible():
+    kept = _kept([(20, 40)])
+    heard = kept[:20] + [R_TOKENS[20], R_TOKENS[21]] + kept[20:]  # first two leak
+    out = verify_cut_audio(_label([(20, 40)]), R_TEXT, words_of(heard))
+    assert out["leftover_tokens"] == 2
+    assert out["intervals"][0]["leftover_indices"] == [20, 21]
+    assert out["leftover_indices"] == [20, 21]
+    clean = verify_cut_audio(_label([(20, 40)]), R_TEXT, words_of(kept))
+    assert clean["leftover_indices"] == []
+
+
+def test_approximate_label_gives_a_count_interval_per_interval_and_in_total():
+    from pipeline.tts.calibrate import approximate_label
+
+    label = _label([(10, 18), (30, 40)])
+    kept = _kept([(10, 18), (30, 40)])
+    # whisper hears one removed token of the first cut; and the kept token just
+    # before the second cut is missing
+    heard = kept[:10] + [R_TOKENS[10]] + kept[10:]
+    heard = [t for t in heard if t != R_TOKENS[29]]
+    post = verify_cut_audio(label, R_TEXT, words_of(heard))
+    assert not post["ok"]
+    a = approximate_label(post)
+    assert a["status"] == "approx"
+    assert a["nominal_tokens"] == 18
+    assert (a["lower_tokens"], a["upper_tokens"]) == (17, 19)
+    assert a["boundary_error"] == 2
+    first, second = a["intervals"]
+    assert (first["nominal"], first["lower"], first["upper"]) == (8, 7, 8)
+    assert (second["nominal"], second["lower"], second["upper"]) == (10, 10, 11)
+    # an exact cut: lower == upper == nominal
+    exact = approximate_label(verify_cut_audio(label, R_TEXT, words_of(kept)))
+    assert exact["status"] == "exact" and exact["boundary_error"] == 0
+    assert (exact["lower_tokens"], exact["upper_tokens"]) == (18, 18)
+
+
+def test_reconstruction_never_counts_tokens_the_cut_audio_still_contains():
+    label = _label([(20, 40)])
+    kept = _kept([(20, 40)])
+    # the cut was a word late: removed tokens 20-21 are audible. Gemini writes
+    # them plus three more it could not have heard: a contiguous run of 5.
+    gemini = " ".join(kept[:20] + R_TOKENS[20:25] + kept[20:])
+    plain = reconstruction(label, R_TEXT, R_TEXT, gemini)
+    assert plain["cut_hits"] == 5
+    out = reconstruction(label, R_TEXT, R_TEXT, gemini, residue_indices=[20, 21])
+    assert out["cut_hits"] == 3 and out["raw_cut_hits"] == 5
+    assert out["audio_residue_tokens"] == 2
+    assert out["intervals"][0]["cut_hits"] == 3
+    # an empty list changes nothing; and a 2-token leak alone is never "hits"
+    assert (
+        reconstruction(label, R_TEXT, R_TEXT, gemini, residue_indices=[])["cut_hits"]
+        == 5
+    )
+    leak_only = " ".join(kept[:20] + R_TOKENS[20:22] + kept[20:])
+    none = reconstruction(label, R_TEXT, R_TEXT, leak_only, residue_indices=[20, 21])
+    assert none["cut_hits"] == 0 and none["level"] == "none"
+
+
+def test_eval_records_carry_label_status_and_bounds_and_evaluate_bins_by_it():
+    mid = (len(TOKENS) - 40) // 2
+    base_kw = {"family": "mid_fluent", "size_bin": 40, "removed": ((mid, mid + 40),)}
+    exact = _rec("c-exact", "cut", _SIM_PLAIN.text, **base_kw)
+    approx = _rec(
+        "c-approx", "cut", _SIM_PLAIN.text, label_status="approx",
+        lower_tokens=38, upper_tokens=41, **base_kw,
+    )  # fmt: skip
+    assert exact.label_status == "exact" and exact.lower_tokens is None
+    again = EvalRecord.from_dict(json.loads(json.dumps(approx.to_dict())))
+    assert again == approx
+    (res,) = evaluate(
+        [exact, approx, _rec("b", "base", " ".join(TOKENS))], [DEFAULT_THRESHOLDS]
+    )
+    by = res["cuts"]["by_label_status"]
+    assert by["exact"]["caught_localized"] == 1 and by["approx"]["n"] == 1
+    assert "by_label_status" not in res["bases"]

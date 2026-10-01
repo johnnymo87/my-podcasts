@@ -32,6 +32,7 @@ import hashlib
 import json
 import os
 import random
+import re
 import signal
 import sqlite3
 import subprocess
@@ -77,6 +78,12 @@ WHISPER_MAX_BYTES = 24 * 1024 * 1024  # the API limit is 25 MB
 WHISPER_BACKOFF_SECONDS = (2.0, 8.0)
 WHISPER_ATTEMPTS = 3
 CUTS_PER_BASE = 1.5
+# A cut whisper puts up to this many tokens off (leftover + extra missing) is
+# admitted with an approximate label; more, or any removed-clip sanity failure,
+# is a discard. 0 restores the strict rule.
+DEFAULT_MAX_BOUNDARY_ERROR = 3
+SEED_RE = re.compile(r"[A-Za-z0-9_.]+")
+SUPPLEMENT_MULTI_SIZES = (cal.MULTI_TOTAL, 2 * cal.MULTI_TOTAL)
 DEFAULT_CUT_SEED = "t5"
 # Wall-clock bounds on one call. The SDK/HTTP timeouts are per-read, so a server
 # that trickles bytes could hang a step forever; past these the call is recorded
@@ -1293,7 +1300,7 @@ def iter_targets(
             if keep(b["base_id"], b["split"]) and _synth_ok(d):
                 out.append(Target("base", b["base_id"], d / "pcm.wav", d, b["split"]))
     if "cut" in kinds or "removed" in kinds:
-        for c in ctx.cuts()["cuts"]:
+        for c in all_cut_entries(ctx):
             d = ctx.cut_dir(c["cut_id"])
             if not keep(c["cut_id"], c["split"]):
                 continue
@@ -1652,11 +1659,109 @@ def plan_slots(n_cuts: int, seed: str, split: str) -> list[tuple[str, int]]:
     return slots[:n_cuts]
 
 
-def step_cuts(ctx: Ctx, *, seed: str = DEFAULT_CUT_SEED) -> dict:
-    """Choose, cut, snap and freeze the cuts (``cuts.json`` is written last and
-    never changed). Deterministic given the seed and the labels."""
-    if ctx.cuts_path.exists():
-        raise Refused(f"{ctx.cuts_path} already exists; the cuts are frozen")
+@dataclass(frozen=True)
+class CutSet:
+    """The main cut set, or one supplement: where it is frozen and verified."""
+
+    name: str
+    cuts_path: Path
+    verified_path: Path
+    supplement: str | None = None
+
+
+def supplement_path(ctx: Ctx, seed: str) -> Path:
+    return ctx.root / f"cuts-supplement-{seed}.json"
+
+
+def cut_sets(ctx: Ctx) -> list[CutSet]:
+    """``cuts.json`` plus every ``cuts-supplement-<seed>.json``, in order."""
+    sets = [CutSet("main", ctx.cuts_path, ctx.verified_path)]
+    for p in sorted(ctx.root.glob("cuts-supplement-*.json")):
+        if p.name.endswith("-verified.json"):
+            continue
+        seed = p.name[len("cuts-supplement-") : -len(".json")]
+        sets.append(
+            CutSet(
+                f"supplement-{seed}",
+                p,
+                ctx.root / f"cuts-supplement-{seed}-verified.json",
+                seed,
+            )
+        )
+    return sets
+
+
+def all_cut_entries(ctx: Ctx) -> list[dict]:
+    """Every frozen cut of the main set and all supplements (``set`` added)."""
+    ctx.cuts()  # the main set must exist first
+    out = []
+    for cs in cut_sets(ctx):
+        for c in read_json(cs.cuts_path)["cuts"]:
+            out.append({**c, "set": cs.name})
+    return out
+
+
+def _materialize_cut(
+    ctx: Ctx,
+    spec: cal.CutSpec,
+    base_id: str,
+    meta: dict[str, dict],
+    faithful: dict[str, cal.BaseLabel],
+    energies: dict[str, float],
+    *,
+    family: str,
+    size: int,
+    split: str,
+    extra: dict | None = None,
+) -> dict:
+    """Snap ``spec`` on its base's audio, write ``cut.wav``, ``removed-k.wav`` and
+    ``label.json`` (existing files must match byte for byte) and return the
+    ``cuts.json`` entry."""
+    pcm, _, _ = wav_info((ctx.base_dir(base_id) / "pcm.wav").read_bytes())
+    if len(pcm) // 2 != faithful[base_id].total_samples:
+        raise CalibrateError(f"{base_id}: label.json no longer matches pcm.wav")
+    if base_id not in energies:
+        energies[base_id] = cal.global_mean_energy(pcm)
+    spec = cal.finalize_cut(spec, pcm, base_energy=energies[base_id])
+    remaining, removed = spec.apply(pcm)
+    d = ctx.cut_dir(spec.cut_id)
+    b = meta[base_id]
+    label_doc = {
+        "spec": spec.to_dict(),
+        "meta": {k: b[k] for k in ("episode", "feed", "split", "model_short", "voice")},
+    }
+    existing = d / "label.json"
+    if existing.exists() and read_json(existing) != json.loads(json.dumps(label_doc)):
+        raise Refused(f"{existing} exists and differs; the seed/labels changed")
+    write_or_verify(d / "cut.wav", pcm_to_wav(remaining), "cut audio")
+    for k, clip in enumerate(removed):
+        write_or_verify(d / f"removed-{k}.wav", pcm_to_wav(clip), "removed clip")
+    write_json_new(existing, label_doc)
+    ratios = [
+        r
+        for iv in spec.intervals
+        for r in (iv.start_energy_ratio, iv.end_energy_ratio)
+        if r is not None
+    ]
+    return {
+        "cut_id": spec.cut_id,
+        "base_id": base_id,
+        "family": family,
+        "size_bin": size,
+        "split": split,
+        "feed": b["feed"],
+        "episode": b["episode"],
+        "model_short": b["model_short"],
+        "voice": b["voice"],
+        "total_tokens": spec.total_tokens,
+        "n_intervals": len(spec.intervals),
+        "max_snap_energy_ratio": max(ratios) if ratios else None,
+        "label_sha256": sha256_hex(json.dumps(label_doc, sort_keys=True)),
+        **(extra or {}),
+    }
+
+
+def _faithful_bases(ctx: Ctx) -> tuple[dict[str, dict], dict[str, cal.BaseLabel]]:
     meta = base_meta(ctx)
     faithful: dict[str, cal.BaseLabel] = {}
     for base_id in sorted(meta):
@@ -1665,6 +1770,32 @@ def step_cuts(ctx: Ctx, *, seed: str = DEFAULT_CUT_SEED) -> dict:
             faithful[base_id] = label
     if not faithful:
         raise Refused("no faithful bases yet; run synth, whisper and label first")
+    return meta, faithful
+
+
+def _coverage(entries: list[dict]) -> dict:
+    return {
+        split: {
+            "families": sorted({e["family"] for e in entries if e["split"] == split}),
+            "size_bins": sorted(
+                {
+                    e["size_bin"]
+                    for e in entries
+                    if e["split"] == split and e["family"] != "multi"
+                }
+            ),
+            "n": sum(1 for e in entries if e["split"] == split),
+        }
+        for split in ("dev", "holdout")
+    }
+
+
+def step_cuts(ctx: Ctx, *, seed: str = DEFAULT_CUT_SEED) -> dict:
+    """Choose, cut, snap and freeze the cuts (``cuts.json`` is written last and
+    never changed). Deterministic given the seed and the labels."""
+    if ctx.cuts_path.exists():
+        raise Refused(f"{ctx.cuts_path} already exists; the cuts are frozen")
+    meta, faithful = _faithful_bases(ctx)
 
     entries: list[dict] = []
     skipped: list[dict] = []
@@ -1706,70 +1837,20 @@ def step_cuts(ctx: Ctx, *, seed: str = DEFAULT_CUT_SEED) -> dict:
                 continue
             base_id, spec = made
             used.add(spec.cut_id)
-            pcm, _, _ = wav_info((ctx.base_dir(base_id) / "pcm.wav").read_bytes())
-            if len(pcm) // 2 != faithful[base_id].total_samples:
-                raise CalibrateError(f"{base_id}: label.json no longer matches pcm.wav")
-            if base_id not in energies:
-                energies[base_id] = cal.global_mean_energy(pcm)
-            spec = cal.finalize_cut(spec, pcm, base_energy=energies[base_id])
-            remaining, removed = spec.apply(pcm)
-            d = ctx.cut_dir(spec.cut_id)
-            b = meta[base_id]
-            label_doc = {
-                "spec": spec.to_dict(),
-                "meta": {
-                    k: b[k]
-                    for k in ("episode", "feed", "split", "model_short", "voice")
-                },
-            }
-            existing = d / "label.json"
-            if existing.exists() and read_json(existing) != json.loads(
-                json.dumps(label_doc)
-            ):
-                raise Refused(f"{existing} exists and differs; the seed/labels changed")
-            write_or_verify(d / "cut.wav", pcm_to_wav(remaining), "cut audio")
-            for k, clip in enumerate(removed):
-                write_or_verify(
-                    d / f"removed-{k}.wav", pcm_to_wav(clip), "removed clip"
-                )
-            write_json_new(existing, label_doc)
-            ratios = [
-                r
-                for iv in spec.intervals
-                for r in (iv.start_energy_ratio, iv.end_energy_ratio)
-                if r is not None
-            ]
             entries.append(
-                {
-                    "cut_id": spec.cut_id,
-                    "base_id": base_id,
-                    "family": family,
-                    "size_bin": size,
-                    "split": split,
-                    "feed": b["feed"],
-                    "episode": b["episode"],
-                    "model_short": b["model_short"],
-                    "voice": b["voice"],
-                    "total_tokens": spec.total_tokens,
-                    "n_intervals": len(spec.intervals),
-                    "max_snap_energy_ratio": max(ratios) if ratios else None,
-                    "label_sha256": sha256_hex(json.dumps(label_doc, sort_keys=True)),
-                }
+                _materialize_cut(
+                    ctx,
+                    spec,
+                    base_id,
+                    meta,
+                    faithful,
+                    energies,
+                    family=family,
+                    size=size,
+                    split=split,
+                )
             )
-    coverage = {
-        split: {
-            "families": sorted({e["family"] for e in entries if e["split"] == split}),
-            "size_bins": sorted(
-                {
-                    e["size_bin"]
-                    for e in entries
-                    if e["split"] == split and e["family"] != "multi"
-                }
-            ),
-            "n": sum(1 for e in entries if e["split"] == split),
-        }
-        for split in ("dev", "holdout")
-    }
+    coverage = _coverage(entries)
     doc = {
         "version": 1,
         "created": now_iso(),
@@ -1790,14 +1871,145 @@ def step_cuts(ctx: Ctx, *, seed: str = DEFAULT_CUT_SEED) -> dict:
     return doc
 
 
-def step_cuts_verify(ctx: Ctx) -> dict:
-    """After ``whisper --kind cut --kind removed``: run the post-cut checks and
-    write ``cuts-verified.json`` (a separate file; ``cuts.json`` stays frozen)."""
-    if ctx.verified_path.exists():
-        raise Refused(f"{ctx.verified_path} already exists; not overwriting")
+def supplement_sizes(family: str, sizes: Sequence[int]) -> tuple[int, ...]:
+    """The sizes to cut for ``family``: ``sizes`` if given, else its normal set.
+    ``multi`` sizes are totals (24 or 48); the others are the size bins."""
+    allowed: tuple[int, ...]
+    default: tuple[int, ...]
+    if family == "multi":
+        allowed = SUPPLEMENT_MULTI_SIZES
+        default = (cal.MULTI_TOTAL,)
+    else:
+        allowed = cal.SIZE_BINS
+        default = (80,) if family == "paragraph" else cal.SIZE_BINS
+    if not sizes:
+        return tuple(default)
+    bad = [x for x in sizes if x not in allowed]
+    if bad:
+        raise Refused(f"--size {bad} is not allowed for {family}; use {list(allowed)}")
+    return tuple(dict.fromkeys(sizes))
+
+
+def step_cuts_supplement(
+    ctx: Ctx,
+    *,
+    seed: str,
+    families: Sequence[str],
+    per_split: int,
+    sizes: Sequence[int] = (),
+) -> dict:
+    """Choose MORE cuts, frozen separately as ``cuts-supplement-<seed>.json``.
+
+    ``per_split`` new cuts per split (dev and hold-out equally), spread
+    round-robin over the requested families and sizes, on faithful bases, never
+    reusing a (base, family, size) slot any frozen set already uses. Cut ids end
+    ``-s<seed>`` so they cannot collide; the layout of each cut directory is the
+    main set's. The main ``cuts.json`` and its verified file are untouched.
+    """
+    if not SEED_RE.fullmatch(seed):
+        raise Refused(f"--seed {seed!r} must be letters, digits, '_' or '.'")
+    if not ctx.cuts_path.exists():
+        raise Refused(f"{ctx.cuts_path} does not exist; run `cuts` first")
+    path = supplement_path(ctx, seed)
+    if path.exists():
+        raise Refused(f"{path} already exists; supplements are frozen")
+    families = tuple(dict.fromkeys(families))
+    if not families:
+        raise Refused("--supplement needs at least one --family")
+    for f in families:
+        if f not in cal.FAMILIES:
+            raise Refused(f"unknown family {f!r}; choose from {list(cal.FAMILIES)}")
+    if per_split < 1:
+        raise Refused("--per-split must be at least 1")
+    combos = [(f, z) for f in families for z in supplement_sizes(f, sizes)]
+    meta, faithful = _faithful_bases(ctx)
+    used = {(c["base_id"], c["family"], c["size_bin"]) for c in all_cut_entries(ctx)}
+    entries: list[dict] = []
+    skipped: list[dict] = []
+    energies: dict[str, float] = {}
+    for split in ("dev", "holdout"):
+        ids = [b for b in faithful if meta[b]["split"] == split]
+        if not ids:
+            continue
+        rng = random.Random(f"{seed}|supp-bases|{split}")
+        rng.shuffle(ids)
+        slot_rng = random.Random(f"{seed}|supp-slots|{split}")
+        slots: list[tuple[str, int]] = []
+        while len(slots) < per_split:
+            cycle = list(combos)
+            slot_rng.shuffle(cycle)
+            slots.extend(cycle)
+        for i, (family, size) in enumerate(slots[:per_split]):
+            made = None
+            for j in range(len(ids)):
+                base_id = ids[(i + j) % len(ids)]
+                if (base_id, family, size) in used:
+                    continue
+                cut_id = f"{base_id}--{family}-{size}-s{seed}"
+                spec = cal.choose_cuts(
+                    faithful[base_id],
+                    family,
+                    size,
+                    random.Random(f"{seed}|{cut_id}"),
+                    seed=seed,
+                )
+                if spec is not None:
+                    made = (base_id, replace(spec, cut_id=cut_id))
+                    break
+            if made is None:
+                skipped.append(
+                    {
+                        "split": split,
+                        "family": family,
+                        "size": size,
+                        "reason": "no unused base has a valid interval",
+                    }
+                )
+                continue
+            base_id, spec = made
+            used.add((base_id, family, size))
+            entries.append(
+                _materialize_cut(
+                    ctx,
+                    spec,
+                    base_id,
+                    meta,
+                    faithful,
+                    energies,
+                    family=family,
+                    size=size,
+                    split=split,
+                    extra={"supplement": seed},
+                )
+            )
+    doc: dict[str, Any] = {
+        "version": 1,
+        "created": now_iso(),
+        "seed": seed,
+        "supplement": seed,
+        "families": list(families),
+        "sizes": list(sizes),
+        "per_split": per_split,
+        "cuts": entries,
+        "skipped": skipped,
+        "coverage": _coverage(entries),
+    }
+    if not write_json_new(path, doc):
+        raise Refused(f"{path} appeared while running; not overwriting")
+    ctx.echo(
+        f"cuts --supplement: {len(entries)} cuts frozen in {path.name} "
+        f"({len(skipped)} slots had no valid interval); next: `whisper --kind cut "
+        "--kind removed` then `cuts --verify`"
+    )
+    for split, c in doc["coverage"].items():
+        ctx.echo(f"  {split}: {c['n']} cuts, families {c['families']}")
+    return doc
+
+
+def _verify_entries(ctx: Ctx, entries: list[dict]) -> tuple[dict, list[str]]:
     results: dict[str, dict] = {}
     missing: list[str] = []
-    for c in ctx.cuts()["cuts"]:
+    for c in entries:
         d = ctx.cut_dir(c["cut_id"])
         doc = read_json(d / "label.json")
         spec = cal.CutSpec.from_dict(doc["spec"])
@@ -1839,21 +2051,59 @@ def step_cuts_verify(ctx: Ctx) -> dict:
             "snap_energy_ratios": ratios,
             "max_snap_energy_ratio": max(ratios) if ratios else None,
         }
-    if missing:
+    return results, missing
+
+
+def step_cuts_verify(ctx: Ctx) -> dict:
+    """After ``whisper --kind cut --kind removed``: run the post-cut checks of
+    every cut set that has no verified file yet and write one (``cuts.json`` /
+    ``cuts-verified.json`` and the supplements' files are separate and never
+    rewritten). Returns ``{"cuts": {...}, "sets": [...]}`` for what was verified
+    now."""
+    pending = [cs for cs in cut_sets(ctx) if not cs.verified_path.exists()]
+    ctx.cuts()
+    if not pending:
         raise Refused(
-            f"{len(missing)} whisper file(s) missing (first: {missing[0]}); run "
-            "`whisper --kind cut --kind removed` first"
+            "nothing to verify: every cut set already has a verified file "
+            f"({', '.join(cs.verified_path.name for cs in cut_sets(ctx))} already "
+            "exists; not overwriting)"
         )
-    doc = {"version": 1, "created": now_iso(), "cuts": results}
-    write_json_new(ctx.verified_path, doc)
-    n_bad = sum(1 for r in results.values() if r["discarded"])
-    ctx.echo(f"cuts --verify: {len(results)} cuts, {n_bad} discarded")
-    for cid, r in sorted(results.items()):
+    done: dict[str, dict] = {}
+    docs: list[tuple[CutSet, dict]] = []
+    for cs in pending:
+        entries = read_json(cs.cuts_path)["cuts"]
+        results, missing = _verify_entries(ctx, entries)
+        if missing:
+            raise Refused(
+                f"{len(missing)} whisper file(s) missing for {cs.name} (first: "
+                f"{missing[0]}); run `whisper --kind cut --kind removed` first"
+            )
+        docs.append((cs, {"version": 1, "created": now_iso(), "cuts": results}))
+    for cs, doc in docs:  # only after every pending set verified cleanly
+        write_json_new(cs.verified_path, doc)
+        done.update(doc["cuts"])
+        n_bad = sum(1 for r in doc["cuts"].values() if r["discarded"])
+        n_close = sum(
+            1
+            for r in doc["cuts"].values()
+            if r["discarded"] and r["reasons"] == ["post_cut_check"]
+        )
+        ctx.echo(
+            f"cuts --verify [{cs.name}]: {len(doc['cuts'])} cuts, {n_bad} discarded "
+            f"({n_close} only for a boundary error; `asr`/`report` admit those up to "
+            f"--max-boundary-error as approximate labels)"
+        )
+    for cid, r in sorted(done.items()):
         if r["discarded"]:
-            ctx.echo(f"  DISCARD {cid}: {','.join(r['reasons'])}")
+            err = (
+                r["post_cut"]["leftover_tokens"] + r["post_cut"]["extra_missing_tokens"]
+            )
+            ctx.echo(
+                f"  DISCARD {cid}: {','.join(r['reasons'])} (boundary error {err})"
+            )
     hot = [
         (cid, r["max_snap_energy_ratio"])
-        for cid, r in sorted(results.items())
+        for cid, r in sorted(done.items())
         if (r["max_snap_energy_ratio"] or 0) > SNAP_ENERGY_WARN
     ]
     if hot:
@@ -1863,23 +2113,69 @@ def step_cuts_verify(ctx: Ctx) -> dict:
         )
         for cid, ratio in hot:
             ctx.echo(f"    {cid}: {ratio:.2f}")
-    return doc
+    return {"cuts": done, "sets": [cs.name for cs, _ in docs]}
 
 
-def live_cuts(ctx: Ctx, *, allow_unverified: bool = False) -> list[dict]:
-    """``cuts.json`` entries minus the ones ``cuts --verify`` discarded."""
-    cuts = ctx.cuts()["cuts"]
-    if not ctx.verified_path.exists():
-        if not allow_unverified:
-            raise Refused(
-                "cuts-verified.json is missing; run `cuts --verify` (or pass "
-                "--unverified to use every cut)"
-            )
-        return cuts
-    verified = read_json(ctx.verified_path)["cuts"]
-    return [
-        c for c in cuts if not verified.get(c["cut_id"], {}).get("discarded", False)
-    ]
+def admit_cut(verified: dict | None, max_boundary_error: int) -> dict | None:
+    """The label of a verified cut, or ``None`` if it is not admitted.
+
+    A cut that passed is ``exact``. A cut discarded ONLY for ``post_cut_check``
+    whose total boundary error (leftover + extra missing tokens, as whisper saw
+    it) is at most ``max_boundary_error`` is ``approx``: its label is the count
+    interval ``[nominal - leftover, nominal + missing]`` (``cal.approximate_label``)
+    and claims rest on the lower bound. A ``removed_clip_sanity`` failure is a
+    discard whatever the error, and ``max_boundary_error=0`` is the strict rule.
+    """
+    if verified is None:
+        return None
+    post = verified.get("post_cut")
+    if not verified.get("discarded"):
+        return cal.approximate_label(post) if post else {"status": "exact"}
+    if verified.get("reasons") != ["post_cut_check"] or not post:
+        return None
+    label = cal.approximate_label(post)
+    if label["boundary_error"] > max_boundary_error:
+        return None
+    return label
+
+
+def live_cuts(
+    ctx: Ctx,
+    *,
+    allow_unverified: bool = False,
+    max_boundary_error: int = DEFAULT_MAX_BOUNDARY_ERROR,
+) -> list[dict]:
+    """The admitted cuts of the main set and every supplement, each with its
+    ``set``, ``label_status`` (``exact``, ``approx`` or ``unverified``) and
+    ``label`` (the count interval)."""
+    out: list[dict] = []
+    ctx.cuts()
+    for cs in cut_sets(ctx):
+        entries = read_json(cs.cuts_path)["cuts"]
+        if not cs.verified_path.exists():
+            if not allow_unverified:
+                raise Refused(
+                    f"{cs.verified_path.name} is missing; run `cuts --verify` (or "
+                    "pass --unverified to use every cut)"
+                )
+            out += [
+                {**c, "set": cs.name, "label_status": "unverified", "label": None}
+                for c in entries
+            ]
+            continue
+        verified = read_json(cs.verified_path)["cuts"]
+        for c in entries:
+            label = admit_cut(verified.get(c["cut_id"]), max_boundary_error)
+            if label is not None:
+                out.append(
+                    {
+                        **c,
+                        "set": cs.name,
+                        "label_status": label["status"],
+                        "label": label,
+                    }
+                )
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -2067,6 +2363,7 @@ def step_asr(
     retry_stale: bool = False,
     allow_unverified: bool = False,
     allow_second_holdout_policy: bool = False,
+    max_boundary_error: int = DEFAULT_MAX_BOUNDARY_ERROR,
     timeout_s: float = ASR_TIMEOUT_S,
 ) -> dict:
     ctx.need_env("GEMINI_API_KEY")
@@ -2094,7 +2391,14 @@ def step_asr(
                 continue  # only faithful bases are negative controls
         targets.append(t)
     if "cut" in kinds:
-        live = {c["cut_id"] for c in live_cuts(ctx, allow_unverified=allow_unverified)}
+        live = {
+            c["cut_id"]
+            for c in live_cuts(
+                ctx,
+                allow_unverified=allow_unverified,
+                max_boundary_error=max_boundary_error,
+            )
+        }
         targets = [t for t in targets if t.kind != "cut" or t.id in live]
     # interleaved order: per target, repeats alternate between the policies
     tasks = [(t, p, n) for t in targets for n in range(repeat) for p in policies]
@@ -2473,7 +2777,12 @@ def _sha_of(path: Path, cache: dict[Path, str]) -> str:
 
 
 def collect_records(
-    ctx: Ctx, split: str, policy: str, *, allow_unverified: bool = False
+    ctx: Ctx,
+    split: str,
+    policy: str,
+    *,
+    allow_unverified: bool = False,
+    max_boundary_error: int = DEFAULT_MAX_BOUNDARY_ERROR,
 ) -> tuple[list[cal.EvalRecord], list[dict], list[str]]:
     """``EvalRecord``s for every stored ASR run of ONE policy name over faithful
     bases and live cuts, the inputs ``reconstruction`` needs per cut run, and the
@@ -2525,13 +2834,24 @@ def collect_records(
                     repeat=n,
                 )
             )
-    for c in live_cuts(ctx, allow_unverified=allow_unverified):
+    for c in live_cuts(
+        ctx, allow_unverified=allow_unverified, max_boundary_error=max_boundary_error
+    ):
         if split != "all" and c["split"] != split:
             continue
         d = ctx.cut_dir(c["cut_id"])
         spec = cal.CutSpec.from_dict(read_json(d / "label.json")["spec"])
         label = effective_label(ctx, c["base_id"])
         assert label is not None
+        approx = c["label"] if c["label_status"] == "approx" else None
+        # Removed tokens whisper heard in the cut audio are residue, not Gemini
+        # reconstruction, however short the leak: recompute which (deterministic).
+        residue_indices: list[int] | None = None
+        if approx is not None:
+            post = cal.verify_cut_audio(
+                spec, label.script_text, read_json(d / "whisper.json"), base=label
+            )
+            residue_indices = post["leftover_indices"]
         for _, n, rec in _asr_files(d, [policy]):
             check(d / "cut.wav", rec, d / "asr" / f"{policy}-{n}.json")
             ok = rec.get("status") == "ok"
@@ -2555,6 +2875,9 @@ def collect_records(
                     family=c["family"],
                     size_bin=c["size_bin"],
                     removed=tuple(spec.token_intervals),
+                    label_status=c["label_status"],
+                    lower_tokens=c["label"]["lower_tokens"] if c["label"] else None,
+                    upper_tokens=c["label"]["upper_tokens"] if c["label"] else None,
                 )
             )
             if ok:
@@ -2567,6 +2890,7 @@ def collect_records(
                         "clean": clean.get(c["base_id"]),
                         "transcript": rec["transcript"],
                         "residue": read_json(whisper) if whisper.exists() else None,
+                        "residue_indices": residue_indices,
                         "family": c["family"],
                         "size_bin": c["size_bin"],
                     }
@@ -2599,6 +2923,7 @@ def build_report(
             item["clean"],
             item["transcript"],
             audio_residue=item["residue"],
+            residue_indices=item.get("residue_indices"),
         )
         verdicts = [cal.replay(by_id[item["record_id"]], th).status for th in grid]
         recon_rows.append(
@@ -2606,6 +2931,7 @@ def build_report(
                 "record_id": item["record_id"],
                 "family": item["family"],
                 "size_bin": item["size_bin"],
+                "label_status": by_id[item["record_id"]].label_status,
                 "level": out["level"],
                 "cut_hits": out["cut_hits"],
                 "raw_cut_hits": out["raw_cut_hits"],
@@ -2634,13 +2960,22 @@ def build_report(
         "n_cuts": sum(1 for r in records if r.kind == "cut"),
         "grid": results,
         "reconstruction": recon_rows,
+        "label_summary": label_summary(records),
     }
 
 
-def cut_points(ctx: Ctx, split: str, *, allow_unverified: bool = False) -> list[dict]:
+def cut_points(
+    ctx: Ctx,
+    split: str,
+    *,
+    allow_unverified: bool = False,
+    max_boundary_error: int = DEFAULT_MAX_BOUNDARY_ERROR,
+) -> list[dict]:
     """Per live cut: the snapped frames' energy relative to the base's RMS."""
     rows = []
-    for c in live_cuts(ctx, allow_unverified=allow_unverified):
+    for c in live_cuts(
+        ctx, allow_unverified=allow_unverified, max_boundary_error=max_boundary_error
+    ):
         if split != "all" and c["split"] != split:
             continue
         spec = cal.CutSpec.from_dict(
@@ -2662,6 +2997,48 @@ def cut_points(ctx: Ctx, split: str, *, allow_unverified: bool = False) -> list[
             }
         )
     return rows
+
+
+def label_summary(records: Sequence[cal.EvalRecord]) -> dict:
+    """What the admitted cuts of one section are labeled, by status and by
+    (family, nominal size): counts, and the LOWER-bound token count a claim may
+    rest on (``min_lower_tokens``)."""
+    cuts: dict[str, cal.EvalRecord] = {}
+    for r in records:
+        if r.kind == "cut":
+            cuts[r.record_id.rsplit(":", 1)[0]] = r
+    by_status: dict[str, int] = {}
+    by_key: dict[str, dict] = {}
+    approx = []
+    for cid, r in sorted(cuts.items()):
+        nominal = sum(e - s for s, e in r.removed)
+        lower = r.lower_tokens if r.lower_tokens is not None else nominal
+        upper = r.upper_tokens if r.upper_tokens is not None else nominal
+        by_status[r.label_status] = by_status.get(r.label_status, 0) + 1
+        row = by_key.setdefault(
+            f"{r.family}/{r.size_bin}",
+            {"n": 0, "exact": 0, "approx": 0, "min_lower_tokens": None},
+        )
+        row["n"] += 1
+        if r.label_status in ("exact", "approx"):
+            row[r.label_status] += 1
+        row["min_lower_tokens"] = (
+            lower
+            if row["min_lower_tokens"] is None
+            else min(row["min_lower_tokens"], lower)
+        )
+        if r.label_status == "approx":
+            approx.append(
+                {
+                    "cut_id": cid,
+                    "family": r.family,
+                    "size_bin": r.size_bin,
+                    "nominal_tokens": nominal,
+                    "lower_tokens": lower,
+                    "upper_tokens": upper,
+                }
+            )
+    return {"by_status": by_status, "by_family_size": by_key, "approx": approx}
 
 
 def _tbl(headers: Sequence[str], rows: Iterable[Sequence[Any]]) -> list[str]:
@@ -2817,12 +3194,47 @@ def _section_markdown(sec: dict) -> list[str]:
             f"acceptance: {r['acceptance']} -> "
             f"{'OK' if r['acceptance_ok'] else 'not ok'}"
         )
+    ls = sec.get("label_summary") or {}
+    if ls.get("by_family_size"):
+        lines += [
+            "",
+            "## Cut labels (exact / approximate)",
+            "",
+            f"by status: {ls['by_status']}. An approximate cut was admitted with a "
+            "count interval [nominal - leftover, nominal + missing]; a claim rests "
+            "on the lower bound.",
+            "",
+        ]
+        lines += _tbl(
+            ["family/nominal bin", "cuts", "exact", "approx", "min lower-bound tokens"],
+            [
+                [k, v["n"], v["exact"], v["approx"], v["min_lower_tokens"]]
+                for k, v in sorted(ls["by_family_size"].items())
+            ],
+        )
+        if ls["approx"]:
+            lines += [""]
+            lines += _tbl(
+                ["approx cut", "family", "bin", "nominal", "lower", "upper"],
+                [
+                    [
+                        a["cut_id"],
+                        a["family"],
+                        a["size_bin"],
+                        a["nominal_tokens"],
+                        a["lower_tokens"],
+                        a["upper_tokens"],
+                    ]
+                    for a in ls["approx"]
+                ],
+            )
     lines += ["", "## Reconstruction (per cut run)", ""]
     lines += _tbl(
         [
             "record",
             "family",
             "bin",
+            "label",
             "level",
             "hits",
             "raw hits",
@@ -2835,6 +3247,7 @@ def _section_markdown(sec: dict) -> list[str]:
                 r["record_id"],
                 r["family"],
                 r["size_bin"],
+                r["label_status"],
                 r["level"],
                 r["cut_hits"],
                 r["raw_cut_hits"],
@@ -2860,6 +3273,7 @@ def step_report(
     policies: Sequence[str] = (),
     name: str | None = None,
     allow_unverified: bool = False,
+    max_boundary_error: int = DEFAULT_MAX_BOUNDARY_ERROR,
 ) -> dict:
     """Write ``reports/<name>.json`` and ``.md``. With several policies, one
     SECTION per policy: each is evaluated on its own records and has its own
@@ -2881,7 +3295,11 @@ def step_report(
         sections = []
         for policy in policies:
             records, recon, strings = collect_records(
-                ctx, split, policy, allow_unverified=allow_unverified
+                ctx,
+                split,
+                policy,
+                allow_unverified=allow_unverified,
+                max_boundary_error=max_boundary_error,
             )
             sections.append(
                 build_report(records, recon, policy=policy, asr_policies=strings)
@@ -2889,16 +3307,33 @@ def step_report(
         report = {
             "version": 2,
             "created": now_iso(),
-            "args": {"name": name, "split": split, "policy": list(policies)},
+            "args": {
+                "name": name,
+                "split": split,
+                "policy": list(policies),
+                "max_boundary_error": max_boundary_error,
+            },
             "meta": {
                 "corpus_sha256": _file_sha(ctx.corpus_path),
                 "cuts_sha256": _file_sha(ctx.cuts_path),
+                "cut_sets": {
+                    cs.name: {
+                        "cuts_sha256": _file_sha(cs.cuts_path),
+                        "verified_sha256": _file_sha(cs.verified_path),
+                    }
+                    for cs in cut_sets(ctx)
+                },
                 "git_head": git_head(),
                 "verifier_policy": verify.VERIFIER_POLICY,
                 "default_asr_policy": asr.ASR_POLICY,
             },
             "sections": sections,
-            "cut_points": cut_points(ctx, split, allow_unverified=allow_unverified)
+            "cut_points": cut_points(
+                ctx,
+                split,
+                allow_unverified=allow_unverified,
+                max_boundary_error=max_boundary_error,
+            )
             if ctx.cuts_path.exists()
             else [],
         }
@@ -3155,6 +3590,19 @@ _ids_option = click.option(
 )
 
 
+_boundary_option = click.option(
+    "--max-boundary-error",
+    "max_boundary_error",
+    type=click.IntRange(min=0),
+    default=DEFAULT_MAX_BOUNDARY_ERROR,
+    show_default=True,
+    help="Admit a cut discarded only for a boundary error of at most this many "
+    "tokens (whisper's leftover + extra-missing count) as an approximate label "
+    "[nominal - leftover, nominal + missing]. 0 = the strict rule. A removed-clip "
+    "sanity failure is a discard whatever this is.",
+)
+
+
 @calibrate_group.command("corpus")
 @click.option(
     "--rundown", "rundown", multiple=True, help="Rundown date YYYY-MM-DD (x4)."
@@ -3300,15 +3748,57 @@ def clips_cmd(c: Ctx, item_id, start_s, end_s, name) -> None:
     "--verify",
     "verify",
     is_flag=True,
-    help="After `whisper --kind cut --kind removed`: write cuts-verified.json.",
+    help="After `whisper --kind cut --kind removed`: write the verified file of "
+    "every cut set (main and supplements) that has none yet.",
+)
+@click.option(
+    "--supplement",
+    "supplement",
+    is_flag=True,
+    help="Choose MORE cuts, frozen separately as cuts-supplement-<seed>.json "
+    "(needs --seed, --family, --per-split).",
+)
+@click.option(
+    "--family",
+    "families",
+    multiple=True,
+    type=click.Choice(list(cal.FAMILIES)),
+    help="With --supplement: a family to cut (repeatable).",
+)
+@click.option(
+    "--per-split",
+    "per_split",
+    type=click.IntRange(min=1),
+    default=None,
+    help="With --supplement: new cuts per split (dev and holdout each), spread "
+    "round-robin over the families and sizes.",
+)
+@click.option(
+    "--size",
+    "sizes",
+    multiple=True,
+    type=int,
+    help="With --supplement: a size (repeatable); default each family's normal "
+    "set. multi sizes are totals: 24 or 48.",
 )
 @click.pass_obj
-def cuts_cmd(c: Ctx, seed, verify) -> None:
-    """Choose, cut, snap and freeze cuts.json (or, with --verify, check them)."""
+def cuts_cmd(c: Ctx, seed, verify, supplement, families, per_split, sizes) -> None:
+    """Choose, cut, snap and freeze cuts.json; --supplement adds more cuts in a
+    separate frozen file; --verify checks every unverified set."""
     with _guard(c):
-        if verify:
+        if verify and supplement:
+            raise Refused("--verify and --supplement are separate steps")
+        if supplement:
+            if per_split is None or not families:
+                raise Refused("--supplement needs --family and --per-split")
+            step_cuts_supplement(
+                c, seed=seed, families=families, per_split=per_split, sizes=sizes
+            )
+        elif verify:
             step_cuts_verify(c)
         else:
+            if families or per_split or sizes:
+                raise Refused("--family/--per-split/--size only go with --supplement")
             step_cuts(c, seed=seed)
 
 
@@ -3361,6 +3851,7 @@ def cuts_cmd(c: Ctx, seed, verify) -> None:
     is_flag=True,
     help="Use cuts even without cuts-verified.json.",
 )
+@_boundary_option
 @click.pass_obj
 def asr_cmd(
     c: Ctx,
@@ -3374,6 +3865,7 @@ def asr_cmd(
     retry_stale,
     allow_second_holdout_policy,
     allow_unverified,
+    max_boundary_error,
 ) -> None:
     """Gemini ASR (audio only) over bases, cuts or repro attempts."""
     with _guard(c):
@@ -3391,6 +3883,7 @@ def asr_cmd(
                 retry_stale=retry_stale,
                 allow_second_holdout_policy=allow_second_holdout_policy,
                 allow_unverified=allow_unverified,
+                max_boundary_error=max_boundary_error,
             ),
         )
 
@@ -3415,8 +3908,11 @@ def asr_cmd(
 )
 @click.option("--name", default=None)
 @click.option("--unverified", "allow_unverified", is_flag=True)
+@_boundary_option
 @click.pass_obj
-def report_cmd(c: Ctx, kind, split, policies, name, allow_unverified) -> None:
+def report_cmd(
+    c: Ctx, kind, split, policies, name, allow_unverified, max_boundary_error
+) -> None:
     """Replay the verifier over stored ASR runs: reports/<name>.json and .md."""
     with _guard(c):
         step_report(
@@ -3426,6 +3922,7 @@ def report_cmd(c: Ctx, kind, split, policies, name, allow_unverified) -> None:
             policies=tuple(dict.fromkeys(policies)),
             name=name,
             allow_unverified=allow_unverified,
+            max_boundary_error=max_boundary_error,
         )
 
 

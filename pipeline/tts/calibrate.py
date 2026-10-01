@@ -1258,6 +1258,7 @@ def verify_cut_audio(
                 "cut_position": p,  # index into ``expected``
                 "leftover": sum(hit),
                 "leftover_text": [t for t, h in zip(interval, hit, strict=True) if h],
+                "leftover_indices": [s + k for k, h in enumerate(hit) if h],
                 "missing": len(missing),
                 "missing_text": [expected[x] for x in missing],
             }
@@ -1265,11 +1266,51 @@ def verify_cut_audio(
     return {
         "ok": leftover_total == 0 and not missing_all,
         "leftover_tokens": leftover_total,
+        # script token indices of the removed tokens that are still audible
+        "leftover_indices": [i for iv in per_interval for i in iv["leftover_indices"]],
         "extra_missing_tokens": len(missing_all),
         "window": window,
         "expected_tokens": len(expected),
         "heard_tokens": len(heard),
         "intervals": per_interval,
+    }
+
+
+def approximate_label(post_cut: dict) -> dict:
+    """The count interval of a cut whose boundary whisper puts a few words off.
+
+    ``post_cut`` is a ``verify_cut_audio`` result. ``leftover`` removed tokens are
+    still audible, so fewer than the nominal count were removed; ``missing`` kept
+    tokens are gone, so up to that many more were. Each interval gets
+    ``[nominal - leftover, nominal + missing]`` and the cut ``[nominal -
+    leftover_tokens, nominal + extra_missing_tokens]``; the LOWER bound is the
+    one a claim ("caught every cut of at least N tokens") may rest on.
+    ``status`` is ``exact`` when whisper saw no boundary error at all.
+    """
+    intervals = []
+    nominal_total = 0
+    for iv in post_cut["intervals"]:
+        nominal = iv["script_end"] - iv["script_start"]
+        nominal_total += nominal
+        intervals.append(
+            {
+                "script_start": iv["script_start"],
+                "script_end": iv["script_end"],
+                "nominal": nominal,
+                "leftover": iv["leftover"],
+                "missing": iv["missing"],
+                "lower": max(0, nominal - iv["leftover"]),
+                "upper": nominal + iv["missing"],
+            }
+        )
+    error = post_cut["leftover_tokens"] + post_cut["extra_missing_tokens"]
+    return {
+        "status": "exact" if error == 0 else "approx",
+        "nominal_tokens": nominal_total,
+        "lower_tokens": max(0, nominal_total - post_cut["leftover_tokens"]),
+        "upper_tokens": nominal_total + post_cut["extra_missing_tokens"],
+        "boundary_error": error,
+        "intervals": intervals,
     }
 
 
@@ -1287,6 +1328,7 @@ def reconstruction(
     *,
     min_run: int = RECON_MIN_RUN,
     audio_residue: Any = None,
+    residue_indices: Iterable[int] | None = None,
 ) -> dict:
     """Did the ASR transcribe removed text that is not in the cut audio?
 
@@ -1302,7 +1344,11 @@ def reconstruction(
     audio (a whisper dict/words list, text, or token list). Removed tokens it
     hears in the cut audio are residue (a cut a word late), not Gemini
     reconstruction, and are subtracted from ``cut_hits``; ``raw_cut_hits`` keeps
-    the unsubtracted count.
+    the unsubtracted count. ``residue_indices`` names script tokens KNOWN to be
+    audible in the cut audio (``verify_cut_audio``'s ``leftover_indices``, for a
+    cut admitted with an approximate boundary): they are residue whatever the
+    run length, so a 1-2 token leak next to genuinely reconstructed text is not
+    counted as reconstruction.
 
     The same measure on the ASR's transcript of the UNCUT base (``clean_hits``)
     is the ceiling: what the ASR produces when the text really is there.
@@ -1331,6 +1377,7 @@ def reconstruction(
         if audio_residue is not None
         else None
     )
+    known_residue = None if residue_indices is None else set(residue_indices)
     per_interval = []
     cut_total = raw_total = clean_total = residue_total = removed_total = 0
     matched_text: list[str] = []
@@ -1344,6 +1391,10 @@ def reconstruction(
             if residue_runs is not None
             else [False] * len(interval)
         )
+        if known_residue is not None:
+            residue_hit = [
+                r or (s + k) in known_residue for k, r in enumerate(residue_hit)
+            ]
         cut_hit = [h and not r for h, r in zip(raw_hit, residue_hit, strict=True)]
         clean_hit = (
             _hits(clean_runs, interval, min_run) if clean_runs is not None else None
@@ -1380,7 +1431,9 @@ def reconstruction(
         "removed_tokens": removed_total,
         "cut_hits": cut_total,
         "raw_cut_hits": raw_total,
-        "audio_residue_tokens": residue_total if residue_runs is not None else None,
+        "audio_residue_tokens": residue_total
+        if residue_runs is not None or known_residue is not None
+        else None,
         "clean_hits": clean_total if clean_runs is not None else None,
         "fraction": cut_total / removed_total if removed_total else 0.0,
         "fraction_of_clean": (
@@ -1584,6 +1637,11 @@ class EvalRecord:
     family: str | None = None
     size_bin: int | None = None
     removed: tuple[tuple[int, int], ...] = ()
+    # ``approx``: whisper put the cut's boundary a few words off; the label is the
+    # interval [lower_tokens, upper_tokens] and ``size_bin`` stays the nominal bin.
+    label_status: str = "exact"
+    lower_tokens: int | None = None
+    upper_tokens: int | None = None
 
     def to_dict(self) -> dict:
         return _jsonable(asdict(self))
@@ -1658,6 +1716,7 @@ def _dims(r: EvalRecord) -> dict[str, str]:
         dims["family"] = str(r.family)
         dims["size_bin"] = str(r.size_bin)
         dims["family_size"] = f"{r.family}/{r.size_bin}"
+        dims["label_status"] = r.label_status
     return dims
 
 
@@ -1736,7 +1795,12 @@ def evaluate(
             for f in fields:
                 _bump(target, "overall", f)
             for dim, value in dims.items():
-                if r.kind == "base" and dim in ("family", "size_bin", "family_size"):
+                if r.kind == "base" and dim in (
+                    "family",
+                    "size_bin",
+                    "family_size",
+                    "label_status",
+                ):
                     continue
                 for f in fields:
                     _bump(target.setdefault(f"by_{dim}", {}), value, f)
