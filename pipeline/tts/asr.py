@@ -38,17 +38,6 @@ ASR_PROMPT = (
 ASR_TEMPERATURE = 0
 DEFAULT_ASR_TIMEOUT_SECONDS = 90.0
 
-# Everything that decides which audio passes, on the ASR side. No thinking
-# config is sent, so the model's default applies; say so, so a change to send
-# one is a visible edit here. Changing ASR_MODEL, ASR_PROMPT (bump
-# ASR_PROMPT_VERSION with it) or the generation config changes this string, and
-# with it verify.VERIFIER_POLICY, which T3 must fold into the render cache key.
-# (The string describes the DEFAULT model; a caller passing ``model=`` to
-# GeminiTranscriber is outside the policy and must say so in its own key.)
-ASR_POLICY = (
-    f"{ASR_MODEL}|prompt-v{ASR_PROMPT_VERSION}|temp{ASR_TEMPERATURE}|thinking-default"
-)
-
 # "default" sends no thinking config (the model's own default applies); "low"
 # sends ThinkingLevel.LOW. gemini-3.8-flash rejects MINIMAL (HTTP 400).
 THINKING_SETTINGS = ("default", "low")
@@ -63,15 +52,23 @@ def _check_thinking(thinking: str) -> str:
 
 
 def policy_for(model: str = ASR_MODEL, thinking: str = "default") -> str:
-    """The ASR policy string for a model and thinking setting.
-
-    ``policy_for()`` is exactly ``ASR_POLICY``.
-    """
+    """The ASR policy string for a model and thinking setting."""
     _check_thinking(thinking)
     return (
         f"{model}|prompt-v{ASR_PROMPT_VERSION}|temp{ASR_TEMPERATURE}"
         f"|thinking-{thinking}"
     )
+
+
+# Everything that decides which audio passes, on the ASR side, for the
+# production default: "gemini-3.8-flash|prompt-v1|temp0|thinking-default". It is
+# derived from policy_for() (never retyped) so the two cannot drift. Changing
+# ASR_MODEL, ASR_PROMPT (bump ASR_PROMPT_VERSION with it) or the generation
+# config changes it, and with it verify.VERIFIER_POLICY, which is folded into
+# the render cache key. A GeminiTranscriber built with another model or
+# thinking setting reports its own string as ``.policy`` and on every
+# Transcription, and verify_audio records that in the verdict.
+ASR_POLICY = policy_for()
 
 
 def _generation_config(thinking: str = "default") -> types.GenerateContentConfig:
@@ -109,6 +106,9 @@ class Transcription:
     input_tokens: int | None
     output_tokens: int | None
     thinking_tokens: int | None
+    # The transcriber's policy string (model, prompt, generation config). None =
+    # unknown (a fake or an older caller); verify then assumes ASR_POLICY.
+    policy: str | None = None
 
 
 def _make_genai_client_unguarded(
@@ -222,6 +222,7 @@ class GeminiTranscriber:
             input_tokens=getattr(usage, "prompt_token_count", None),
             output_tokens=getattr(usage, "candidates_token_count", None),
             thinking_tokens=getattr(usage, "thoughts_token_count", None),
+            policy=self.policy,
         )
 
     def close(self) -> None:

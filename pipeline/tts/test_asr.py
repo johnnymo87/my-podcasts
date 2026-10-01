@@ -406,3 +406,20 @@ def test_unknown_thinking_is_a_value_error(bad):
         GeminiTranscriber(thinking=bad)
     with pytest.raises(ValueError):
         asr._generation_config(bad)
+
+
+def test_transcription_carries_the_transcribers_policy():
+    t, _, p = transcriber_with(response("hello world"))
+    with p:
+        assert t(b"x", "audio/wav").policy == asr.ASR_POLICY
+    low = GeminiTranscriber(timeout_s=30, thinking="low")
+    with patch.object(
+        asr, "_make_genai_client", lambda timeout_s: FakeClient(response())
+    ):
+        out = low(b"x", "audio/wav")
+    assert out.policy == low.policy and "thinking-low" in out.policy
+
+
+def test_default_policy_string_is_pinned_and_derived():
+    assert asr.ASR_POLICY == "gemini-3.8-flash|prompt-v1|temp0|thinking-default"
+    assert asr.ASR_POLICY == asr.policy_for("gemini-3.8-flash", "default")

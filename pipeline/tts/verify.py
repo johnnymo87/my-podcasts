@@ -31,7 +31,14 @@ from pipeline.tts.normalize import normalize_tokens
 
 
 VERIFIER_VERSION = "1"
-VERIFIER_POLICY = f"verifier-v{VERIFIER_VERSION}|{ASR_POLICY}"
+
+
+def verifier_policy(asr_policy: str = ASR_POLICY) -> str:
+    """Both halves of the policy for a given ASR policy string."""
+    return f"verifier-v{VERIFIER_VERSION}|{asr_policy}"
+
+
+VERIFIER_POLICY = verifier_policy()
 _EXCERPT_TOKENS = 30
 
 
@@ -291,6 +298,7 @@ class AsrInfo:
     output_tokens: int | None
     thinking_tokens: int | None
     transcript_chars: int
+    policy: str | None = None  # the transcriber's ASR policy; None = unknown
 
 
 @dataclass(frozen=True)
@@ -314,7 +322,11 @@ class Verdict:
 
 
 def _unavailable(
-    reason: str, detail: str, th: VerifyThresholds, asr: AsrInfo | None
+    reason: str,
+    detail: str,
+    th: VerifyThresholds,
+    asr: AsrInfo | None,
+    policy: str = VERIFIER_POLICY,
 ) -> Verdict:
     return Verdict(
         "unavailable",
@@ -324,7 +336,7 @@ def _unavailable(
         asr,
         th,
         VERIFIER_VERSION,
-        VERIFIER_POLICY,
+        policy,
         "chunk",
     )
 
@@ -341,11 +353,20 @@ def verify_audio(
 
     Only ``TranscriptionUnavailable`` becomes "unavailable"; any other
     exception from the transcriber is a bug and propagates.
+
+    The verdict's ``verifier_policy`` names the ASR policy actually used: the
+    transcription's own, else the transcriber's ``policy`` attribute, else the
+    production default ``ASR_POLICY``.
     """
+    declared = getattr(transcriber, "policy", None)
+    fallback_policy = declared if isinstance(declared, str) and declared else ASR_POLICY
     try:
         tr = transcriber(audio, mime_type)
     except TranscriptionUnavailable as exc:
-        return _unavailable(exc.reason, str(exc), thresholds, None)
+        return _unavailable(
+            exc.reason, str(exc), thresholds, None, verifier_policy(fallback_policy)
+        )
+    policy = verifier_policy(tr.policy or fallback_policy)
     info = AsrInfo(
         model=tr.model,
         prompt_version=tr.prompt_version,
@@ -355,10 +376,11 @@ def verify_audio(
         output_tokens=tr.output_tokens,
         thinking_tokens=tr.thinking_tokens,
         transcript_chars=len(tr.text),
+        policy=tr.policy,
     )
     if not normalize_tokens(tr.text):
         return _unavailable(
-            "asr_empty", "transcript has no word tokens", thresholds, info
+            "asr_empty", "transcript has no word tokens", thresholds, info, policy
         )
     a = analyze(script_text, tr.text, thresholds)
     return Verdict(
@@ -369,6 +391,6 @@ def verify_audio(
         info,
         thresholds,
         VERIFIER_VERSION,
-        VERIFIER_POLICY,
+        policy,
         "chunk",
     )

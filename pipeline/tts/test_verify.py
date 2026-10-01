@@ -337,3 +337,53 @@ def test_net_deficit_off_is_identical_to_before_on_a_plain_skip():
     )
     assert base == same
     assert VERIFIER_VERSION == "1"
+
+
+def test_production_policy_strings_are_pinned():
+    from pipeline.tts import asr
+
+    assert asr.ASR_POLICY == "gemini-3.8-flash|prompt-v1|temp0|thinking-default"
+    assert asr.ASR_POLICY == asr.policy_for()
+    assert VERIFIER_POLICY == f"verifier-v1|{asr.ASR_POLICY}"
+
+
+def test_verdict_records_the_policy_of_the_transcriber_actually_used():
+    from pipeline.tts import asr
+    from pipeline.tts.verify import verifier_policy
+
+    low = asr.policy_for(thinking="low")
+
+    def t(audio, mime_type):
+        return Transcription(
+            as_asr(SCRIPT), "gemini-3.8-flash", "1", "STOP", 1.0, 1, 2, 3, policy=low
+        )
+
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.status == "pass"
+    assert v.asr.policy == low
+    assert v.verifier_policy == verifier_policy(low) != VERIFIER_POLICY
+    assert v.to_dict()["asr"]["policy"] == low
+    assert v.to_dict()["verifier_policy"] == f"verifier-v{VERIFIER_VERSION}|{low}"
+
+
+def test_verdict_without_a_transcription_policy_falls_back_to_the_default():
+    t, _ = fake_transcriber(as_asr(SCRIPT))
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.asr.policy is None
+    assert v.verifier_policy == VERIFIER_POLICY
+
+
+def test_unavailable_verdict_uses_the_transcribers_policy_attribute():
+    from pipeline.tts import asr
+    from pipeline.tts.verify import verifier_policy
+
+    low = asr.GeminiTranscriber(thinking="low")
+    exc = TranscriptionUnavailable("asr_timeout", "slow")
+
+    def t(audio, mime_type):
+        raise exc
+
+    t.policy = low.policy
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.status == "unavailable"
+    assert v.verifier_policy == verifier_policy(low.policy)
