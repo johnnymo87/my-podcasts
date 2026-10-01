@@ -442,3 +442,79 @@ def test_unavailable_verdict_uses_the_transcribers_policy_attribute():
     v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
     assert v.status == "unavailable"
     assert v.verifier_policy == verifier_policy(low.policy)
+
+
+# --- diagnostics: what the ASR heard (never affects flagging) ----------------
+
+
+def _unique_words(n: int, prefix: str = "") -> list[str]:
+    """Distinct alphabetic words, so difflib anchors exactly where we intend."""
+    import itertools
+    import string
+
+    gen = ("".join(c) for c in itertools.product(string.ascii_lowercase, repeat=3))
+    return [prefix + w for w in itertools.islice(gen, n)]
+
+
+def test_flagged_span_records_what_was_heard():
+    script = _unique_words(60)
+    transcript = script[:25] + ["xray", "yankee"] + script[35:]  # 10 words -> 2
+    a = analyze(" ".join(script), " ".join(transcript))
+    flagged = [s for s in a.spans if s.flagged]
+    assert len(flagged) == 1
+    assert flagged[0].script_words == 10 and flagged[0].transcript_words == 2
+    assert flagged[0].heard == "xray yankee"
+    assert flagged[0].excerpt == " ".join(script[25:35])
+
+
+def test_heard_is_empty_when_the_gap_has_no_transcript_words():
+    script = _unique_words(60)
+    transcript = script[:20] + script[40:]  # 20 words vanish outright
+    a = analyze(" ".join(script), " ".join(transcript))
+    [flagged] = [s for s in a.spans if s.flagged]
+    assert flagged.heard == ""
+
+
+def test_heard_is_capped_at_the_excerpt_length():
+    script = _unique_words(120)
+    noise = _unique_words(45, prefix="z")  # 45 heard words in place of 60
+    transcript = script[:30] + noise + script[90:]
+    a = analyze(" ".join(script), " ".join(transcript))
+    [flagged] = [s for s in a.spans if s.flagged]
+    assert flagged.transcript_words == 45
+    assert flagged.heard == " ".join(noise[:30])
+    assert len(flagged.heard.split()) == 30
+
+
+def test_unflagged_spans_also_record_heard():
+    script = _unique_words(40)
+    transcript = script[:20] + ["qq"] + script[21:]  # one substitution
+    a = analyze(" ".join(script), " ".join(transcript))
+    [span] = a.spans
+    assert not span.flagged
+    assert span.heard == "qq"
+
+
+def test_verdict_carries_the_raw_asr_text():
+    raw = as_asr(SCRIPT)
+    t, _ = fake_transcriber(raw)
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.transcript == raw
+    assert v.to_dict()["transcript"] == raw
+
+
+def test_verdict_carries_the_transcript_on_omission_and_asr_empty():
+    raw = drop_words(as_asr(SCRIPT), 200, 40)
+    t, _ = fake_transcriber(raw)
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.status == "omission" and v.transcript == raw
+    t, _ = fake_transcriber("... --- ...")
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.status == "unavailable" and v.reasons == ("asr_empty",)
+    assert v.transcript == "... --- ..."
+
+
+def test_verdict_transcript_is_none_when_the_transcriber_raised():
+    t, _ = fake_transcriber(exc=TranscriptionUnavailable("asr_timeout", "slow"))
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.transcript is None

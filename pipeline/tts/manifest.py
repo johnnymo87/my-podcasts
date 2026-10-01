@@ -30,6 +30,31 @@ def _safe_component(value: str) -> str:
     return _UNSAFE.sub("-", value).lstrip(".") or "unnamed"
 
 
+OMISSION_AUDIO_DIRNAME = "omission-audio"
+
+
+def utc_stamp() -> str:
+    """The timestamp in manifest (and omission clip) file names, microseconds
+    included so two attempts in one second never collide."""
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+def omission_audio_dir(manifest_dir: Path, feed_slug: str) -> Path:
+    """Where a feed's kept omission clips live: next to its manifests, in a
+    subdirectory (so the ``*/*.json`` manifest glob never sees them)."""
+    return manifest_dir / _safe_component(feed_slug) / OMISSION_AUDIO_DIRNAME
+
+
+def omission_clip_path(
+    omission_dir: Path, episode_id: str, stamp: str, *, chunk: int, attempt: int
+) -> Path:
+    """``<id>-<stamp>-c<chunk>-a<attempt>.mp3``, the id sanitized and truncated
+    exactly as a manifest's is."""
+    suffix = f"-{stamp}-c{chunk:04d}-a{attempt}.mp3"
+    safe_id = _safe_component(episode_id)[: _MAX_FILENAME - len(suffix)]
+    return omission_dir / f"{safe_id}{suffix}"
+
+
 def write_manifest(
     manifest_dir: Path, *, feed_slug: str, episode_id: str, record: dict
 ) -> Path | None:
@@ -43,7 +68,7 @@ def write_manifest(
     """
     tmp: Path | None = None
     try:
-        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        stamp = utc_stamp()
         suffix = f"-{stamp}.json"
         safe_id = _safe_component(episode_id)[: _MAX_FILENAME - len(suffix)]
         path = manifest_dir / _safe_component(feed_slug) / f"{safe_id}{suffix}"
@@ -66,12 +91,21 @@ def write_manifest(
 
 
 def prune_manifests(manifest_dir: Path, *, max_age_days: int = RETENTION_DAYS) -> None:
-    """Remove manifests older than ``max_age_days`` (by mtime). Never raises."""
+    """Remove manifests, kept omission clips (``*/omission-audio/*.mp3``) and stale
+    clip encode temp files (``*.tmp`` there), older than ``max_age_days`` (by
+    mtime). Never raises."""
     try:
         cutoff = time.time() - max_age_days * 86400
-        for path in manifest_dir.glob("*/*.json"):
-            with contextlib.suppress(OSError):
-                if path.stat().st_mtime < cutoff:
-                    path.unlink()
+        # *.tmp in the clip dir: ``encode_mp3``'s temp file, left behind only if
+        # an encode was killed. Same age rule, so a live encode's is untouched.
+        for pattern in (
+            "*/*.json",
+            f"*/{OMISSION_AUDIO_DIRNAME}/*.mp3",
+            f"*/{OMISSION_AUDIO_DIRNAME}/*.tmp",
+        ):
+            for path in manifest_dir.glob(pattern):
+                with contextlib.suppress(OSError):
+                    if path.stat().st_mtime < cutoff:
+                        path.unlink()
     except Exception:  # noqa: BLE001
         return

@@ -139,3 +139,30 @@ def test_stderr_tail_is_capped(monkeypatch, tmp_path) -> None:
         encode.encode_mp3(b"\x00\x00", tmp_path / "x.mp3")
     assert str(exc.value).endswith("END")
     assert len(str(exc.value)) < 2_100
+
+
+def test_encode_timeout_defaults_to_the_module_bound_and_can_be_overridden(
+    monkeypatch, tmp_path
+) -> None:
+    seen = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(kwargs["timeout"])
+        Path(cmd[-1]).write_bytes(b"mp3")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(encode.subprocess, "run", fake_run)
+    encode.encode_mp3(b"\x00\x00", tmp_path / "a.mp3")
+    encode.encode_mp3(b"\x00\x00", tmp_path / "b.mp3", timeout=30)
+    assert encode.ENCODE_TIMEOUT_SECONDS == 600
+    assert seen == [600, 30]
+
+
+def test_a_timed_out_encode_raises_and_leaves_no_temp_file(monkeypatch, tmp_path):
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(encode.subprocess, "run", fake_run)
+    with pytest.raises(subprocess.TimeoutExpired):
+        encode.encode_mp3(b"\x00\x00", tmp_path / "x.mp3", timeout=1)
+    assert list(tmp_path.iterdir()) == []

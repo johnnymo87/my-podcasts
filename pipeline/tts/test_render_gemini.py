@@ -20,8 +20,10 @@ import pytest
 
 from pipeline.tts import cache, chunker, render
 from pipeline.tts import gemini_phase as gp
+from pipeline.tts.asr import Transcription
 from pipeline.tts.config import GeminiConfig, OpenAIConfig, RenderConfig
 from pipeline.tts.providers import GeminiProvider, OpenAIProvider, TTSProviderError
+from pipeline.tts.verify import verify_audio
 
 
 GEMINI = GeminiConfig("gemini-3.8-flash-lite-tts", "Kore")
@@ -131,6 +133,7 @@ class Env:
         self.outcome = None  # callable(chunks) -> PhaseOutcome, or an exception
         self.openai = FakeOpenAI()
         self.encoded: list[bytes] = []
+        self.encode_kwargs: list[dict] = []
         self.alerts: list[str] = []
         self.alert_result = True
 
@@ -145,8 +148,9 @@ class Env:
         monkeypatch.setattr(render, "_provider_for", lambda leaf: self.openai)
         monkeypatch.setattr(render, "_sleep", lambda s: None)
 
-        def fake_encode(pcm, out):
+        def fake_encode(pcm, out, **kw):
             self.encoded.append(pcm)
+            self.encode_kwargs.append(kw)
             out.write_bytes(b"ID3" + pcm[:10])
 
         monkeypatch.setattr(render, "encode_mp3", fake_encode)
@@ -297,7 +301,7 @@ def test_both_failing_names_both_reasons_alerts_failed_and_writes_a_failed_manif
     (alert,) = env.alerts
     assert alert.startswith(
         "TTS fallback: fp-digest 2026-09-30-fp: Gemini gemini-3.8-flash-lite-tts/Kore "
-        "second_omission -> OpenAI nova FAILED: "
+        "second_omission (chunk index 1: the budget ran out) -> OpenAI nova FAILED: "
     )
     assert "401 bad key" in alert
     [m] = env.manifests()
@@ -910,3 +914,453 @@ def test_a_slow_alert_that_completes_late_does_not_break_the_next(env, monkeypat
     assert by_episode["slow"]["alert_sent"] == "timeout"
     assert by_episode["next"]["alert_sent"] is True
     assert len(calls) == 2  # the slow one was still sent, late; then the next
+
+
+# --- the alert names what was skipped (second_omission only) ---------------------
+
+OMISSION_DETAIL = (
+    "omission (long_unmatched_span) recall 0.912, max net 24: "
+    'script "the first twelve tokens of the largest flagged span here" '
+    'heard "something else entirely"'
+)
+ALERT_HEAD = (
+    "TTS fallback: fp-digest 2026-09-30-fp: Gemini gemini-3.8-flash-lite-tts/Kore "
+)
+
+
+def test_second_omission_alert_names_the_chunk_and_what_was_dropped(env):
+    env.outcome = failed_outcome("second_omission", detail=OMISSION_DETAIL)
+    env.render()
+    assert env.alerts == [
+        ALERT_HEAD + f"second_omission (chunk index 1: {OMISSION_DETAIL}) "
+        "-> OpenAI nova rendered"
+    ]
+    # the manifest carries the same detail, untruncated
+    m = env.manifests()[0]
+    assert m["gemini_phase"]["detail"] == OMISSION_DETAIL
+    assert m["gemini_phase"]["failed_chunk"] == 1
+
+
+@pytest.mark.parametrize("reason", ["deadline", "fatal", "child_error", "exhausted"])
+def test_other_reasons_keep_todays_alert_text_exactly(env, reason):
+    # Their details are tracebacks or SDK errors; the manifest has them.
+    env.outcome = failed_outcome(reason, detail="Traceback (most recent call last): x")
+    env.render()
+    assert env.alerts == [ALERT_HEAD + f"{reason} -> OpenAI nova rendered"]
+
+
+def test_a_long_omission_detail_is_cut_to_320_characters(env):
+    detail = "omission " + "x" * 1000
+    env.outcome = failed_outcome("second_omission", detail=detail)
+    env.render()
+    (alert,) = env.alerts
+    assert f"(chunk index 1: {detail[:320]})" in alert
+    assert detail[:321] not in alert
+
+
+def test_the_omission_detail_is_whitespace_collapsed(env):
+    env.outcome = failed_outcome("second_omission", detail="omission\n  (a,b)\t recall")
+    env.render()
+    (alert,) = env.alerts
+    assert "(chunk index 1: omission (a,b) recall)" in alert
+
+
+def test_an_omission_without_a_chunk_or_detail_degrades_cleanly():
+    kw = (render.GeminiConfig("m", "Kore"), "second_omission", FALLBACK, None)
+
+    def text(**extra):
+        return render._fallback_alert_text("f", "e", *kw, **extra)
+
+    base = "TTS fallback: f e: Gemini m/Kore second_omission -> OpenAI nova rendered"
+    assert text() == base
+    assert text(detail="") == base
+    assert text(detail="   ") == base
+    assert text(detail="d") == base.replace("second_omission", "second_omission (d)")
+    assert text(detail="d", failed_chunk=2) == base.replace(
+        "second_omission", "second_omission (chunk index 2: d)"
+    )
+
+
+def test_a_detail_that_cannot_be_stringified_never_breaks_the_alert(env):
+    class BadDetail:
+        def __str__(self):
+            raise RuntimeError("no string for you")
+
+    sent = render._deliver_alert(
+        "fp-digest",
+        "2026-09-30-fp",
+        GEMINI,
+        "second_omission",
+        FALLBACK,
+        None,
+        detail=BadDetail(),
+        failed_chunk=1,
+    )
+    assert sent is True
+    assert env.alerts == [ALERT_HEAD + "second_omission -> OpenAI nova rendered"]
+
+
+def test_a_failed_fallback_still_names_the_dropped_passage(env):
+    env.outcome = failed_outcome("second_omission", detail=OMISSION_DETAIL)
+    env.openai.script = [TTSProviderError("401 bad key", retryable=False)]
+    with pytest.raises(render.TTSRenderError):
+        env.render()
+    (alert,) = env.alerts
+    assert (
+        f"second_omission (chunk index 1: {OMISSION_DETAIL}) -> OpenAI nova FAILED: "
+        in alert
+    )
+
+
+# --- the rejected audio of omission attempts is kept ---------------------------------
+
+CLIP_PCM = b"\x09\x00" * 4_800  # distinguishable from the episode audio
+
+
+def with_clips(outcome, *clips):
+    """``outcome`` with ``(chunk, n, pcm)`` clips, and the matching attempts marked."""
+    records = [
+        dict(r, attempts=[dict(a) for a in r["attempts"]])
+        for r in outcome.chunk_records
+    ]
+    for i, n, _ in clips:
+        for a in records[i]["attempts"]:
+            if a["n"] == n:
+                a["outcome"] = "omission"
+                a["omission_audio"] = gp.omission_name(i, n)
+    return dataclasses.replace(outcome, chunk_records=records, omission_audio=clips)
+
+
+def clip_files(env):
+    return sorted((env.tmp / "m" / "fp-digest" / "omission-audio").glob("*.mp3"))
+
+
+def test_clips_are_encoded_next_to_the_manifests_and_recorded_on_the_attempt(env):
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (1, 1, CLIP_PCM))
+    result = env.render()
+    assert result.provider == "gemini"
+    [clip] = clip_files(env)
+    assert clip.name.startswith("2026-09-30-fp-") and clip.name.endswith(
+        "-c0001-a1.mp3"
+    )
+    assert clip.read_bytes() == b"ID3" + CLIP_PCM[:10]  # what encode_mp3 produced
+    attempt = env.manifests()[0]["gemini_phase"]["chunks"][1]["attempts"][0]
+    assert attempt["omission_audio_file"] == str(clip) and clip.is_absolute()
+    assert "omission_audio_error" not in env.manifests()[0]["gemini_phase"]
+
+
+def test_the_episode_audio_is_encoded_before_any_clip(env):
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (0, 1, CLIP_PCM))
+    env.render()
+    assert env.encoded[0] == b"".join(gemini_pcm(i) for i in range(N_GEMINI))
+    assert env.encoded[1:] == [CLIP_PCM]
+
+
+def test_clips_of_a_fallback_render_are_saved_after_the_openai_audio(env):
+    env.outcome = lambda chunks: with_clips(
+        failed_outcome("second_omission", chunks=3), (1, 1, CLIP_PCM), (1, 2, CLIP_PCM)
+    )
+    result = env.render()
+    assert result.provider == "openai" and result.fallback_reason == "second_omission"
+    assert env.encoded[0] == OPENAI_PCM * len(env.openai.calls)
+    assert env.encoded[1:] == [CLIP_PCM, CLIP_PCM]
+    assert [c.name.rsplit("-", 2)[1:] for c in clip_files(env)] == [
+        ["c0001", "a1.mp3"],
+        ["c0001", "a2.mp3"],
+    ]
+    attempts = env.manifests()[0]["gemini_phase"]["chunks"][1]["attempts"]
+    assert "omission_audio_file" in attempts[0]
+
+
+def test_clips_are_saved_even_when_the_fallback_fails_too(env):
+    env.outcome = lambda chunks: with_clips(
+        failed_outcome("second_omission", chunks=3), (1, 1, CLIP_PCM)
+    )
+    env.openai.script = [TTSProviderError("401 bad key", retryable=False)]
+    with pytest.raises(render.TTSRenderError):
+        env.render()
+    assert len(clip_files(env)) == 1
+    [m] = env.manifests()
+    assert m["status"] == "failed"
+    assert "omission_audio_file" in m["gemini_phase"]["chunks"][1]["attempts"][0]
+
+
+def test_clips_are_saved_when_there_is_no_fallback_and_the_phase_failed(env):
+    env.outcome = lambda chunks: with_clips(
+        failed_outcome("second_omission", chunks=3), (1, 1, CLIP_PCM)
+    )
+    with pytest.raises(render.TTSRenderError, match="Gemini phase failed"):
+        env.render(CFG_NO_FALLBACK)
+    assert len(clip_files(env)) == 1
+
+
+def test_a_keyboard_interrupt_saves_no_clips_and_still_propagates(env):
+    env.outcome = lambda chunks: with_clips(
+        failed_outcome("second_omission", chunks=3), (1, 1, CLIP_PCM)
+    )
+    env.openai.script = [KeyboardInterrupt()]
+    with pytest.raises(KeyboardInterrupt):
+        env.render()
+    assert clip_files(env) == [] and CLIP_PCM not in env.encoded
+
+
+def test_without_a_manifest_dir_nothing_is_kept(env):
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (1, 1, CLIP_PCM))
+    result = env.render(manifest_dir=None)
+    assert result.provider == "gemini" and result.manifest_path is None
+    assert CLIP_PCM not in env.encoded
+    assert list(env.tmp.rglob("omission-audio")) == []
+    assert list((env.tmp / "m").rglob("*.mp3")) == []
+
+
+def test_a_clip_encode_failure_is_noted_and_the_episode_still_renders(env, monkeypatch):
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (1, 1, CLIP_PCM))
+    real = render.encode_mp3
+
+    def encode(pcm, out, **kw):
+        if pcm == CLIP_PCM:
+            raise RuntimeError("ffmpeg exploded")
+        real(pcm, out, **kw)
+
+    monkeypatch.setattr(render, "encode_mp3", encode)
+    result = env.render()
+    assert result.provider == "gemini" and (env.tmp / "out.mp3").exists()
+    [m] = env.manifests()
+    assert m["status"] == "rendered"
+    assert m["gemini_phase"]["omission_audio_error"].startswith("RuntimeError: ffmpeg")
+    assert "omission_audio_file" not in m["gemini_phase"]["chunks"][1]["attempts"][0]
+    assert env.cache_result()["verification"] == "passed"
+
+
+def test_a_clip_encode_failure_does_not_break_a_fallback_render(env, monkeypatch):
+    env.outcome = lambda chunks: with_clips(
+        failed_outcome("second_omission", chunks=3), (1, 1, CLIP_PCM)
+    )
+    real = render.encode_mp3
+
+    def encode(pcm, out, **kw):
+        if pcm == CLIP_PCM:
+            raise OSError("no space left on device")
+        real(pcm, out, **kw)
+
+    monkeypatch.setattr(render, "encode_mp3", encode)
+    result = env.render()
+    assert result.provider == "openai" and (env.tmp / "out.mp3").exists()
+    [m] = env.manifests()
+    assert m["status"] == "rendered" and m["alert_sent"] is True
+    assert m["gemini_phase"]["omission_audio_error"].startswith("OSError: no space")
+
+
+def test_one_bad_clip_does_not_cost_the_others(env, monkeypatch):
+    other = b"\x07\x00" * 4_800
+    env.outcome = lambda chunks: with_clips(
+        ok_outcome(chunks), (0, 1, CLIP_PCM), (1, 1, other)
+    )
+    real = render.encode_mp3
+
+    def encode(pcm, out, **kw):
+        if pcm == CLIP_PCM:
+            raise RuntimeError("bad clip")
+        real(pcm, out, **kw)
+
+    monkeypatch.setattr(render, "encode_mp3", encode)
+    env.render()
+    [clip] = clip_files(env)
+    assert clip.name.endswith("-c0001-a1.mp3")
+    phase = env.manifests()[0]["gemini_phase"]
+    assert phase["omission_audio_error"].startswith("RuntimeError: bad clip")
+    assert "omission_audio_file" in phase["chunks"][1]["attempts"][0]
+
+
+def test_an_unusable_clip_dir_is_a_noted_error_not_a_crash(env):
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (1, 1, CLIP_PCM))
+    feed_dir = env.tmp / "m" / "fp-digest"
+    feed_dir.mkdir(parents=True)
+    (feed_dir / "omission-audio").write_text("a file where the dir should be")
+    result = env.render()
+    assert result.provider == "gemini"
+    assert "omission_audio_error" in env.manifests()[0]["gemini_phase"]
+
+
+def test_the_error_note_is_capped(env, monkeypatch):
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (1, 1, CLIP_PCM))
+    real = render.encode_mp3
+
+    def encode(pcm, out, **kw):
+        if pcm == CLIP_PCM:
+            raise RuntimeError("x" * 2000)
+        real(pcm, out, **kw)
+
+    monkeypatch.setattr(render, "encode_mp3", encode)
+    env.render()
+    assert len(env.manifests()[0]["gemini_phase"]["omission_audio_error"]) <= 300
+
+
+def test_a_phase_with_no_clips_adds_nothing_to_the_manifest(env):
+    env.outcome = ok_outcome
+    env.render()
+    assert clip_files(env) == []
+    assert not (env.tmp / "m" / "fp-digest" / "omission-audio").exists()
+    assert "omission_audio_error" not in env.manifests()[0]["gemini_phase"]
+
+
+def test_the_clip_attach_survives_a_degraded_phase_record(env, monkeypatch):
+    # If the manifest's gemini_phase fell back to the minimal record (no chunks),
+    # the clip is still saved and nothing raises.
+    monkeypatch.setattr(
+        render, "_phase_totals", lambda r: (_ for _ in ()).throw(RuntimeError("x"))
+    )
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (1, 1, CLIP_PCM))
+    result = env.render()
+    assert result.provider == "gemini" and len(clip_files(env)) == 1
+    phase = env.manifests()[0]["gemini_phase"]
+    assert phase["chunks"] == [] and "telemetry_error" in phase
+
+
+def test_saving_clips_never_raises_whatever_the_record_looks_like(tmp_path):
+    outcome = with_clips(ok_outcome(["a", "b"]), (1, 1, CLIP_PCM))
+    for record in ({}, {"gemini_phase": None}, {"gemini_phase": "nope"}):
+        render._save_omission_audio(outcome, tmp_path / "d", "ep", record)
+    # and with nothing to do, it does nothing at all
+    render._save_omission_audio(outcome, None, "ep", {})
+    render._save_omission_audio(ok_outcome(["a"]), tmp_path / "e", "ep", {})
+    assert not (tmp_path / "e").exists()
+
+
+# --- review round: bounded clip saving, recorded paths, alert wording ---------------
+
+
+def test_the_alert_detail_cut_is_320_characters():
+    assert render.ALERT_DETAIL_CHARS == 320
+
+
+def test_a_realistic_omission_summary_fits_the_alert_uncut(env):
+    """Two 12-token excerpts plus the boilerplate must survive the cut, or the
+    alert would end mid-quote exactly where it says what was dropped."""
+    script = (
+        "Treasury yields climbed sharply on Thursday after the Federal Reserve "
+        "chair signaled that additional interest rate reductions remain "
+        "possible later this year despite persistent inflationary pressures "
+        "across housing, healthcare, and transportation services."
+    )
+    heard = (
+        "Treasury yields climbed sharply on Thursday and then the host described "
+        "an entirely different segment about gardening tips and weather"
+    )
+    verdict = verify_audio(
+        b"",
+        "audio/wav",
+        script,
+        transcriber=lambda a, m: Transcription(heard, "m", "0", "STOP", 0.0, 1, 1, 0),
+    )
+    assert verdict.status == "omission"
+    summary = gp._omission_summary(verdict)
+    assert 200 < len(summary) < render.ALERT_DETAIL_CHARS, len(summary)
+    env.outcome = failed_outcome("second_omission", detail=summary)
+    env.render()
+    (alert,) = env.alerts
+    assert f"(chunk index 1: {summary})" in alert  # not cut
+
+
+def test_clip_encodes_are_individually_bounded_and_the_episode_encode_is_not(env):
+    env.outcome = lambda chunks: with_clips(
+        ok_outcome(chunks), (0, 1, CLIP_PCM), (1, 1, CLIP_PCM)
+    )
+    env.render()
+    episode, *clips = env.encode_kwargs
+    assert episode == {}  # the episode keeps encode_mp3's own default bound
+    assert len(clips) == 2
+    for kw in clips:
+        assert 0 < kw["timeout"] <= render.OMISSION_CLIP_TIMEOUT_SECONDS == 30
+
+
+def test_the_clip_budget_is_sixty_seconds_in_total():
+    assert render.OMISSION_CLIPS_BUDGET_SECONDS == 60
+
+
+@pytest.mark.parametrize("path", ["ok", "fallback"])
+def test_a_clip_encode_that_times_out_is_noted_and_the_render_completes(
+    env, monkeypatch, path
+):
+    import subprocess
+
+    if path == "ok":
+        env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (1, 1, CLIP_PCM))
+    else:
+        env.outcome = lambda chunks: with_clips(
+            failed_outcome("second_omission", chunks=3), (1, 1, CLIP_PCM)
+        )
+    real = render.encode_mp3
+
+    def encode(pcm, out, **kw):
+        if pcm == CLIP_PCM:
+            raise subprocess.TimeoutExpired(["ffmpeg"], kw["timeout"])
+        real(pcm, out, **kw)
+
+    monkeypatch.setattr(render, "encode_mp3", encode)
+    result = env.render()
+    assert (env.tmp / "out.mp3").exists()
+    assert result.provider == ("gemini" if path == "ok" else "openai")
+    [m] = env.manifests()
+    assert m["status"] == "rendered"
+    assert m["gemini_phase"]["omission_audio_error"].startswith("TimeoutExpired")
+    assert clip_files(env) == []
+
+
+def test_the_total_budget_stops_further_clips_and_says_so(env, monkeypatch):
+    import time as _time
+
+    monkeypatch.setattr(render, "OMISSION_CLIPS_BUDGET_SECONDS", 0.05)
+    env.outcome = lambda chunks: with_clips(
+        ok_outcome(chunks), (0, 1, CLIP_PCM), (1, 1, CLIP_PCM), (2, 1, CLIP_PCM)
+    )
+    real = render.encode_mp3
+
+    def slow(pcm, out, **kw):
+        if pcm == CLIP_PCM:
+            _time.sleep(0.08)  # the first clip alone spends the whole budget
+        real(pcm, out, **kw)
+
+    monkeypatch.setattr(render, "encode_mp3", slow)
+    result = env.render()
+    assert result.provider == "gemini"
+    [clip] = clip_files(env)
+    assert clip.name.endswith("-c0000-a1.mp3")
+    note = env.manifests()[0]["gemini_phase"]["omission_audio_error"]
+    assert "budget" in note and "2 clip(s) skipped" in note
+
+
+def test_each_clip_timeout_shrinks_to_what_is_left_of_the_budget(env, monkeypatch):
+    monkeypatch.setattr(render, "OMISSION_CLIPS_BUDGET_SECONDS", 5.0)
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (0, 1, CLIP_PCM))
+    env.render()
+    assert 0 < env.encode_kwargs[1]["timeout"] <= 5.0
+
+
+def test_saved_clip_paths_are_listed_on_the_phase_record(env):
+    env.outcome = lambda chunks: with_clips(
+        ok_outcome(chunks), (0, 1, CLIP_PCM), (1, 1, CLIP_PCM)
+    )
+    env.render()
+    files = env.manifests()[0]["gemini_phase"]["omission_audio_files"]
+    on_disk = [str(p) for p in clip_files(env)]
+    assert [f["file"] for f in files] == on_disk
+    assert [(f["chunk"], f["attempt"]) for f in files] == [(0, 1), (1, 1)]
+
+
+def test_saved_clip_paths_survive_a_degraded_phase_record(env, monkeypatch):
+    monkeypatch.setattr(
+        render, "_phase_totals", lambda r: (_ for _ in ()).throw(RuntimeError("x"))
+    )
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (1, 1, CLIP_PCM))
+    env.render()
+    phase = env.manifests()[0]["gemini_phase"]
+    assert phase["chunks"] == [] and "telemetry_error" in phase
+    [f] = phase["omission_audio_files"]
+    assert f["file"] == str(clip_files(env)[0]) and (f["chunk"], f["attempt"]) == (1, 1)
+
+
+def test_no_clips_means_no_omission_audio_files_key(env):
+    env.outcome = ok_outcome
+    env.render()
+    assert "omission_audio_files" not in env.manifests()[0]["gemini_phase"]

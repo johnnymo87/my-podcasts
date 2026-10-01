@@ -19,6 +19,12 @@ Files, all in the parent-created scratch directory and all written atomically
 ``chunk-NNNN.pcm``
     A *verified* chunk's raw PCM (24 kHz mono s16le). Only verified audio is
     ever written here.
+``omission-NNNN-N.pcm``
+    The raw PCM of chunk NNNN's TTS attempt N when ASR rejected it as an
+    omission, written best-effort and atomically *before* the progress record
+    that names it (``attempt["omission_audio"]``). Never used as episode audio;
+    the runner reads at most 4 of them into ``PhaseOutcome.omission_audio`` for
+    a human to listen to. The parent's validation ignores them.
 ``progress-NNNN.json``
     ``{"schema": 1, "index": i, "attempts": [attempt, ...]}``, rewritten before
     each stage starts so a kill leaves the record of what was in flight. An
@@ -34,7 +40,18 @@ Files, all in the parent-created scratch directory and all written atomically
                         "elapsed_s": None|float, "input_tokens": None|int,
                         "output_tokens": None|int, "thinking_tokens": None|int},
          "outcome": None|"transient_error"|"fatal"|"omission"|
-                    "asr_unavailable"|"verified"}
+                    "asr_unavailable"|"verified",
+         "omission_audio": <omission-NNNN-N.pcm>}  # only on a kept omission
+
+    A span is ``{"script_start", "script_end", "script_words",
+    "transcript_words", "net_missing", "flagged", "excerpt", "heard"}``:
+    coordinates are normalized-token indices into the chunk, ``excerpt`` is the
+    script's first <=30 normalized tokens of the gap and ``heard`` the ASR's.
+    An ``omission`` record keeps every flagged span plus the largest unflagged
+    ones (at least 3, at most 8) and the raw ASR ``transcript`` (capped); a
+    ``pass`` keeps its single largest-``net_missing`` span. All of this is
+    diagnostic and best-effort: a failure building it leaves the original fields
+    intact and the new ones ``None`` / ``[]``.
 
     ``None`` tokens mean *unknown* (the request was killed, or failed before
     reporting usage), never zero. Synth and ASR tokens are separate, and a
@@ -66,6 +83,7 @@ import multiprocessing
 import os
 import queue
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -100,6 +118,18 @@ WATCHDOG_POLL_SECONDS = 0.25
 # write a terminal ``deadline`` result first, so the watchdog is a backstop and
 # not a race with the normal path.
 WATCHDOG_GRACE_SECONDS = 1.0
+
+# What an ASR record keeps so a verdict can be diagnosed afterwards (T6 prereq).
+MAX_RECORDED_SPANS = 8  # an omission records its flagged spans, then clues, up to this
+MIN_RECORDED_OMISSION_SPANS = 3  # an omission records at least this many (if any exist)
+MAX_RECORDED_TRANSCRIPT_CHARS = 6000  # omission only; a 3000-char chunk is ~3000
+SUMMARY_TOKENS = 12  # script / heard excerpt length in the omission summary
+
+# The audio an omission verdict rejected is kept, so a human can listen: the ASR
+# that flags an omission is itself fallible (T5: whisper dropped words in 9 of 10
+# clips it flagged). Omissions are rare, so this is cheap.
+MAX_OMISSION_CLIPS = 4  # per phase
+MAX_OMISSION_CLIP_BYTES = 24_000_000  # ~8.3 min of 24 kHz s16 PCM (48,000 B/s)
 
 # --- fallback reasons: a closed set --------------------------------------------
 
@@ -156,6 +186,11 @@ def chunk_name(i: int) -> str:
 
 def progress_name(i: int) -> str:
     return f"progress-{i:04d}.json"
+
+
+def omission_name(i: int, n: int) -> str:
+    """Chunk ``i``'s rejected audio from TTS attempt ``n`` (raw PCM, like a chunk)."""
+    return f"omission-{i:04d}-{n}.pcm"
 
 
 # Module attributes, so in-process tests can replace them without patching the
@@ -236,6 +271,89 @@ def _new_attempt(n: int) -> dict[str, Any]:
     }
 
 
+def _no_diagnostics() -> dict[str, Any]:
+    """The diagnostic keys of an ASR record that has nothing to say (an
+    unavailable verdict, a request still in flight, or a diagnostics failure):
+    same shape as a full record, so readers never branch on missing keys."""
+    return {
+        "script_tokens": None,
+        "transcript_tokens": None,
+        "matched_tokens": None,
+        "max_net_missing": None,
+        "spans": [],
+        "transcript": None,
+    }
+
+
+def _span_dict(span) -> dict[str, Any]:
+    return {
+        "script_start": span.script_start,
+        "script_end": span.script_end,
+        "script_words": span.script_words,
+        "transcript_words": span.transcript_words,
+        "net_missing": span.net_missing,
+        "flagged": span.flagged,
+        "excerpt": span.excerpt,
+        "heard": span.heard,
+    }
+
+
+def _recorded_spans(verdict) -> list[dict[str, Any]]:
+    """The spans worth keeping from ``verdict``'s alignment.
+
+    ``omission``: every flagged span, then the largest-``net_missing`` unflagged
+    ones until there are ``MIN_RECORDED_OMISSION_SPANS`` (a recall-floor failure
+    has no flagged span, so these are its best clues), at most
+    ``MAX_RECORDED_SPANS``, flagged first and largest first. ``pass``: the single
+    span with the largest ``net_missing``, the margin to trend. Anything else
+    (``unavailable``): none.
+    """
+    if verdict.analysis is None:
+        return []
+    spans = verdict.analysis.spans
+    by_net = sorted(spans, key=lambda s: (-s.net_missing, s.script_start))
+    if verdict.status == "omission":
+        flagged = [s for s in by_net if s.flagged]
+        rest = [s for s in by_net if not s.flagged]
+        chosen = flagged + rest[: max(0, MIN_RECORDED_OMISSION_SPANS - len(flagged))]
+        return [_span_dict(s) for s in chosen[:MAX_RECORDED_SPANS]]
+    if verdict.status == "pass":
+        return [_span_dict(by_net[0])] if by_net else []
+    return []
+
+
+def _capped_transcript(text: str | None) -> str | None:
+    if text is None:
+        return None
+    if len(text) <= MAX_RECORDED_TRANSCRIPT_CHARS:
+        return text
+    return text[:MAX_RECORDED_TRANSCRIPT_CHARS] + "...[truncated]"
+
+
+def _diagnostics(verdict) -> dict[str, Any]:
+    """Counts, spans and (omission only) the transcript. Best effort: telemetry
+    never costs a chunk, so any failure here degrades to ``_no_diagnostics``."""
+    try:
+        a = verdict.analysis
+        if a is None:
+            return _no_diagnostics()
+        return {
+            "script_tokens": a.script_tokens,
+            "transcript_tokens": a.transcript_tokens,
+            "matched_tokens": a.matched_tokens,
+            "max_net_missing": max((s.net_missing for s in a.spans), default=0),
+            "spans": _recorded_spans(verdict),
+            "transcript": (
+                _capped_transcript(verdict.transcript)
+                if verdict.status == "omission"
+                else None
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001
+        print(f"gemini-phase: ASR diagnostics not recorded: {exc!r}", file=sys.stderr)
+        return _no_diagnostics()
+
+
 def _asr_record(verdict) -> dict[str, Any]:
     info = verdict.asr
     return {
@@ -247,7 +365,42 @@ def _asr_record(verdict) -> dict[str, Any]:
         "input_tokens": info.input_tokens if info else None,
         "output_tokens": info.output_tokens if info else None,
         "thinking_tokens": info.thinking_tokens if info else None,
+        **_diagnostics(verdict),
     }
+
+
+def _trim_tokens(text: str) -> str:
+    return " ".join(text.split()[:SUMMARY_TOKENS])
+
+
+def _omission_summary(verdict) -> str:
+    """One line naming what an omission dropped, e.g.
+    ``omission (long_unmatched_span) recall 0.912, max net 24: script "..." heard
+    "..."`` (the largest-``net_missing`` span; script and heard trimmed to 12 tokens).
+
+    It becomes the ``second_omission`` failure detail, so it must never raise:
+    on any problem it falls back to the plain ``omission (<reasons>)`` text.
+    """
+    try:
+        plain = f"omission ({','.join(verdict.reasons) or 'flagged'})"
+    except Exception:  # noqa: BLE001
+        return "omission (flagged)"
+    try:
+        recall = verdict.recall
+        head = f"{plain} recall {'n/a' if recall is None else f'{recall:.3f}'}"
+        spans = verdict.analysis.spans if verdict.analysis is not None else ()
+        if not spans:
+            return head
+        top = max(spans, key=lambda s: s.net_missing)
+        # A recall-floor-only omission has no flagged span: say so, or "max net 3"
+        # reads as a gap that was near the flag rather than scattered loss.
+        unflagged = "" if any(s.flagged for s in spans) else " (no flagged span)"
+        return (
+            f"{head}, max net {top.net_missing}{unflagged}: "
+            f'script "{_trim_tokens(top.excerpt)}" heard "{_trim_tokens(top.heard)}"'
+        )
+    except Exception:  # noqa: BLE001
+        return plain
 
 
 def _render_chunk(
@@ -385,6 +538,7 @@ def _render_chunk_inner(
             "input_tokens": None,
             "output_tokens": None,
             "thinking_tokens": None,
+            **_no_diagnostics(),
         }
         save()  # "started", before the request
         transcriber = make_transcriber(min(remaining(), REQUEST_TIMEOUT_CAP_SECONDS))
@@ -420,9 +574,18 @@ def _render_chunk_inner(
             )
         # omission: the audio is discarded; re-render once if the counter allows
         attempt["outcome"] = "omission"
+        # Best effort and before the save() that records the outcome, so a name
+        # in the progress file always has a whole file behind it (the write is
+        # atomic). Never changes the chunk's outcome.
+        name = omission_name(i, attempt["n"])
+        try:
+            _atomic_write(scratch / name, pcm)
+            attempt["omission_audio"] = name
+        except Exception as exc:  # noqa: BLE001
+            print(f"gemini-phase: {name} not saved: {exc!r}", file=sys.stderr)
         save()
         omissions += 1
-        last_problem = f"omission ({','.join(verdict.reasons) or 'flagged'})"
+        last_problem = _omission_summary(verdict)
         if omissions >= 2:
             raise _ChunkFailure(REASON_SECOND_OMISSION, last_problem)
 
@@ -723,6 +886,10 @@ class PhaseOutcome:
     failed_chunk: int | None = None
     child_pid: int | None = None
     child_started_s: float | None = None
+    # (chunk index, attempt n, PCM) for each omission attempt whose rejected audio
+    # was kept: at most MAX_OMISSION_CLIPS, in (chunk, n) order, collected whether
+    # or not the phase succeeded. Diagnostic only; may be empty for any reason.
+    omission_audio: tuple[tuple[int, int, bytes], ...] = ()
 
 
 class _InvalidResult(Exception):
@@ -844,6 +1011,66 @@ def _read_progress(scratch: Path | None, n_chunks: int) -> list[dict[str, Any]]:
         else:
             records.append({"index": i, "attempts": [], "progress": "unreadable"})
     return records
+
+
+def _collect_omission_audio(
+    scratch: Path | None, records: Any, failed_chunk: int | None = None
+) -> tuple[tuple[int, int, bytes], ...]:
+    """The rejected audio the child kept, from its progress ``records``.
+
+    A clip is a candidate only if its attempt names exactly
+    ``omission_name(chunk, n)`` and the file is a regular, non-empty,
+    even-length file of at most ``MAX_OMISSION_CLIP_BYTES`` (checked with
+    ``lstat`` before anything is read). At most ``MAX_OMISSION_CLIPS`` are
+    kept: the failing chunk's first (``failed_chunk``, the chunk that ended the
+    phase, whose audio is the one you most need), then the earliest of the
+    rest; a candidate that then fails to read is replaced by the next. The
+    result is always in (chunk, n) order. Telemetry: this never raises; any
+    problem yields fewer clips.
+    """
+    kept: list[tuple[int, int, bytes]] = []
+    try:
+        if scratch is None or not isinstance(records, list):
+            return ()
+        candidates: list[tuple[int, int, Path]] = []
+        for i, rec in enumerate(records):
+            attempts = rec.get("attempts") if isinstance(rec, dict) else None
+            if not isinstance(attempts, list):
+                continue
+            wanted = set()
+            for attempt in attempts:
+                if not isinstance(attempt, dict):
+                    continue
+                n = attempt.get("n")
+                if _is_int(n) and attempt.get("omission_audio") == omission_name(i, n):
+                    wanted.add(n)
+            for n in sorted(wanted):
+                try:
+                    path = scratch / omission_name(i, n)
+                    st = path.lstat()  # lstat: a symlink is not followed
+                except Exception:  # noqa: BLE001
+                    continue
+                if (
+                    stat.S_ISREG(st.st_mode)
+                    and 0 < st.st_size <= MAX_OMISSION_CLIP_BYTES
+                    and not st.st_size % 2
+                ):
+                    candidates.append((i, n, path))
+        # sorted() is stable: the failing chunk first, everything else in order.
+        failing = failed_chunk if _is_int(failed_chunk) else None
+        candidates.sort(key=lambda c: c[0] != failing)
+        for i, n, path in candidates:
+            if len(kept) >= MAX_OMISSION_CLIPS:
+                break
+            try:
+                data = path.read_bytes()
+            except Exception:  # noqa: BLE001 -- one bad clip costs only itself
+                continue
+            if 0 < len(data) <= MAX_OMISSION_CLIP_BYTES and not len(data) % 2:
+                kept.append((i, n, data))
+    except Exception:  # noqa: BLE001
+        pass
+    return tuple(sorted(kept, key=lambda c: (c[0], c[1])))
 
 
 def _read_started(scratch: Path | None) -> float | None:
@@ -1001,12 +1228,18 @@ def run_gemini_phase(
         failed_chunk: int | None = None,
     ) -> PhaseOutcome:
         child_started = _read_started(scratch)
+        records = _read_progress(scratch, len(chunks))
+        try:  # read now: the scratch dir goes as soon as this returns
+            clips = _collect_omission_audio(scratch, records, failed_chunk)
+        except Exception:  # noqa: BLE001 -- diagnostics never cost the phase
+            clips = ()
         return PhaseOutcome(
             ok=reason is None,
             reason=reason,
             detail=detail,
             pcm_parts=pcm,
-            chunk_records=_read_progress(scratch, len(chunks)),
+            chunk_records=records,
+            omission_audio=clips,
             elapsed_s=time.monotonic() - t0,
             spawn_s=spawn_s,
             failed_chunk=failed_chunk,
