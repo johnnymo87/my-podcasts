@@ -353,22 +353,90 @@ def test_prices_follow_the_plan_and_unknown_models_cost_the_most():
     assert cr.est_whisper(60) == pytest.approx(0.006)
 
 
+def _reserve(led, usd, what="x"):
+    return led.reserve(usd, what, kind="synth", model="m", ids={"id": what})
+
+
 def test_ledger_appends_totals_and_refuses_before_the_budget(tmp_path):
     led = cr.Ledger(tmp_path / "ledger.jsonl", budget=1.0)
     led.append("synth", "m", {"id": "a"}, {"audio_tokens": 5}, 0.4)
     led.append("asr", "g", {"id": "a"}, None, 0.5, worst_case=True)
     assert led.total() == pytest.approx(0.9)
     with pytest.raises(cr.BudgetError, match="nothing was sent"):
-        with led.reserve(0.2, "x"):
+        with _reserve(led, 0.2):
             raise AssertionError("must not be reached")  # pragma: no cover
-    with led.reserve(0.1, "fits"):
-        with pytest.raises(cr.BudgetError):  # an in-flight reservation counts
-            with led.reserve(0.01, "second"):
+    assert len(led.entries()) == 2  # a refused call books nothing
+    with _reserve(led, 0.05, "fits"):
+        with pytest.raises(cr.BudgetError):  # an in-flight call counts at its worst
+            with _reserve(led, 0.06, "second"):
                 pass  # pragma: no cover
     s = led.summary()
     assert s["by_kind"]["asr"]["worst_case_calls"] == 1
-    assert s["remaining_usd"] == pytest.approx(0.1)
-    assert len(led.path.read_text().splitlines()) == 2  # append-only, one line each
+    # the "fits" call left the block unsettled -> settled at its worst case
+    assert s["by_kind"]["synth"]["calls"] == 2
+    assert s["by_kind"]["synth"]["worst_case_calls"] == 1  # the 0.4 line was exact
+    assert s["remaining_usd"] == pytest.approx(0.05)
+
+
+def test_write_ahead_books_the_worst_case_before_the_call_and_settles_after(tmp_path):
+    led = cr.Ledger(tmp_path / "ledger.jsonl", budget=1.0)
+    with _reserve(led, 0.30, "a") as call:
+        # the call has not happened yet: its WORST case is already on disk
+        (line,) = led.entries()
+        assert line["phase"] == "reserve" and line["worst_case"] is True
+        assert line["note"] == "in flight" and line["call_id"] == call.call_id
+        assert line["est_usd"] == pytest.approx(0.30)
+        assert led.total() == pytest.approx(0.30)
+        call.settle({"audio_tokens": 10}, 0.12, worst_case=False)
+        call.settle(None, 99.0)  # idempotent: the first settlement wins
+    reserve_line, settle_line = led.entries()
+    assert settle_line["phase"] == "settle" and settle_line["call_id"] == call.call_id
+    assert settle_line["est_usd"] == pytest.approx(0.12 - 0.30)  # negative
+    assert settle_line["actual_usd"] == pytest.approx(0.12)
+    assert settle_line["usage"] == {"audio_tokens": 10}
+    assert led.total() == pytest.approx(0.12)
+    (merged,) = led.calls()
+    assert merged["settled"] is True and merged["est_usd"] == pytest.approx(0.12)
+    assert merged["worst_case"] is False and merged["note"] is None
+    assert merged["usage"] == {"audio_tokens": 10}
+
+
+def test_a_killed_process_leaves_the_worst_case_booked_for_the_next_run(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    dead = cr.Ledger(path, budget=1.0)
+    gen = dead.reserve(0.7, "died", kind="asr", model="g", ids={"id": "z"})
+    gen.__enter__()  # the call is "in flight" ... and the process is SIGKILLed here
+    fresh = cr.Ledger(path, budget=1.0)  # the next run, a new process
+    s = fresh.summary()
+    assert (s["calls"], s["settled"], s["unsettled"]) == (1, 0, 1)
+    assert s["total_usd"] == pytest.approx(0.7)
+    assert (
+        s["by_kind"]["asr"]["unsettled"] == 1
+        and s["by_kind"]["asr"]["worst_case_calls"] == 1
+    )
+    (c,) = fresh.calls()
+    assert (
+        c["settled"] is False and c["note"] == "in flight" and c["worst_case"] is True
+    )
+    # and the budget gate counts it: 0.7 + 0.4 > 1.0
+    with pytest.raises(cr.BudgetError):
+        with _reserve(fresh, 0.4):
+            pass  # pragma: no cover
+    with _reserve(fresh, 0.2):
+        pass
+
+
+def test_ledger_step_prints_settled_and_unsettled_counts(tmp_path):
+    rig = Rig(tmp_path)
+    ctx = rig.ctx(tmp_path / "t5")
+    with ctx.ledger.reserve(0.1, "ok", kind="synth", model="m", ids={}) as call:
+        call.settle(None, 0.02)
+    gen = ctx.ledger.reserve(0.3, "died", kind="asr", model="m", ids={})
+    gen.__enter__()
+    s = cr.step_ledger(ctx)
+    assert (s["settled"], s["unsettled"]) == (1, 1)
+    text = "\n".join(ctx.out)
+    assert "1 settled, 1 unsettled" in text and "in flight when a run died" in text
 
 
 def test_a_corrupt_ledger_is_refused_not_guessed_at(tmp_path):
@@ -546,7 +614,7 @@ def test_synth_saves_pcm_then_synth_json_and_ledgers_usage(tmp_path):
     pcm, rate, seconds = cr.wav_info((d / "pcm.wav").read_bytes())
     assert rate == 24_000 and rec["pcm_samples"] == len(pcm) // 2
     assert (d / "chunk.txt").read_text() == rig.provider.calls[0][2]
-    (entry,) = ctx.ledger.entries()
+    (entry,) = ctx.ledger.calls()
     assert entry["kind"] == "synth" and entry["usage"]["audio_tokens"] == 1000
     assert entry["est_usd"] == pytest.approx(1000 / 1e6 * 9.2)
     assert entry["worst_case"] is False
@@ -557,11 +625,11 @@ def test_synth_is_resumable_a_second_run_makes_no_calls(tmp_path):
     rig, ctx = corpus_ctx(tmp_path)
     ids = ["levine-2026-09-21--c0--flash--Kore", "levine-2026-09-21--c0--lite--Kore"]
     assert cr.step_synth(ctx, ids=ids) == {"ok": 2}
-    n_calls, ledger_lines = len(rig.provider.calls), len(ctx.ledger.entries())
+    n_calls, ledger_lines = len(rig.provider.calls), len(ctx.ledger.calls())
     before = {p: p.read_bytes() for p in (ctx.root / "bases").rglob("*.*")}
     assert cr.step_synth(ctx, ids=ids) == {"skipped": 2}
     assert len(rig.provider.calls) == n_calls
-    assert len(ctx.ledger.entries()) == ledger_lines
+    assert len(ctx.ledger.calls()) == ledger_lines
     assert {p: p.read_bytes() for p in (ctx.root / "bases").rglob("*.*")} == before
 
 
@@ -651,7 +719,7 @@ def test_transient_errors_are_retried_with_production_backoff(tmp_path):
     )
     assert [a["status"] for a in rec["attempts"]] == ["error", "error", "ok"]
     # every attempt is on the ledger; the failed ones at worst case
-    entries = ctx.ledger.entries()
+    entries = ctx.ledger.calls()
     assert [e["worst_case"] for e in entries] == [True, True, False]
 
 
@@ -666,7 +734,7 @@ def test_synth_with_unreported_usage_is_costed_at_the_worst_case(tmp_path):
     rig, ctx = corpus_ctx(tmp_path)
     rig.provider.audio_tokens = None
     cr.step_synth(ctx, workers=1, ids=["levine-2026-09-21--c0--lite--Kore"])
-    (entry,) = ctx.ledger.entries()
+    (entry,) = ctx.ledger.calls()
     chars = len(rig.provider.calls[0][2])
     assert entry["worst_case"] is True
     assert entry["est_usd"] == pytest.approx(
@@ -680,7 +748,7 @@ def test_synth_runs_in_parallel_without_losing_ledger_lines(tmp_path):
     ids = [b["base_id"] for b in ctx.corpus()["bases"] if b["feed"] == "levine"]
     counts = cr.step_synth(ctx, workers=4, ids=ids)
     assert counts == {"ok": len(ids)}
-    assert len(ctx.ledger.entries()) == len(ids)
+    assert len(ctx.ledger.calls()) == len(ids)
     assert len(rig.provider.calls) == len(ids)
 
 
@@ -723,11 +791,18 @@ def test_whisper_stores_verbose_json_and_ledgers_minutes(staged):
     ledger = [
         json.loads(line) for line in (root / "ledger.jsonl").read_text().splitlines()
     ]
-    w = [e for e in ledger if e["kind"] == "whisper"]
+    assert all(e["call_id"] for e in ledger if e["kind"] == "whisper")
+    w = [
+        c
+        for c in cr.Ledger(root / "ledger.jsonl", 15).calls()
+        if c["kind"] == "whisper"
+    ]
     assert len(w) == sum(1 for _ in (root / "bases").glob("*/whisper.json"))
     one = cr.read_json(next((root / "bases").glob("*/whisper.json")))
     assert one["words"] and one["_calibrate"]["model"] == "whisper-1"
-    assert w[0]["est_usd"] == pytest.approx(w[0]["usage"]["seconds"] / 60 * 0.006)
+    assert w[0]["settled"] and w[0]["est_usd"] == pytest.approx(
+        w[0]["usage"]["seconds"] / 60 * 0.006
+    )
 
 
 def test_whisper_second_run_makes_no_calls_and_keeps_files(copy_of_staged):
@@ -993,6 +1068,7 @@ def asr(ctx: cr.Ctx, *, split: str | None = None, ids=(), **kw) -> dict:
         if ids
         else ["dev", "holdout"]
     )
+    kw.setdefault("policies", ["default"])  # the hold-out needs one named explicitly
     total: dict[str, int] = {}
     for sp in splits:
         for k, v in cr.step_asr(ctx, split=sp, ids=ids, **kw).items():
@@ -1090,7 +1166,7 @@ def test_asr_records_unavailable_and_retries_it_only_on_request(verified):
     path = ctx.base_dir(base_id) / "asr" / "default-0.json"
     rec = cr.read_json(path)
     assert rec["status"] == "unavailable" and rec["unavailable_reason"] == "asr_timeout"
-    (entry,) = [e for e in ctx.ledger.entries() if e["kind"] == "asr"]
+    (entry,) = [e for e in ctx.ledger.calls() if e["kind"] == "asr"]
     assert entry["worst_case"] is True  # unknown usage: worst case, not zero
     n = len(rig.asr_calls)
     assert asr(ctx, kinds=["base"], ids=[base_id]) == {"skipped": 1}  # not retried
@@ -1339,7 +1415,7 @@ def test_deadline_runs_render_episode_without_fallback_or_cache_and_summarizes(
     assert rec["retries"] == 1 and rec["verifier_policy"].startswith("verifier-v")
     expected = 70_000 / 1e6 * 6.1 + 90_000 / 1e6 + (6_000 + 3_000) / 1e6 * 5
     assert rec["est_usd"] == pytest.approx(expected) and rec["worst_case"] is False
-    (entry,) = [e for e in ctx.ledger.entries() if e["kind"] == "deadline"]
+    (entry,) = [e for e in ctx.ledger.calls() if e["kind"] == "deadline"]
     assert entry["est_usd"] == pytest.approx(expected)
     lines = (ctx.root / "deadline/summary.jsonl").read_text().splitlines()
     assert len(lines) == 1
@@ -1576,7 +1652,7 @@ def test_deadline_reads_a_failed_phase_from_the_manifest_after_a_render_error(tm
     # tokens known (a completed call with no thinking count is 0): not worst case
     expected = 50_000 / 1e6 * 6.1 + 60_000 / 1e6 + 4_000 / 1e6 * 5
     assert rec["worst_case"] is False and rec["est_usd"] == pytest.approx(expected)
-    (entry,) = [e for e in ctx.ledger.entries() if e["kind"] == "deadline"]
+    (entry,) = [e for e in ctx.ledger.calls() if e["kind"] == "deadline"]
     assert entry["est_usd"] == pytest.approx(expected) and entry["worst_case"] is False
 
 
@@ -1608,7 +1684,7 @@ def test_deadline_interrupt_is_booked_then_reraised(tmp_path):
     rig.render_impl = interrupted
     with pytest.raises(KeyboardInterrupt):
         cr.step_deadline(ctx, model="gemini-3.8-flash-tts")
-    (entry,) = [e for e in ctx.ledger.entries() if e["kind"] == "deadline"]
+    (entry,) = [e for e in ctx.ledger.calls() if e["kind"] == "deadline"]
     assert entry["usage"]["synth_audio"] == 10_000  # booked from the manifest
     (line,) = (ctx.root / "deadline/summary.jsonl").read_text().splitlines()
     assert json.loads(line)["render_outcome"] == "interrupted"
@@ -1679,7 +1755,7 @@ def test_synth_books_the_ledger_even_when_the_provider_blows_up(tmp_path):
     rig.provider.script["Kore"] = [RuntimeError("boom")]
     with pytest.raises(RuntimeError, match="boom"):
         cr.step_synth(ctx, workers=1, ids=["levine-2026-09-21--c0--flash--Kore"])
-    (entry,) = ctx.ledger.entries()
+    (entry,) = ctx.ledger.calls()
     assert entry["worst_case"] is True and entry["est_usd"] > 0
     assert entry["note"] == "call did not complete"
 
@@ -1696,7 +1772,7 @@ def test_synth_books_real_usage_even_when_saving_the_audio_fails(tmp_path, monke
     monkeypatch.setattr(cr, "write_new", failing)
     with pytest.raises(OSError, match="disk full"):
         _synth_x(ctx)
-    (entry,) = ctx.ledger.entries()
+    (entry,) = ctx.ledger.calls()
     assert entry["usage"]["audio_tokens"] == 1000 and entry["worst_case"] is False
 
 
@@ -1705,14 +1781,14 @@ def test_an_interrupt_during_synth_is_booked_at_the_worst_case(tmp_path):
     rig.provider.script["Kore"] = [KeyboardInterrupt()]
     with pytest.raises(KeyboardInterrupt):
         _synth_x(ctx)
-    (entry,) = ctx.ledger.entries()
+    (entry,) = ctx.ledger.calls()
     assert entry["worst_case"] is True
 
 
 def test_asr_and_whisper_book_the_ledger_when_the_service_blows_up(verified):
     rig, ctx, cuts = verified
     base_id = next(p.parent.name for p in (ctx.root / "bases").glob("*/label.json"))
-    before = len(ctx.ledger.entries())
+    before = len(ctx.ledger.calls())
     orig = rig._transcriber
 
     def crashing(thinking, timeout):
@@ -1723,7 +1799,7 @@ def test_asr_and_whisper_book_the_ledger_when_the_service_blows_up(verified):
     rig.services.transcriber = crashing
     with pytest.raises(RuntimeError, match="asr exploded"):
         asr(ctx, kinds=["base"], ids=[base_id])
-    entry = ctx.ledger.entries()[before]
+    entry = ctx.ledger.calls()[before]
     assert entry["kind"] == "asr" and entry["worst_case"] is True
     # whisper: a non-ServiceError escapes, but the call is still on the ledger
     victim = next((ctx.root / "bases").glob("*/whisper.json"))
@@ -1731,7 +1807,7 @@ def test_asr_and_whisper_book_the_ledger_when_the_service_blows_up(verified):
     rig.whisper.errors = [RuntimeError("whisper exploded")]
     with pytest.raises(RuntimeError, match="whisper exploded"):
         cr.step_whisper(ctx, kinds=["base"], ids=[victim.parent.name])
-    last = ctx.ledger.entries()[-1]
+    last = ctx.ledger.calls()[-1]
     assert last["kind"] == "whisper" and last["worst_case"] is True
 
 
@@ -1746,7 +1822,7 @@ def test_threaded_budget_refusal_never_oversubscribes_and_loses_no_ledger_line(
     ids = [b["base_id"] for b in mine]
     with pytest.raises(cr.BudgetError):
         cr.step_synth(ctx, workers=4, ids=ids)
-    entries = ctx.ledger.entries()
+    entries = ctx.ledger.calls()
     assert 1 <= len(rig.provider.calls) < len(ids)
     assert len(entries) == len(rig.provider.calls)  # every call that went out is booked
     # in-flight worst cases never exceeded the budget
@@ -1781,7 +1857,7 @@ def test_a_hung_asr_request_is_recorded_unavailable_and_the_step_finishes(
     assert out == {"unavailable": 1}
     rec = cr.read_json(ctx.base_dir(base_id) / "asr" / "default-0.json")
     assert rec["unavailable_reason"] == "asr_timeout" and "may linger" in rec["detail"]
-    entry = [e for e in ctx.ledger.entries() if e["kind"] == "asr"][-1]
+    entry = [e for e in ctx.ledger.calls() if e["kind"] == "asr"][-1]
     assert entry["worst_case"] is True
 
 
@@ -1800,8 +1876,8 @@ def test_a_hung_synth_is_a_transient_error_then_exhausts(tmp_path, monkeypatch):
     )
     assert [a["kind"] for a in rec["attempts"]] == ["infra"] * 3
     assert (
-        all(e["worst_case"] for e in ctx.ledger.entries())
-        and len(ctx.ledger.entries()) == 3
+        all(e["worst_case"] for e in ctx.ledger.calls())
+        and len(ctx.ledger.calls()) == 3
     )
 
 
@@ -2025,16 +2101,18 @@ def test_holdout_run_writes_a_marker_first_and_later_runs_warn(verified, monkeyp
     dev = next(b["base_id"] for b in ctx.corpus()["bases"] if b["split"] == "dev")
     cr.step_asr(ctx, kinds=["base"], split="dev", ids=[dev])
     assert not marker.exists()
-    assert cr.step_asr(ctx, kinds=["base"], split="holdout", ids=[hold]) == {"ok": 1}
+    assert cr.step_asr(
+        ctx, kinds=["base"], split="holdout", policies=["default"], ids=[hold]
+    ) == {"ok": 1}
     doc = cr.read_json(marker)
     assert doc["git_head"] == "deadbeef" and doc["policies"] == ["default"]
     assert doc["kinds"] == ["base"] and doc["first_run"]
     assert not any("WARNING" in line for line in ctx.out)
     calls = len(rig.asr_calls)
     # resuming: nothing new is sent, but the warning lists the marker
-    assert cr.step_asr(ctx, kinds=["base"], split="holdout", ids=[hold]) == {
-        "skipped": 1
-    }
+    assert cr.step_asr(
+        ctx, kinds=["base"], split="holdout", policies=["default"], ids=[hold]
+    ) == {"skipped": 1}
     assert len(rig.asr_calls) == calls
     warn = [line for line in ctx.out if "WARNING" in line]
     assert warn and "deadbeef" in warn[0] and "already run" in warn[0]
@@ -2043,7 +2121,13 @@ def test_holdout_run_writes_a_marker_first_and_later_runs_warn(verified, monkeyp
 
 def test_holdout_with_no_targets_writes_no_marker(verified):
     rig, ctx, cuts = verified
-    cr.step_asr(ctx, kinds=["base"], split="holdout", ids=["no-such-base"])
+    cr.step_asr(
+        ctx,
+        kinds=["base"],
+        split="holdout",
+        policies=["default"],
+        ids=["no-such-base"],
+    )
     assert not (ctx.root / "holdout-run.json").exists()
 
 
@@ -2188,3 +2272,279 @@ def test_two_steps_cannot_run_on_one_root_at_once(cli_rig, tmp_path):
         assert invoke(["--root", str(tmp_path / "t5"), "ledger"]).exit_code == 0
     with other.locked():  # released
         pass
+
+
+# =========================================================================== #
+# review round 3: write-ahead ledger, interrupts, whisper staleness, hold-out policy
+# =========================================================================== #
+
+
+def test_every_paid_call_is_on_the_ledger_before_it_is_sent(tmp_path):
+    rig, ctx = corpus_ctx(tmp_path)
+    seen = {}
+    real = rig.provider.synthesize_detailed
+
+    def spy(text, cfg, **kw):
+        seen["lines"] = ctx.ledger.entries()  # what is booked while the call runs
+        return real(text, cfg, **kw)
+
+    rig.provider.synthesize_detailed = spy
+    cr.step_synth(ctx, workers=1, ids=["levine-2026-09-21--c0--flash--Kore"])
+    (during,) = seen["lines"]
+    assert during["phase"] == "reserve" and during["worst_case"] is True
+    assert during["est_usd"] == pytest.approx(
+        cr.est_synth_worst(len(rig.provider.calls[0][2]), "gemini-3.8-flash-tts")
+    )
+    reserve_line, settle_line = ctx.ledger.entries()
+    assert settle_line["call_id"] == reserve_line["call_id"]
+    assert settle_line["est_usd"] < 0  # actual (1000 tokens) is under the worst case
+    (merged,) = ctx.ledger.calls()
+    assert merged["settled"] and merged["est_usd"] == pytest.approx(1000 / 1e6 * 9.2)
+
+
+def test_the_same_holds_for_asr_whisper_and_deadline(verified):
+    rig, ctx, cuts = verified
+    base_id = _first_base(ctx)
+    during = {}
+    orig = rig._transcriber
+
+    def spying(thinking, timeout):
+        t = orig(thinking, timeout)
+        real = t.__call__
+
+        class Spy(FakeTranscriber):
+            def __call__(self, audio, mime):
+                during["asr"] = ctx.ledger.calls()[-1]
+                return real(audio, mime)
+
+        t.__class__ = Spy
+        return t
+
+    rig.services.transcriber = spying
+    asr(ctx, kinds=["base"], ids=[base_id])
+    assert during["asr"]["kind"] == "asr" and during["asr"]["settled"] is False
+    assert during["asr"]["worst_case"] is True and during["asr"]["note"] == "in flight"
+    assert ctx.ledger.calls()[-1]["settled"] is True
+
+
+# --- interrupts -------------------------------------------------------------------
+
+
+def test_run_parallel_stops_queued_work_on_a_baseexception_and_waits_for_in_flight():
+    started = []
+
+    def fn(item):
+        started.append(item)
+        if item == 0:
+            raise KeyboardInterrupt
+        return item
+
+    with pytest.raises(KeyboardInterrupt):
+        cr.run_parallel(list(range(6)), fn, workers=1)
+    assert started == [0]  # nothing queued behind it was started
+    started.clear()
+
+    def exits(item):
+        started.append(item)
+        raise SystemExit(143)
+
+    with pytest.raises(SystemExit):
+        cr.run_parallel(list(range(6)), exits, workers=1)
+    assert started == [0]
+
+
+def test_run_parallel_waits_for_the_in_flight_item_before_propagating():
+    done = []
+    gate = threading.Event()
+
+    def fn(item):
+        if item == 0:
+            gate.wait(5)
+            done.append("in-flight finished")
+            return 0
+        raise SystemExit(143)
+
+    def release():
+        time.sleep(0.2)
+        gate.set()
+
+    threading.Thread(target=release, daemon=True).start()
+    with pytest.raises(SystemExit):
+        cr.run_parallel([0, 1], fn, workers=2)
+    assert done == ["in-flight finished"]  # the pool was joined before re-raising
+
+
+def test_sigterm_handler_raises_systemexit_and_is_restored():
+    import signal
+
+    before = signal.getsignal(signal.SIGTERM)
+    restore = cr.install_sigterm_handler()
+    try:
+        handler = signal.getsignal(signal.SIGTERM)
+        assert handler is not before
+        with pytest.raises(SystemExit) as exc:
+            handler(signal.SIGTERM, None)
+        assert exc.value.code == 143 == cr.SIGTERM_EXIT
+    finally:
+        restore()
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_cli_installs_and_restores_the_sigterm_handler(cli_rig, tmp_path):
+    import signal
+
+    before = signal.getsignal(signal.SIGTERM)
+    seen = {}
+    real = cr.step_ledger
+
+    def spy(ctx):
+        seen["handler"] = signal.getsignal(signal.SIGTERM)
+        return real(ctx)
+
+    cr.step_ledger, original = spy, cr.step_ledger
+    try:
+        out = invoke(["--root", str(tmp_path / "t5"), "ledger"])
+    finally:
+        cr.step_ledger = original
+    assert out.exit_code == 0
+    assert seen["handler"] is cr._raise_system_exit
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_sigterm_mid_step_cancels_queued_paid_work_and_settles_in_flight(
+    cli_rig, tmp_path
+):
+    import os
+    import signal
+
+    rig = cli_rig
+    ctx = rig.ctx(tmp_path / "t5")
+    run_corpus(rig, ctx, tmp_path)
+    ids = [b["base_id"] for b in ctx.corpus()["bases"] if b["feed"] == "levine"][:4]
+    real = rig.provider.synthesize_detailed
+    fired = []
+
+    def term_on_first(text, cfg, **kw):
+        if not fired:
+            fired.append(1)
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(0.3)  # let the main thread act before this call returns
+        return real(text, cfg, **kw)
+
+    rig.provider.synthesize_detailed = term_on_first
+    out = invoke(
+        [
+            "--root",
+            str(tmp_path / "t5"),
+            "synth",
+            "--workers",
+            "1",
+            "--ids",
+            ",".join(ids),
+        ]
+    )
+    assert out.exit_code == 143
+    assert len(rig.provider.calls) == 1  # the queued bases were never sent
+    (call,) = ctx.ledger.calls()
+    assert call["settled"] is True  # the in-flight call settled before the exit
+    assert not (ctx.root / ".tts-calibrate.lock").is_dir()
+
+
+# --- whisper staleness ----------------------------------------------------------------
+
+
+def test_whisper_refuses_a_stored_file_for_different_audio_before_any_call(
+    copy_of_staged,
+):
+    rig, ctx, *_ = copy_of_staged
+    base_id = _first_base(ctx)
+    wav_path = ctx.base_dir(base_id) / "pcm.wav"
+    wav_path.write_bytes(cal.wav_bytes(b"\x05\x00" * 20_000))
+    with pytest.raises(cr.Refused, match="stale.*audio changed"):
+        cr.step_whisper(ctx, kinds=["base"])
+    assert rig.whisper.calls == []
+    # --retry-stale moves the old file aside and transcribes the new audio
+    rig.world.register(wav_path.read_bytes(), ["alpha", "beta", "gamma"])
+    out = cr.step_whisper(ctx, kinds=["base"], ids=[base_id], retry_stale=True)
+    assert out == {"ok": 1}
+    d = ctx.base_dir(base_id)
+    assert (d / "whisper.stale-1.json").exists()
+    assert cr.read_json(d / "whisper.json")["_calibrate"]["audio_sha256"] == (
+        cr.sha256_hex(wav_path.read_bytes())
+    )
+
+
+def test_whisper_refuses_a_stored_file_that_cannot_be_checked(copy_of_staged):
+    rig, ctx, *_ = copy_of_staged
+    base_id = _first_base(ctx)
+    f = ctx.base_dir(base_id) / "whisper.json"
+    doc = cr.read_json(f)
+    doc.pop("_calibrate")
+    f.write_text(json.dumps(doc))
+    with pytest.raises(cr.Refused, match="records no audio sha256"):
+        cr.step_whisper(ctx, kinds=["base"], ids=[base_id])
+
+
+def test_whisper_resume_with_unchanged_audio_still_skips(copy_of_staged):
+    rig, ctx, *_ = copy_of_staged
+    n = len(list((ctx.root / "bases").glob("*/whisper.json")))
+    assert cr.step_whisper(ctx, kinds=["base"]) == {"skipped": n}
+    assert rig.whisper.calls == []
+
+
+# --- hold-out policy -----------------------------------------------------------
+
+
+def test_holdout_asr_requires_an_explicit_policy(verified):
+    rig, ctx, cuts = verified
+    hold = next(b["base_id"] for b in ctx.corpus()["bases"] if b["split"] == "holdout")
+    with pytest.raises(cr.Refused, match="--policy is required for the hold-out"):
+        cr.step_asr(ctx, kinds=["base"], split="holdout", ids=[hold])
+    assert rig.asr_calls == [] and not (ctx.root / "holdout-run.json").exists()
+    # dev keeps its default
+    dev = next(b["base_id"] for b in ctx.corpus()["bases"] if b["split"] == "dev")
+    assert cr.step_asr(ctx, kinds=["base"], split="dev", ids=[dev]) == {"ok": 1}
+
+
+def test_cli_holdout_needs_policy_and_a_second_policy_needs_the_flag(
+    verified, monkeypatch
+):
+    rig, ctx, cuts = verified
+    monkeypatch.setattr(cr, "default_services", lambda: rig.services)
+    hold = next(b["base_id"] for b in ctx.corpus()["bases"] if b["split"] == "holdout")
+    root = ["--root", str(ctx.root)]
+    out = invoke([*root, "asr", "--kind", "base", "--split", "holdout", "--ids", hold])
+    assert out.exit_code == 2 and "--policy is required for the hold-out" in out.output
+    ok = invoke(
+        [*root, "asr", "--kind", "base", "--split", "holdout", "--policy", "low",
+         "--ids", hold]
+    )  # fmt: skip
+    assert ok.exit_code == 0
+    calls = len(rig.asr_calls)
+    # same policy again: resumes (warns), nothing new
+    again = invoke(
+        [*root, "asr", "--kind", "base", "--split", "holdout", "--policy", "low",
+         "--ids", hold]
+    )  # fmt: skip
+    assert again.exit_code == 0 and "already run" in again.output
+    # a second, different policy is refused ...
+    second = [
+        *root,
+        *("asr", "--kind", "base", "--split", "holdout"),
+        *("--policy", "default", "--ids", hold),
+    ]
+    out = invoke(second)
+    assert out.exit_code == 2 and "selecting on the hold-out" in out.output
+    assert len(rig.asr_calls) == calls  # nothing was sent
+    # ... unless deliberately allowed: warned, recorded, and then it runs
+    out = invoke([*second, "--allow-second-holdout-policy"])
+    assert out.exit_code == 0 and "SECOND HOLD-OUT POLICY" in out.output
+    extra = cr.read_json(ctx.root / "holdout-run.policy-default.json")
+    assert extra["policy"] == "default"
+    assert cr.read_json(ctx.root / "holdout-run.json")["policies"] == [
+        "low"
+    ]  # unchanged
+    assert len(rig.asr_calls) == calls + 1
+    # and once recorded, resuming that policy needs no flag
+    out = invoke(second)
+    assert out.exit_code == 0

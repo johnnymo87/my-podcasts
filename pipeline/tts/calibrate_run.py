@@ -13,11 +13,13 @@ Rules every step obeys:
 - **Resumable, never overwrites.** An artifact that exists is skipped; writes are
   atomic (temp file, then a no-clobber ``os.link``). Frozen files (``corpus.json``,
   ``cuts.json``, ``cuts-verified.json``) refuse to be regenerated.
-- **Budget.** Before every paid call the ledger total plus every in-flight call's
-  worst case plus this call's worst case must fit ``--budget``, else
-  ``BudgetError`` (exit 2, nothing sent). Every paid call is appended to
-  ``ledger.jsonl``; usage the API did not report is costed at its worst case, not
-  zero.
+- **Budget, write-ahead.** Before every paid call its worst case is booked in
+  ``ledger.jsonl`` (``reserve``), and the gate refuses (``BudgetError``, exit 2,
+  nothing booked or sent) when the total, which already counts in-flight calls at
+  their worst case, plus this call's worst case would pass ``--budget``. After the
+  call a settlement line records the real usage; usage the API did not report is
+  costed at its worst case, not zero. A killed process leaves the worst case
+  booked.
 - **Keys from the environment**, only variable names are ever printed.
 - **No hidden network.** All services come through ``Services``; tests pass fakes.
 """
@@ -30,11 +32,13 @@ import hashlib
 import json
 import os
 import random
+import signal
 import sqlite3
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
@@ -310,16 +314,79 @@ def est_deadline_worst(chars: int, model: str) -> float:
     return total
 
 
+class LedgerCall:
+    """One paid call's ledger entry: written ahead at the worst case, settled
+    after. ``settle`` appends the difference (actual minus worst, usually
+    negative), so ``total()`` is the actual spend once settled and the worst case
+    until then."""
+
+    def __init__(
+        self,
+        ledger: Ledger,
+        call_id: str,
+        worst_usd: float,
+        kind: str,
+        model: str,
+        ids: dict,
+    ) -> None:
+        self.ledger = ledger
+        self.call_id = call_id
+        self.worst_usd = worst_usd
+        self.kind = kind
+        self.model = model
+        self.ids = ids
+        self.settled = False
+
+    def settle(
+        self,
+        usage: dict | None,
+        usd: float,
+        *,
+        worst_case: bool = False,
+        note: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        """Record what the call cost (``usd``; its worst case if the usage is
+        unknown). Idempotent: only the first settlement counts."""
+        if self.settled:
+            return
+        self.settled = True
+        self.ledger._write(
+            {
+                "call_id": self.call_id,
+                "phase": "settle",
+                "kind": self.kind,
+                "model": model or self.model,
+                "ids": self.ids,
+                "usage": usage,
+                "est_usd": usd - self.worst_usd,
+                "actual_usd": usd,
+                "worst_case": worst_case,
+                "note": note,
+            }
+        )
+
+
 class Ledger:
-    """Append-only ``ledger.jsonl`` plus the budget gate."""
+    """Append-only ``ledger.jsonl`` plus the budget gate.
+
+    Write-ahead: before a paid call goes out, ``reserve`` appends a line booking
+    its WORST case (``phase: reserve``, ``worst_case: true``, note ``in flight``,
+    a ``call_id``). After the call, ``LedgerCall.settle`` appends a settlement
+    line with the same ``call_id`` and ``est_usd = actual - worst`` (usually
+    negative) and the real usage. ``total()`` sums every line, so a process
+    killed mid-call (SIGKILL, power loss) leaves the worst case booked, and the
+    budget gate of the next run sees it. ``summary()`` counts settled calls and
+    unsettled ones (in flight when the process died).
+    """
 
     def __init__(self, path: Path, budget: float) -> None:
         self.path = path
         self.budget = budget
         self._lock = threading.Lock()
-        self._reserved = 0.0
 
     def entries(self) -> list[dict]:
+        """Every raw line (reserve, settle and plain ``append`` lines)."""
         if not self.path.exists():
             return []
         out = []
@@ -338,6 +405,53 @@ class Ledger:
     def total(self) -> float:
         return sum(float(e.get("est_usd", 0.0)) for e in self.entries())
 
+    def calls(self) -> list[dict]:
+        """One merged record per call, in order: ``call_id``, ``kind``, ``model``,
+        ``ids``, ``usage``, ``est_usd`` (net: the actual cost once settled, the
+        worst case while unsettled), ``worst_case``, ``note`` and ``settled``."""
+        order: list[str] = []
+        groups: dict[str, list[dict]] = {}
+        for i, e in enumerate(self.entries()):
+            key = e.get("call_id") or f"line-{i}"
+            if key not in groups:
+                order.append(key)
+                groups[key] = []
+            groups[key].append(e)
+        out = []
+        for key in order:
+            lines = groups[key]
+            first = lines[0]
+            settle = next((e for e in lines if e.get("phase") == "settle"), None)
+            if first.get("phase") != "reserve":  # a plain, already-final line
+                settle = first
+            out.append(
+                {
+                    "call_id": first.get("call_id"),
+                    "kind": first["kind"],
+                    "model": (settle or first).get("model"),
+                    "ids": first.get("ids"),
+                    "usage": settle.get("usage") if settle else None,
+                    "est_usd": sum(float(e.get("est_usd", 0.0)) for e in lines),
+                    "worst_case": bool(settle.get("worst_case")) if settle else True,
+                    "note": settle.get("note") if settle else "in flight",
+                    "settled": settle is not None,
+                }
+            )
+        return out
+
+    def _write(self, entry: dict) -> None:
+        with self._lock:
+            self._write_locked(entry)
+
+    def _write_locked(self, entry: dict) -> None:
+        entry = {"ts": now_iso(), **entry}
+        line = json.dumps(entry, sort_keys=True) + "\n"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+            os.fsync(f.fileno())
+
     def append(
         self,
         kind: str,
@@ -349,8 +463,8 @@ class Ledger:
         worst_case: bool = False,
         note: str | None = None,
     ) -> None:
+        """A plain, final line (no write-ahead): for spend that is already known."""
         entry = {
-            "ts": now_iso(),
             "kind": kind,
             "model": model,
             "ids": ids,
@@ -360,52 +474,79 @@ class Ledger:
         }
         if note:
             entry["note"] = note
-        line = json.dumps(entry, sort_keys=True) + "\n"
-        with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.path, "a", encoding="utf-8") as f:
-                f.write(line)
-                f.flush()
-                os.fsync(f.fileno())
+        self._write(entry)
 
     @contextlib.contextmanager
-    def reserve(self, worst_usd: float, what: str) -> Iterator[None]:
-        """Hold ``worst_usd`` while a paid call is in flight.
+    def reserve(
+        self, worst_usd: float, what: str, *, kind: str, model: str, ids: dict
+    ) -> Iterator[LedgerCall]:
+        """Book a paid call's worst case BEFORE it is sent; yield the call to
+        settle after.
 
-        Raises ``BudgetError`` (before anything is sent) when the recorded spend,
-        every other call's reservation and this call's worst case would pass the
-        budget. The caller appends the real ledger entry before leaving the block.
+        Raises ``BudgetError`` (before anything is booked or sent) when the
+        ledger total, which already includes every in-flight call at its worst
+        case, plus this call's worst case would pass the budget. Leaving the
+        block unsettled settles at the worst case, so only a hard kill leaves a
+        call unsettled.
         """
         with self._lock:
-            spent = self.total()
-            projected = spent + self._reserved + worst_usd
-            if projected > self.budget + 1e-12:
+            committed = self.total()
+            if committed + worst_usd > self.budget + 1e-12:
                 raise BudgetError(
-                    f"budget: ${spent:.4f} spent + ${self._reserved:.4f} in flight "
-                    f"+ ${worst_usd:.4f} worst case for {what} would pass "
-                    f"--budget ${self.budget:.2f}; nothing was sent"
+                    f"budget: ${committed:.4f} committed (spent plus in flight at "
+                    f"worst case) + ${worst_usd:.4f} worst case for {what} would "
+                    f"pass --budget ${self.budget:.2f}; nothing was sent"
                 )
-            self._reserved += worst_usd
+            call = LedgerCall(self, uuid.uuid4().hex[:12], worst_usd, kind, model, ids)
+            self._write_locked(
+                {
+                    "call_id": call.call_id,
+                    "phase": "reserve",
+                    "kind": kind,
+                    "model": model,
+                    "ids": ids,
+                    "usage": None,
+                    "est_usd": worst_usd,
+                    "worst_case": True,
+                    "note": "in flight",
+                }
+            )
         try:
-            yield
+            yield call
         finally:
-            with self._lock:
-                self._reserved -= worst_usd
+            if not call.settled:
+                call.settle(
+                    None,
+                    worst_usd,
+                    worst_case=True,
+                    note="left the block without settling",
+                )
 
     def summary(self) -> dict:
         by_kind: dict[str, dict] = {}
-        for e in self.entries():
+        for c in self.calls():
             row = by_kind.setdefault(
-                e["kind"], {"calls": 0, "est_usd": 0.0, "worst_case_calls": 0}
+                c["kind"],
+                {
+                    "calls": 0,
+                    "settled": 0,
+                    "unsettled": 0,
+                    "est_usd": 0.0,
+                    "worst_case_calls": 0,
+                },
             )
             row["calls"] += 1
-            row["est_usd"] += float(e.get("est_usd", 0.0))
-            row["worst_case_calls"] += 1 if e.get("worst_case") else 0
+            row["settled" if c["settled"] else "unsettled"] += 1
+            row["est_usd"] += c["est_usd"]
+            row["worst_case_calls"] += 1 if c["worst_case"] else 0
         total = sum(r["est_usd"] for r in by_kind.values())
         return {
             "total_usd": total,
             "budget_usd": self.budget,
             "remaining_usd": self.budget - total,
+            "calls": sum(r["calls"] for r in by_kind.values()),
+            "settled": sum(r["settled"] for r in by_kind.values()),
+            "unsettled": sum(r["unsettled"] for r in by_kind.values()),
             "by_kind": by_kind,
         }
 
@@ -563,24 +704,33 @@ def run_parallel(
     """Run ``fn`` over ``items``; completed work is never lost.
 
     A ``BudgetError`` cancels the queued items and is re-raised after the
-    in-flight ones finish; any other exception is re-raised the same way.
+    in-flight ones finish; any other exception is re-raised the same way. So is a
+    ``BaseException`` (Ctrl-C, ``SystemExit`` from SIGTERM, from the caller's
+    wait or a worker): every queued item is cancelled, so no further paid call
+    is started, and the in-flight ones finish (and settle their ledger lines)
+    before it propagates.
     """
     results: list[Any] = []
     budget_error: BudgetError | None = None
     other: Exception | None = None
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
         futures = [ex.submit(fn, it) for it in items]
-        for f in as_completed(futures):
-            try:
-                results.append(f.result())
-            except BudgetError as exc:
-                budget_error = budget_error or exc
-                for g in futures:
-                    g.cancel()
-            except Exception as exc:  # noqa: BLE001
-                other = other or exc
-                for g in futures:
-                    g.cancel()
+        try:
+            for f in as_completed(futures):
+                try:
+                    results.append(f.result())
+                except BudgetError as exc:
+                    budget_error = budget_error or exc
+                    for g in futures:
+                        g.cancel()
+                except Exception as exc:  # noqa: BLE001
+                    other = other or exc
+                    for g in futures:
+                        g.cancel()
+        except BaseException:
+            for g in futures:
+                g.cancel()
+            raise  # the with block waits for what is in flight
     if budget_error is not None:
         raise budget_error
     if other is not None:
@@ -972,7 +1122,9 @@ def _synth_attempts(
         ids = {"id": item_id, "attempt": n}
         error: TTSProviderError | None = None
         result = None
-        with ctx.ledger.reserve(worst, f"synth {item_id}"):
+        with ctx.ledger.reserve(
+            worst, f"synth {item_id}", kind="synth", model=model, ids=ids
+        ) as call:
             usd, worst_case, usage = worst, True, None
             note: str | None = "call did not complete"
             try:
@@ -1005,9 +1157,7 @@ def _synth_attempts(
                             "not overwriting it"
                         )
             finally:
-                ctx.ledger.append(
-                    "synth", model, ids, usage, usd, worst_case=worst_case, note=note
-                )
+                call.settle(usage, usd, worst_case=worst_case, note=note)
         cost += usd
         if error is not None:
             attempts.append(
@@ -1173,11 +1323,26 @@ def iter_targets(
 # --------------------------------------------------------------------------- #
 
 
-def whisper_one(ctx: Ctx, t: Target) -> str:
+def _whisper_stale(out: Path, audio_sha: str) -> str | None:
+    """Why a stored whisper file is not a transcript of THIS audio, or ``None``."""
+    stored = (read_json(out).get("_calibrate") or {}).get("audio_sha256")
+    if stored is None:
+        return "it records no audio sha256, so it cannot be checked"
+    if stored != audio_sha:
+        return "the audio changed since it was transcribed"
+    return None
+
+
+def whisper_one(ctx: Ctx, t: Target, retry_stale: bool = False) -> str:
     out = t.dir / t.out_name
-    if out.exists():
-        return "skipped"
     wav = t.audio.read_bytes()
+    if out.exists():
+        stale = _whisper_stale(out, sha256_hex(wav))
+        if stale is None:
+            return "skipped"
+        if not retry_stale:
+            raise Refused(f"{out} is stale: {stale} (use --retry-stale)")
+        move_aside(out, "stale")
     if len(wav) > WHISPER_MAX_BYTES:
         raise CalibrateError(
             f"{t.audio}: {len(wav)} bytes is over the {WHISPER_MAX_BYTES}-byte "
@@ -1191,7 +1356,13 @@ def whisper_one(ctx: Ctx, t: Target) -> str:
         worst = est_whisper(duration)
         resp: dict | None = None
         err: ServiceError | None = None
-        with ctx.ledger.reserve(worst, f"whisper {t.id}"):
+        with ctx.ledger.reserve(
+            worst,
+            f"whisper {t.id}",
+            kind="whisper",
+            model=WHISPER_MODEL,
+            ids={"id": t.id, "kind": t.kind},
+        ) as call:
             usd, worst_case, usage = worst, True, None
             note: str | None = "call did not complete"
             started = time.monotonic()
@@ -1228,15 +1399,7 @@ def whisper_one(ctx: Ctx, t: Target) -> str:
                     }
                     write_json_new(out, resp)
             finally:
-                ctx.ledger.append(
-                    "whisper",
-                    WHISPER_MODEL,
-                    {"id": t.id, "kind": t.kind},
-                    usage,
-                    usd,
-                    worst_case=worst_case,
-                    note=note,
-                )
+                call.settle(usage, usd, worst_case=worst_case, note=note)
         if resp is not None:
             return "ok"
         assert err is not None
@@ -1255,14 +1418,32 @@ def step_whisper(
     split: str = "all",
     ids: Sequence[str] = (),
     workers: int = 4,
+    retry_stale: bool = False,
 ) -> dict:
     ctx.need_env("OPENAI_API_KEY")
     targets = iter_targets(ctx, kinds, split, ids)
+    if not retry_stale:  # before any call: a stored file must not pass as 'done'
+        stale = []
+        for t in targets:
+            out = t.dir / t.out_name
+            if out.exists():
+                why = _whisper_stale(out, sha256_hex(t.audio.read_bytes()))
+                if why:
+                    stale.append(f"{out.relative_to(ctx.root)}: {why}")
+        if stale:
+            more = f" (+{len(stale) - 3} more)" if len(stale) > 3 else ""
+            raise Refused(
+                f"{len(stale)} stored whisper file(s) are stale: "
+                + "; ".join(stale[:3])
+                + more
+                + ". Nothing was sent. Pass --retry-stale to move them aside "
+                "and redo them"
+            )
     failures: list[str] = []
 
     def one(t: Target) -> str:
         try:
-            return whisper_one(ctx, t)
+            return whisper_one(ctx, t, retry_stale)
         except BudgetError:
             raise
         except CalibrateError as exc:
@@ -1756,13 +1937,15 @@ def asr_one(
         "audio_sha256": audio_sha,
         "audio_seconds": duration,
     }
-    with ctx.ledger.reserve(worst, f"asr {t.id} {policy}-{n}"):
+    model = getattr(tr, "model", ASR_MODEL)
+    with ctx.ledger.reserve(
+        worst, f"asr {t.id} {policy}-{n}", kind="asr", model=model, ids=ids
+    ) as call:
         started = time.monotonic()
         res = None
         unavailable: tuple[str, str] | None = None
         usd, worst_case, usage = worst, True, None
         note: str | None = "call did not complete"
-        model = getattr(tr, "model", ASR_MODEL)
         try:
             try:
                 res = call_with_timeout(lambda: tr(wav, "audio/wav"), ASR_WALL_S)
@@ -1802,9 +1985,7 @@ def asr_one(
                     asr_policy=res.policy or record["asr_policy"],
                 )
         finally:
-            ctx.ledger.append(
-                "asr", model, ids, usage, usd, worst_case=worst_case, note=note
-            )
+            call.settle(usage, usd, worst_case=worst_case, note=note, model=model)
     record["created"] = now_iso()
     write_json_new(out, record)
     return str(record["status"])
@@ -1814,18 +1995,52 @@ def holdout_marker_path(ctx: Ctx) -> Path:
     return ctx.root / "holdout-run.json"
 
 
+def _holdout_policies(ctx: Ctx) -> list[str]:
+    """Policies the hold-out has been run (or explicitly extended) with."""
+    path = holdout_marker_path(ctx)
+    names = list(read_json(path).get("policies", [])) if path.exists() else []
+    for extra in sorted(ctx.root.glob("holdout-run.policy-*.json")):
+        names.append(read_json(extra)["policy"])
+    return names
+
+
 def _mark_holdout(
-    ctx: Ctx, kinds: Sequence[str], policies: Sequence[str], repeat: int
+    ctx: Ctx,
+    kinds: Sequence[str],
+    policies: Sequence[str],
+    repeat: int,
+    allow_second_policy: bool = False,
 ) -> None:
-    """The hold-out is read once. The first hold-out ASR run writes this marker
-    (before sending anything); later runs may resume it but say so loudly."""
+    """The hold-out is read once, under ONE policy. The first hold-out ASR run
+    writes this marker (before sending anything); later runs may resume it, say
+    so loudly, and may not add a different policy unless explicitly allowed
+    (then it is recorded in ``holdout-run.policy-<name>.json`` and warned about:
+    choosing the better of two hold-out policies is selection on the hold-out)."""
     path = holdout_marker_path(ctx)
     if path.exists():
+        known = _holdout_policies(ctx)
+        new = [p for p in policies if p not in known]
+        if new and not allow_second_policy:
+            raise Refused(
+                f"the hold-out was already run with policy {known} ({path}); "
+                f"running it with {new} would be selecting on the hold-out. "
+                "Nothing was sent. Pass --allow-second-holdout-policy only if "
+                "that is deliberate"
+            )
         ctx.echo(
             f"WARNING: the hold-out was already run ({path}): "
             f"{json.dumps(read_json(path), sort_keys=True)}. Resuming skips what "
             "is done; anything new is NOT an untouched hold-out."
         )
+        for p in new:
+            ctx.echo(
+                f"WARNING: SECOND HOLD-OUT POLICY {p!r} (first: {known}). Results "
+                "under it are no longer untouched hold-out evidence."
+            )
+            write_json_new(
+                ctx.root / f"holdout-run.policy-{p}.json",
+                {"policy": p, "added": now_iso(), "git_head": git_head()},
+            )
         return
     write_json_new(
         path,
@@ -1844,13 +2059,14 @@ def step_asr(
     *,
     kinds: Sequence[str],
     split: str,
-    policies: Sequence[str] = ("default",),
+    policies: Sequence[str] | None = None,
     repeat: int = 1,
     ids: Sequence[str] = (),
     workers: int = 4,
     retry_unavailable: bool = False,
     retry_stale: bool = False,
     allow_unverified: bool = False,
+    allow_second_holdout_policy: bool = False,
     timeout_s: float = ASR_TIMEOUT_S,
 ) -> dict:
     ctx.need_env("GEMINI_API_KEY")
@@ -1859,7 +2075,12 @@ def step_asr(
             f"--split must be dev or holdout, got {split!r}: the hold-out is run "
             "deliberately, never as part of 'all'"
         )
-    policies = tuple(dict.fromkeys(policies))
+    if split == "holdout" and not policies:
+        raise Refused(
+            "--policy is required for the hold-out: it is run under the one policy "
+            "chosen on dev, named explicitly, never a default"
+        )
+    policies = tuple(dict.fromkeys(policies or ("default",)))
     for p in policies:
         if p not in ASR_POLICIES:
             raise Refused(f"unknown ASR policy {p!r}; choose from {ASR_POLICIES}")
@@ -1881,7 +2102,7 @@ def step_asr(
     try:
         _refuse_stale(ctx, tasks, transcribers, retry_stale)
         if tasks and split == "holdout":
-            _mark_holdout(ctx, kinds, policies, repeat)
+            _mark_holdout(ctx, kinds, policies, repeat, allow_second_holdout_policy)
         results = run_parallel(
             tasks,
             lambda task: asr_one(
@@ -2124,7 +2345,9 @@ def step_deadline(
     manifest_dir = deadline_dir / "manifests"
     ids = {"key": key}
     interrupted: BaseException | None = None
-    with ctx.ledger.reserve(worst, f"deadline {key}"):
+    with ctx.ledger.reserve(
+        worst, f"deadline {key}", kind="deadline", model=model, ids=ids
+    ) as call:
         started_wall = time.time()
         started = time.monotonic()
         outcome, error = "ok", None
@@ -2160,10 +2383,7 @@ def step_deadline(
                     tokens = phase.get("tokens") or {}
             usd, worst_case = est_render_from_tokens(tokens, len(text), model)
         finally:
-            ctx.ledger.append(
-                "deadline",
-                model,
-                ids,
+            call.settle(
                 tokens or None,
                 usd,
                 worst_case=worst_case,
@@ -2821,12 +3041,19 @@ def step_ledger(ctx: Ctx) -> dict:
     s = ctx.ledger.summary()
     ctx.echo(
         f"ledger: ${s['total_usd']:.4f} of ${s['budget_usd']:.2f} spent "
-        f"(${s['remaining_usd']:.4f} left)"
+        f"(${s['remaining_usd']:.4f} left); {s['calls']} calls: "
+        f"{s['settled']} settled, {s['unsettled']} unsettled"
     )
+    if s["unsettled"]:
+        ctx.echo(
+            f"  WARNING: {s['unsettled']} call(s) were in flight when a run died; "
+            "they stay booked at their worst case (inspect ledger.jsonl)"
+        )
     for kind, row in sorted(s["by_kind"].items()):
         ctx.echo(
             f"  {kind:<9} {row['calls']:>4} calls  ${row['est_usd']:.4f}  "
-            f"({row['worst_case_calls']} at worst case)"
+            f"({row['settled']} settled, {row['unsettled']} unsettled, "
+            f"{row['worst_case_calls']} at worst case)"
         )
     return s
 
@@ -2861,6 +3088,31 @@ def _csv_ids(
 def calibrate_group(ctx: click.Context, root: Path, budget: float) -> None:
     """T5 omission-detector calibration harness (paid steps; resumable)."""
     ctx.obj = Ctx(root=root, budget=budget, services=default_services())
+    ctx.call_on_close(install_sigterm_handler())
+
+
+SIGTERM_EXIT = 128 + signal.SIGTERM
+
+
+def _raise_system_exit(signum: int, frame: Any) -> None:
+    raise SystemExit(128 + signum)
+
+
+def install_sigterm_handler() -> Callable[[], None]:
+    """Turn SIGTERM into ``SystemExit`` so ``finally`` blocks run (ledger
+    settlements, lock release) and queued paid work is cancelled, instead of the
+    process dying mid-call. Returns a function that restores the old handler;
+    does nothing off the main thread."""
+    try:
+        previous = signal.signal(signal.SIGTERM, _raise_system_exit)
+    except ValueError:  # not the main thread
+        return lambda: None
+
+    def restore() -> None:
+        with contextlib.suppress(ValueError):
+            signal.signal(signal.SIGTERM, previous)
+
+    return restore
 
 
 @contextlib.contextmanager
@@ -2986,11 +3238,26 @@ def synth_cmd(c: Ctx, workers, split, ids, retry_failed) -> None:
 @click.option("--split", type=_SPLIT, default="all", show_default=True)
 @_ids_option
 @click.option("--workers", default=4, show_default=True, type=click.IntRange(min=1))
+@click.option(
+    "--retry-stale",
+    is_flag=True,
+    help="Redo stored whisper files made for different audio (the old file is kept).",
+)
 @click.pass_obj
-def whisper_cmd(c: Ctx, kinds, split, ids, workers) -> None:
+def whisper_cmd(c: Ctx, kinds, split, ids, workers, retry_stale) -> None:
     """whisper-1 word timestamps for bases, cut audio, removed clips, repro attempts."""
     with _guard(c):
-        _finish(c, step_whisper(c, kinds=kinds, split=split, ids=ids, workers=workers))
+        _finish(
+            c,
+            step_whisper(
+                c,
+                kinds=kinds,
+                split=split,
+                ids=ids,
+                workers=workers,
+                retry_stale=retry_stale,
+            ),
+        )
 
 
 @calibrate_group.command("label")
@@ -3065,8 +3332,7 @@ def cuts_cmd(c: Ctx, seed, verify) -> None:
     "policies",
     multiple=True,
     type=click.Choice(ASR_POLICIES),
-    default=("default",),
-    show_default=True,
+    help="Default (dev only): default. REQUIRED, explicitly, for --split holdout.",
 )
 @click.option("--repeat", default=1, show_default=True, type=click.IntRange(min=1))
 @_ids_option
@@ -3081,6 +3347,13 @@ def cuts_cmd(c: Ctx, seed, verify) -> None:
     is_flag=True,
     help="Redo stored runs made for different audio or another ASR policy string "
     "(the old record is kept).",
+)
+@click.option(
+    "--allow-second-holdout-policy",
+    "allow_second_holdout_policy",
+    is_flag=True,
+    help="Deliberately run the hold-out under a second, different policy "
+    "(recorded and warned about; this is selection on the hold-out).",
 )
 @click.option(
     "--unverified",
@@ -3099,6 +3372,7 @@ def asr_cmd(
     workers,
     retry_unavailable,
     retry_stale,
+    allow_second_holdout_policy,
     allow_unverified,
 ) -> None:
     """Gemini ASR (audio only) over bases, cuts or repro attempts."""
@@ -3115,6 +3389,7 @@ def asr_cmd(
                 workers=workers,
                 retry_unavailable=retry_unavailable,
                 retry_stale=retry_stale,
+                allow_second_holdout_policy=allow_second_holdout_policy,
                 allow_unverified=allow_unverified,
             ),
         )
