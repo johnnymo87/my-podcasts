@@ -127,10 +127,22 @@ One run each: feasibility, not tail latency.
 
 ## Short tail chunks (verifier v3, bead `my-podcasts-9p3.14`)
 
-T5 sampled chunks 0 and n//2 only (shortest 306 tokens), so the recall floor, a fraction, was never
-checked on a short tail. Verifier v3 pads it. Raw numbers: `/persist/my-podcasts/tts-eval/tail-recall/`
-(`notes/EVIDENCE.md`; `tails.json`, `texts/`, `renders/`, `ledger.jsonl`, `reports/tails.{json,txt}`,
-`clips/`). Code: `36e1316`, `081ffb5`, `4211cb9`.
+**Why v3.** v2's recall floor is a fraction (0.95) that was never calibrated below 300 tokens: T5
+sampled chunks 0 and n//2 only, and the shortest was 306 tokens. On a short chunk a fraction is an
+absolute bound of only a few tokens (two mismatched names fail a 34-token sign-off). The smallest
+absolute bound that does not fire on clean audio is about 14-15 unmatched tokens: the worst clean
+window had 8-13 unmatched at 47-299 tokens, so e.g. `recall_min_tokens=150` (bound >7) or "unmatched
+>= 8 AND recall < 0.95" would fire on clean audio. That bound is v3. What v3 gives up (scattered loss
+of 15 or fewer tokens in a chunk under 300 tokens) is outside the claimed scope: v2 already let
+15-30 scattered tokens through on 300-600-token chunks, and in T5 the recall floor was never the
+only detector of a cut. Verifier v3 therefore pads the floor.
+
+**Scope.** v3 changes any chunk under 300 tokens, not only tails: in the Rundown/FP archive 197 of
+1,456 chunks (about 14%) are under 300 tokens, 156 tails plus 41 non-final chunks of 186-299 tokens.
+
+Raw numbers: `/persist/my-podcasts/tts-eval/tail-recall/` (`notes/EVIDENCE.md`; `tails.json`,
+`texts/`, `renders/`, `ledger.jsonl`, `reports/tails.{json,txt}`, `clips/`). Code: `36e1316`,
+`081ffb5`, `4211cb9`.
 
 **The rule.** Fail when `(padded - unmatched) / padded < recall_floor`, `padded = max(n, recall_min_tokens)`,
 `recall_min_tokens=300`. For n >= 300 it is the same float expression as v2 (`matched / n`); below
@@ -180,11 +192,14 @@ is speech (RMS 0.80-1.01 of the file's RMS, 64-88% voiced 50 ms frames;
 `clips/fp-2026-09-24--flash--Charon--r0--50-61s.mp3`). Whisper's 6 edge misses are spelling
 (That's/That is, Semaphore, Sen.), not clipped audio.
 
-**Honest reading.** On real tail renders the production ASR did **not** reproduce the v2 false-alarm
-rate the windowed replay predicts: 0 of 156 runs (correlated sample; one-sided 95% bound for
-independent runs about 1.9%). v3 is justified by the windowed replay (1-7% of clean windows), the
-one-token margin on short tails, and the noisier ASR (whisper) tripping v2 on 25 of 78 faithful
-renders. v2 on short chunks is a bet that ASR noise stays where it was in one sample.
+**Honest reading.** The windowed replay over-predicts v2 fires on real tails. A rough Poisson
+estimate from the windowed rates predicts about 4-5 v2 fires over the 156 tail runs; none were
+observed (0 of 156; P(0) about 1%; correlated sample, one-sided 95% bound for independent runs about
+1.9%), likely because tails are formulaic sign-offs and recaps while the windows are mid-episode
+prose. So no production-ASR false alarm on a real tail has been seen. v3 rests on the argument in
+"Why v3" (v2's fraction was never calibrated below 300 tokens, and a clean 1-7% of windows fire it),
+the one-token margin on short tails, and the noisier ASR (whisper) tripping v2 on 25 of 78 faithful
+renders.
 
 **What v3 gives up** (text simulation, k separated deletions, 10 seeds per tail):
 
@@ -196,6 +211,13 @@ renders. v2 on short chunks is a bet that ASR noise stays where it was in one sa
   still fire on short chunks. A wholly dropped chunk of 6-15 tokens is still flagged (net deficit); a
   wholly dropped chunk of 5 tokens or fewer is not (v2 flagged it). Pinned by
   `test_a_wholly_dropped_5_token_chunk_is_not_flagged_by_v3` as a documented limit.
+
+Methodology caveats:
+
+- The windowed replay aligns the whole chunk once, then slides windows, so it cannot see edge
+  effects; the paid tails cover that (first and last 3 tokens matched in 156/156 runs).
+- The deletion simulation assumes a perfect ASR, so it is conservative about what v3 gives up (real
+  ASR noise adds unmatched tokens and makes a catch more likely).
 
 Spend: $1.211 (synth $0.690, Gemini ASR $0.236, whisper $0.286), all calls settled, budget cap $2.00.
 
@@ -210,6 +232,10 @@ Spend: $1.211 (synth $0.690, Gemini ASR $0.236, whisper $0.286), all calls settl
   Remaining limit: in a chunk under 300 tokens, scattered loss of 15 unmatched tokens or fewer is not
   caught by recall (contiguous drops still are, by the span rules), and a wholly dropped chunk of 5
   tokens or fewer passes.
+- **Watch item (v3 margin):** the margin is 2 tokens (worst clean window 13 unmatched vs the bound of 15; real Gemini
+  tails peaked at 4; whisper reached exactly 15 on the names-dense Levine 2026-09-29 headline list).
+  During T6 review, trend unmatched tokens on chunks under 300 (PR #29's per-attempt `matched_tokens`
+  and `max_net_missing`, once merged) and revisit if any faithful chunk exceeds 12.
 - **Currency normalization is asymmetric:** `$15.51` normalizes to dollars-and-cents words, but a
   transcript that drops the `$` reads "fifteen point five one", and Gemini ASR is not consistent
   about `$`. A price list can produce a false omission. Rundown/FP scripts spell numbers out
