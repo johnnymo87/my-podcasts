@@ -122,7 +122,17 @@ FEED_VOICES: dict[str, RenderConfig] = {
     "levine": _openai("ash"),
     "yglesias": _openai("shimmer"),
     "silver": _openai("echo"),
-    "the-rundown": _openai("nova"),
+    # Owner's listening-gate decision (my-podcasts-9p3.6, 2026-10-01). The
+    # fallback is the feed's previous OpenAI voice, so a fallback episode
+    # sounds exactly like the pre-Gemini feed. Rollback: restore _openai("nova").
+    "the-rundown": RenderConfig(
+        primary=GeminiConfig(
+            model="gemini-3.8-flash-lite-tts",
+            voice="Kore",
+            style="calm, measured news anchor",
+        ),
+        fallback=OpenAIConfig(model=DEFAULT_OPENAI_MODEL, voice="nova"),
+    ),
     "fp-digest": _openai("onyx"),
     "aaronson": _openai("fable"),
     "chinatalk": _openai("alloy"),
