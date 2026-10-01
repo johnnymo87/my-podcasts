@@ -14,7 +14,7 @@ from pipeline.script_processor import (
     render_show_notes_html,
     strip_markdown_for_tts,
 )
-from pipeline.tts import openai_config
+from pipeline.tts import openai_config, resolve_render_config
 
 
 def test_episode_show_notes_html_stored_and_retrieved(tmp_path) -> None:
@@ -588,12 +588,15 @@ def _publish_with_fake_render(tmp_path, monkeypatch, **kwargs) -> None:
         store.close()
 
 
-def test_publish_script_default_voice_is_nova(
+def test_publish_script_default_voice_is_the_feeds_config(
     tmp_path, monkeypatch, fake_tts_render
 ) -> None:
+    # "deep-dives" is not in FEED_VOICES, so the feed's config is the default
+    # (nova); the per-feed fall-through is pinned in test_feed_voices.py.
     _publish_with_fake_render(tmp_path, monkeypatch)
 
     [call] = fake_tts_render
+    assert call["config"] == resolve_render_config("deep-dives")
     assert call["config"] == openai_config(model="tts-1-hd", voice="nova")
     assert call["feed_slug"] == "deep-dives"
     assert call["episode_id"] == "2026-03-13-some-title"

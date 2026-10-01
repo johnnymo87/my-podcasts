@@ -85,7 +85,6 @@ def render_show_notes_html(show_notes_md: str) -> str:
     )
 
 
-DEFAULT_VOICE = "nova"
 DEFAULT_CATEGORY = "Technology"
 SCRIPT_ARCHIVE_ROOT = Path("/persist/my-podcasts/scripts")
 
@@ -183,12 +182,17 @@ def publish_script(
     store: StateStore,
     r2_client: R2Client,
     show_notes_file: Path | None = None,
-    voice: str = DEFAULT_VOICE,
+    voice: str | None = None,
     category: str = DEFAULT_CATEGORY,
     date_str: str | None = None,
     source_url: str | None = None,
 ) -> PublishResult:
-    """Publish a podcast episode from a pre-written script file."""
+    """Publish a podcast episode from a pre-written script file.
+
+    ``voice=None`` renders the feed's configured ``FEED_VOICES`` entry, exactly
+    as the consumer would (a Gemini primary included). An explicit ``voice``
+    forces OpenAI with that voice.
+    """
     from pipeline.db import Episode
 
     if date_str is None:

@@ -811,7 +811,15 @@ def _audit_previous_daily_run(store: StateStore, feed_slug: str, today: str) -> 
     default=None,
     help="Path to markdown show notes file.",
 )
-@click.option("--voice", default="nova", show_default=True, type=str)
+@click.option(
+    "--voice",
+    default=None,
+    type=str,
+    help=(
+        "TTS voice. Default: the feed's configured voice (FEED_VOICES). "
+        "Any value forces OpenAI with that voice."
+    ),
+)
 @click.option("--category", default="Technology", show_default=True, type=str)
 @click.option(
     "--date",
@@ -831,7 +839,7 @@ def publish_script_command(
     title: str,
     feed_slug: str,
     show_notes_file: Path | None,
-    voice: str,
+    voice: str | None,
     category: str,
     date_str: str | None,
     dry_run: bool,
@@ -861,11 +869,18 @@ def publish_script_command(
             tmp = Path(tmp_dir)
             output_mp3 = tmp / "dry-run.mp3"
 
-            click.echo(f"Running TTS (dry run, voice={voice})...")
+            # Resolve once: the echo describes, and render_episode receives,
+            # the same config object.
+            config = tts.resolve_render_config(feed_slug, voice_override=voice)
+            primary = config.primary
+            click.echo(
+                "Running TTS (dry run, "
+                f"{primary.provider} {primary.model}/{primary.voice})..."
+            )
             # A dry run touches no state: no manifest, no completed-render cache.
             tts.render_episode(
                 tts_text,
-                tts.resolve_render_config(feed_slug, voice_override=voice),
+                config,
                 output_mp3,
                 feed_slug=feed_slug,
                 episode_id="dry-run",
@@ -931,7 +946,15 @@ def publish_script_command(
     type=str,
     help="Override episode title (report mode prepends 'Report: ' if not set).",
 )
-@click.option("--voice", default="nova", show_default=True, type=str)
+@click.option(
+    "--voice",
+    default=None,
+    type=str,
+    help=(
+        "TTS voice. Default: the feed's configured voice (FEED_VOICES). "
+        "Any value forces OpenAI with that voice."
+    ),
+)
 @click.option(
     "--category",
     default=None,
@@ -962,7 +985,7 @@ def episode_command(
     feed_slug: str,
     style: str | None,
     title: str | None,
-    voice: str,
+    voice: str | None,
     category: str | None,
     date_str: str | None,
     script_file_opt: Path | None,

@@ -23,7 +23,15 @@ from pipeline.db import StateStore
 from pipeline.presets import DEFAULT_PRESET, PRESETS, NewsletterPreset
 from pipeline.processor import process_email_bytes
 from pipeline.script_processor import publish_script
-from pipeline.tts import FEED_VOICES, openai_config
+from pipeline.tts import (
+    FEED_VOICES,
+    GeminiConfig,
+    OpenAIConfig,
+    RenderConfig,
+    openai_config,
+    resolve_render_config,
+)
+from pipeline.tts.config import DEFAULT_RENDER_CONFIG
 
 
 @pytest.fixture(autouse=True)
@@ -140,14 +148,7 @@ def test_pinned_slugs_are_what_we_think() -> None:
     assert BLOG_SOURCES[0].feed_slug == "aaronson"
 
 
-def test_publish_script_default_voice_stays_nova_even_for_fp_digest(
-    tmp_path, fake_tts_render
-) -> None:
-    """Manual publish has always been nova for every feed.
-
-    my-podcasts-9p3.7 (T6 prerequisite) changes the publish_script/CLI voice
-    default to None so it falls through to FEED_VOICES; update this then.
-    """
+def _publish(tmp_path: Path, feed_slug: str, **kwargs) -> None:
     script_file = tmp_path / "script.md"
     script_file.write_text("The episode body.", encoding="utf-8")
     store = StateStore(tmp_path / "test.sqlite3")
@@ -155,24 +156,20 @@ def test_publish_script_default_voice_stays_nova_even_for_fp_digest(
         publish_script(
             script_file=script_file,
             title="Some Title",
-            feed_slug="fp-digest",
+            feed_slug=feed_slug,
             store=store,
             r2_client=MagicMock(),
             date_str="2026-03-13",
+            **kwargs,
         )
     finally:
         store.close()
-    [call] = fake_tts_render
-    assert call["config"] == openai_config(model="tts-1-hd", voice="nova")
-    assert call["feed_slug"] == "fp-digest"
 
 
-def test_publish_script_dry_run_default_voice_is_nova_for_fp_digest(
-    tmp_path, fake_tts_render
-) -> None:
+def _publish_cli(tmp_path: Path, feed_slug: str, *extra: str):
     script_file = tmp_path / "script.md"
     script_file.write_text("The episode body.", encoding="utf-8")
-    res = CliRunner().invoke(
+    return CliRunner().invoke(
         cli,
         [
             "publish-script",
@@ -181,10 +178,94 @@ def test_publish_script_dry_run_default_voice_is_nova_for_fp_digest(
             "--title",
             "Some Title",
             "--feed-slug",
-            "fp-digest",
+            feed_slug,
             "--dry-run",
+            *extra,
         ],
     )
+
+
+def test_publish_script_default_voice_follows_feed_voices(
+    tmp_path, fake_tts_render
+) -> None:
+    """A manual publish renders what the consumer would: the feed's config."""
+    _publish(tmp_path, "fp-digest")
+    [call] = fake_tts_render
+    # Compared against the table, not a re-literaled voice, so this survives a
+    # feed's voice (or provider) changing.
+    assert call["config"] == resolve_render_config("fp-digest")
+    assert call["config"] == FEED_VOICES["fp-digest"]
+    assert call["feed_slug"] == "fp-digest"
+
+
+def test_publish_script_dry_run_default_voice_follows_feed_voices(
+    tmp_path, fake_tts_render
+) -> None:
+    res = _publish_cli(tmp_path, "fp-digest")
+    assert res.exit_code == 0, res.output
+    [call] = fake_tts_render
+    assert call["config"] == resolve_render_config("fp-digest")
+
+
+def test_publish_script_unknown_slug_still_gets_the_default_voice(
+    tmp_path, fake_tts_render
+) -> None:
+    _publish(tmp_path, "no-such-feed")
+    [call] = fake_tts_render
+    assert call["config"] == DEFAULT_RENDER_CONFIG
+
+
+def test_publish_script_explicit_voice_still_forces_openai(
+    tmp_path, fake_tts_render
+) -> None:
+    _publish(tmp_path, "fp-digest", voice="nova")
+    [call] = fake_tts_render
+    assert call["config"] == openai_config(model="tts-1-hd", voice="nova")
+
+
+def test_publish_script_dry_run_explicit_voice_still_forces_openai(
+    tmp_path, fake_tts_render
+) -> None:
+    res = _publish_cli(tmp_path, "fp-digest", "--voice", "nova")
     assert res.exit_code == 0, res.output
     [call] = fake_tts_render
     assert call["config"] == openai_config(model="tts-1-hd", voice="nova")
+
+
+_GEMINI_CFG = RenderConfig(
+    primary=GeminiConfig(model="gemini-3.8-flash-lite-tts", voice="Kore"),
+    fallback=OpenAIConfig(model="tts-1-hd", voice="onyx"),
+)
+
+
+def test_publish_script_default_falls_through_to_a_gemini_primary(
+    tmp_path, fake_tts_render, monkeypatch
+) -> None:
+    """The T6 case: once a feed is Gemini, the consumer-down recovery path
+    must render Gemini (with its OpenAI fallback), not a silent OpenAI voice."""
+    monkeypatch.setitem(FEED_VOICES, "gemini-feed", _GEMINI_CFG)
+    _publish(tmp_path, "gemini-feed")
+    [call] = fake_tts_render
+    assert call["config"] is _GEMINI_CFG
+
+
+def test_publish_script_dry_run_falls_through_to_a_gemini_primary(
+    tmp_path, fake_tts_render, monkeypatch
+) -> None:
+    monkeypatch.setitem(FEED_VOICES, "gemini-feed", _GEMINI_CFG)
+    res = _publish_cli(tmp_path, "gemini-feed")
+    assert res.exit_code == 0, res.output
+    [call] = fake_tts_render
+    assert call["config"] is _GEMINI_CFG
+    # The dry-run echo describes what will actually render.
+    assert "gemini gemini-3.8-flash-lite-tts/Kore" in res.output
+
+
+def test_publish_script_dry_run_echo_describes_the_resolved_config(
+    tmp_path, fake_tts_render
+) -> None:
+    res = _publish_cli(tmp_path, "fp-digest")
+    assert res.exit_code == 0, res.output
+    assert "Running TTS (dry run, openai tts-1-hd/onyx)..." in res.output
+    res = _publish_cli(tmp_path, "fp-digest", "--voice", "ash")
+    assert "Running TTS (dry run, openai tts-1-hd/ash)..." in res.output

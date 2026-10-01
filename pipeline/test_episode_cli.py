@@ -81,6 +81,25 @@ def test_interview_report(
 @patch("pipeline.script_processor.publish_script")
 @patch("pipeline.report_writer.generate_report")
 @patch("pipeline.sources.resolve_document")
+def test_voice_defaults_to_none_so_the_feeds_config_applies(
+    mock_resolve, mock_report, mock_publish, tmp_path, monkeypatch
+):
+    _patch_env(monkeypatch, tmp_path)
+    mock_resolve.return_value = _interview_doc()
+    mock_report.return_value = ReportOutput(script="Briefing.", summary="B.")
+    args = ["episode", "--url", "https://x/p/y", "--feed-slug", "dwarkesh"]
+    res = CliRunner().invoke(cli, args)
+    assert res.exit_code == 0, res.output
+    assert mock_publish.call_args.kwargs["voice"] is None
+
+    res = CliRunner().invoke(cli, [*args, "--voice", "ash"])
+    assert res.exit_code == 0, res.output
+    assert mock_publish.call_args.kwargs["voice"] == "ash"
+
+
+@patch("pipeline.script_processor.publish_script")
+@patch("pipeline.report_writer.generate_report")
+@patch("pipeline.sources.resolve_document")
 def test_paper_report_uses_paper_style_and_science_category(
     mock_resolve, mock_report, mock_publish, tmp_path, monkeypatch
 ):
