@@ -12,6 +12,7 @@ import random
 import shutil
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -100,15 +101,31 @@ class FakeProvider:
         self.script: dict[str, list] = {}  # voice -> queue of exceptions to raise first
         self.audio_tokens: int | None = 1000
         self.lock = threading.Lock()
+        self.block: threading.Event | None = None  # when set, calls hang on it
+        self.delay = 0.0
+        self.inflight = 0
+        self.max_inflight = 0
 
     def synthesize_detailed(self, text, cfg, *, timeout=None):
         with self.lock:
             self.calls.append((cfg.model, cfg.voice, text))
+            self.inflight += 1
+            self.max_inflight = max(self.max_inflight, self.inflight)
             queue = self.script.get(cfg.voice)
-            if queue:
-                exc = queue.pop(0)
-                if exc is not None:
-                    raise exc
+            exc = queue.pop(0) if queue else None
+        try:
+            if self.block is not None:
+                self.block.wait(10)
+            if self.delay:
+                time.sleep(self.delay)
+            if exc is not None:
+                raise exc
+            return self._render(text, cfg)
+        finally:
+            with self.lock:
+                self.inflight -= 1
+
+    def _render(self, text, cfg):
         words = [w.strip('.,;:!?"“”()') for w in text.split()]
         words = [w for w in words if w]
         n = len(words) * WORD_SAMPLES + TAIL_SAMPLES
@@ -128,12 +145,15 @@ class FakeWhisper:
         self.calls: list[str] = []
         self.errors: list[Exception] = []
         self.lock = threading.Lock()
+        self.block: threading.Event | None = None
 
     def __call__(self, wav: bytes, filename: str) -> dict:
         with self.lock:
             self.calls.append(filename)
             if self.errors:
                 raise self.errors.pop(0)
+        if self.block is not None:
+            self.block.wait(10)
         words = self.world.words[wav_sha(wav)]
         n_samples = (len(wav) - 44) // 2
         return whisper_for(words, seconds=n_samples / 24_000)
@@ -148,10 +168,16 @@ class FakeTranscriber:
         self.model = "gemini-3.8-flash"
         self.closed = False
         self.fail: dict[str, str] = {}
+        self.block: threading.Event | None = None
+        self.crash: Exception | None = None
 
     def __call__(self, audio: bytes, mime_type: str) -> Transcription:
         sha = wav_sha(audio)
         self.calls.append((self.thinking, sha))
+        if self.block is not None:
+            self.block.wait(10)
+        if self.crash is not None:
+            raise self.crash
         if sha in self.fail:
             raise TranscriptionUnavailable(self.fail[sha], "fake")
         words = self.world.words[sha]
@@ -179,6 +205,7 @@ class Rig:
         self.provider = FakeProvider(self.world)
         self.whisper = FakeWhisper(self.world)
         self.asr_calls: list = []
+        self.made: list[str] = []
         self.transcribers: dict[str, FakeTranscriber] = {}
         self.emails: dict[str, bytes] = {}
         self.sleeps: list[float] = []
@@ -198,6 +225,7 @@ class Rig:
     def _transcriber(self, thinking: str, timeout: float) -> FakeTranscriber:
         t = FakeTranscriber(self.world, thinking, self.asr_calls)
         self.transcribers[thinking] = t
+        self.made.append(thinking)
         return t
 
     def _clip(self, pcm: bytes, out: Path) -> None:
@@ -548,7 +576,7 @@ def test_synth_refuses_before_the_call_when_the_budget_is_gone(tmp_path):
     ).exists()
 
 
-def test_synth_never_overwrites_a_pcm_left_by_a_crashed_run(tmp_path):
+def test_synth_refuses_an_orphan_pcm_instead_of_discarding_or_repaying(tmp_path):
     rig, ctx = corpus_ctx(tmp_path)
     base_id = "levine-2026-09-21--c0--flash--Kore"
     d = ctx.base_dir(base_id)
@@ -557,10 +585,30 @@ def test_synth_never_overwrites_a_pcm_left_by_a_crashed_run(tmp_path):
     old = pcm_to_wav(b"\x01\x00" * 5000)  # pcm.wav without a synth.json
     d.mkdir(parents=True)
     (d / "pcm.wav").write_bytes(old)
-    cr.step_synth(ctx, workers=1, ids=[base_id])
+    with pytest.raises(cr.Refused, match="exists without a synth.json"):
+        cr.step_synth(ctx, workers=1, ids=[base_id])
+    assert rig.provider.calls == []  # nothing was paid for
     assert (d / "pcm.wav").read_bytes() == old
-    rec = cr.read_json(d / "synth.json")
-    assert rec["pcm_samples"] == 5000 and "never overwritten" in rec["note"]
+    assert not (d / "synth.json").exists()
+
+
+def test_synth_refuses_a_chunk_file_that_no_longer_matches_the_corpus(tmp_path):
+    rig, ctx = corpus_ctx(tmp_path)
+    base_id = "levine-2026-09-21--c0--flash--Kore"
+    d = ctx.base_dir(base_id)
+    d.mkdir(parents=True)
+    (d / "chunk.txt").write_text("someone edited this")
+    with pytest.raises(cr.Refused, match="differs"):
+        cr.step_synth(ctx, workers=1, ids=[base_id])
+    assert rig.provider.calls == []
+
+
+def test_synth_closes_the_provider_it_opened(tmp_path):
+    rig, ctx = corpus_ctx(tmp_path)
+    closed = []
+    rig.provider.close = lambda: closed.append(1)  # type: ignore[attr-defined]
+    cr.step_synth(ctx, workers=1, ids=["levine-2026-09-21--c0--flash--Kore"])
+    assert closed == [1]
 
 
 def test_a_fatal_synth_error_is_recorded_not_raised_and_the_rest_continue(tmp_path):
@@ -925,12 +973,39 @@ def test_cuts_verify_requires_every_whisper_file(cut_whispered):
 # --- asr ---------------------------------------------------------------------
 
 
+def _split_of(ctx: cr.Ctx, item_id: str) -> str:
+    for b in ctx.corpus()["bases"]:
+        if item_id in (b["base_id"], b["episode"]):
+            return b["split"]
+    if ctx.cuts_path.exists():
+        for c in ctx.cuts()["cuts"]:
+            if item_id == c["cut_id"]:
+                return c["split"]
+    return "dev"  # levine-repro attempts
+
+
+def asr(ctx: cr.Ctx, *, split: str | None = None, ids=(), **kw) -> dict:
+    """``step_asr`` with the split inferred from ``ids`` (or both splits)."""
+    splits = (
+        [split]
+        if split
+        else sorted({_split_of(ctx, i) for i in ids})
+        if ids
+        else ["dev", "holdout"]
+    )
+    total: dict[str, int] = {}
+    for sp in splits:
+        for k, v in cr.step_asr(ctx, split=sp, ids=ids, **kw).items():
+            total[k] = total.get(k, 0) + v
+    return total
+
+
 def test_asr_requires_verified_cuts_unless_told_otherwise(cut_whispered):
     rig, ctx, cuts = cut_whispered
     with pytest.raises(cr.Refused, match="cuts-verified.json is missing"):
-        cr.step_asr(ctx, kinds=["cut"])
+        asr(ctx, kinds=["cut"])
     assert rig.asr_calls == []
-    out = cr.step_asr(
+    out = asr(
         ctx, kinds=["cut"], allow_unverified=True, ids=[cuts["cuts"][0]["cut_id"]]
     )
     assert out == {"ok": 1}
@@ -947,9 +1022,7 @@ def verified(cut_whispered):
 def test_asr_stores_transcript_policy_usage_and_never_overwrites(verified):
     rig, ctx, cuts = verified
     base_id = next(p.parent.name for p in (ctx.root / "bases").glob("*/label.json"))
-    out = cr.step_asr(
-        ctx, kinds=["base"], policies=["default"], repeat=2, ids=[base_id]
-    )
+    out = asr(ctx, kinds=["base"], policies=["default"], repeat=2, ids=[base_id])
     assert out == {"ok": 2}
     d = ctx.base_dir(base_id) / "asr"
     assert sorted(p.name for p in d.iterdir()) == ["default-0.json", "default-1.json"]
@@ -959,23 +1032,24 @@ def test_asr_stores_transcript_policy_usage_and_never_overwrites(verified):
     )
     assert rec["asr_policy"] == "fake-asr|thinking-default"
     assert rec["input_tokens"] == 800 and rec["thinking_tokens"] == 40
-    assert (
-        rec["transcript"]
-        == (ctx.base_dir(base_id) / "chunk.txt").read_text().replace("\n\n", " ")
-        or rec["transcript"]
+    spoken = rig.world.words[wav_sha((ctx.base_dir(base_id) / "pcm.wav").read_bytes())]
+    assert rec["transcript"] == " ".join(spoken) and len(spoken) > 50
+    assert rec["audio_sha256"] == wav_sha(
+        (ctx.base_dir(base_id) / "pcm.wav").read_bytes()
     )
     before = {p: p.read_bytes() for p in d.iterdir()}
     calls = len(rig.asr_calls)
     # same request again: skipped, no calls, files untouched
-    assert cr.step_asr(
-        ctx, kinds=["base"], policies=["default"], repeat=2, ids=[base_id]
-    ) == {"skipped": 2}
+    assert asr(ctx, kinds=["base"], policies=["default"], repeat=2, ids=[base_id]) == {
+        "skipped": 2
+    }
     assert len(rig.asr_calls) == calls
     assert {p: p.read_bytes() for p in d.iterdir()} == before
     # a larger --repeat only adds the new index
-    assert cr.step_asr(
-        ctx, kinds=["base"], policies=["default"], repeat=3, ids=[base_id]
-    ) == {"skipped": 2, "ok": 1}
+    assert asr(ctx, kinds=["base"], policies=["default"], repeat=3, ids=[base_id]) == {
+        "skipped": 2,
+        "ok": 1,
+    }
     assert {
         p: p.read_bytes() for p in d.iterdir() if p.name != "default-2.json"
     } == before
@@ -985,7 +1059,7 @@ def test_asr_stores_transcript_policy_usage_and_never_overwrites(verified):
 def test_asr_policies_interleave_and_use_their_own_transcriber(verified):
     rig, ctx, cuts = verified
     base_id = next(p.parent.name for p in (ctx.root / "bases").glob("*/label.json"))
-    cr.step_asr(
+    asr(
         ctx,
         kinds=["base"],
         policies=["default", "low"],
@@ -997,7 +1071,7 @@ def test_asr_policies_interleave_and_use_their_own_transcriber(verified):
     low = cr.read_json(ctx.base_dir(base_id) / "asr" / "low-0.json")
     assert low["asr_policy"] == "fake-asr|thinking-low"
     with pytest.raises(cr.Refused, match="unknown ASR policy"):
-        cr.step_asr(ctx, kinds=["base"], policies=["minimal"])
+        asr(ctx, kinds=["base"], policies=["minimal"])
 
 
 def test_asr_records_unavailable_and_retries_it_only_on_request(verified):
@@ -1012,21 +1086,17 @@ def test_asr_records_unavailable_and_retries_it_only_on_request(verified):
         return t
 
     rig.services.transcriber = flaky
-    assert cr.step_asr(ctx, kinds=["base"], ids=[base_id]) == {"unavailable": 1}
+    assert asr(ctx, kinds=["base"], ids=[base_id]) == {"unavailable": 1}
     path = ctx.base_dir(base_id) / "asr" / "default-0.json"
     rec = cr.read_json(path)
     assert rec["status"] == "unavailable" and rec["unavailable_reason"] == "asr_timeout"
     (entry,) = [e for e in ctx.ledger.entries() if e["kind"] == "asr"]
     assert entry["worst_case"] is True  # unknown usage: worst case, not zero
     n = len(rig.asr_calls)
-    assert cr.step_asr(ctx, kinds=["base"], ids=[base_id]) == {
-        "skipped": 1
-    }  # not retried
+    assert asr(ctx, kinds=["base"], ids=[base_id]) == {"skipped": 1}  # not retried
     assert len(rig.asr_calls) == n
     rig.services.transcriber = original
-    assert cr.step_asr(ctx, kinds=["base"], ids=[base_id], retry_unavailable=True) == {
-        "ok": 1
-    }
+    assert asr(ctx, kinds=["base"], ids=[base_id], retry_unavailable=True) == {"ok": 1}
     assert cr.read_json(path)["status"] == "ok"
     assert (path.parent / "default-0.unavailable-1.json").exists()  # evidence kept
 
@@ -1037,11 +1107,11 @@ def test_asr_skips_discarded_cuts_and_non_faithful_bases(verified):
     some = cuts["cuts"][0]["cut_id"]
     doc["cuts"][some]["discarded"] = True
     ctx.verified_path.write_text(json.dumps(doc))
-    cr.step_asr(ctx, kinds=["cut"], ids=[some])
+    asr(ctx, kinds=["cut"], ids=[some])
     assert rig.asr_calls == []  # nothing selected: the only id is discarded
     base_id = cuts["cuts"][1]["base_id"]
     cr.record_owner_call(ctx, base_id, "defect")
-    cr.step_asr(ctx, kinds=["base"], ids=[base_id])
+    asr(ctx, kinds=["base"], ids=[base_id])
     assert rig.asr_calls == []  # an owner "defect" is not a negative control
 
 
@@ -1049,7 +1119,7 @@ def test_asr_refuses_over_budget_before_calling(verified):
     rig, ctx, cuts = verified
     ctx.ledger.budget = ctx.ledger.total() + 1e-6
     with pytest.raises(cr.BudgetError):
-        cr.step_asr(ctx, kinds=["base"], workers=1)
+        asr(ctx, kinds=["base"], workers=1)
     assert rig.asr_calls == []
 
 
@@ -1058,17 +1128,21 @@ def test_asr_refuses_over_budget_before_calling(verified):
 
 def test_report_builds_records_runs_the_grid_and_writes_json_and_markdown(verified):
     rig, ctx, cuts = verified
-    cr.step_asr(ctx, kinds=["base", "cut"], policies=["default"], repeat=2, workers=4)
-    report = cr.step_report(ctx, policies=["default"], name="dev")
+    asr(ctx, kinds=["base", "cut"], policies=["default"], repeat=2, workers=4)
+    report = cr.step_report(ctx, split="all", policies=["default"], name="dev")
+    (sec,) = report["sections"]
+    assert sec["policy"] == "default" and sec["asr_policies"] == [
+        "fake-asr|thinking-default"
+    ]
     assert (ctx.root / "reports/dev.json").exists() and (
         ctx.root / "reports/dev.md"
     ).exists()
-    assert report["n_cuts"] == 2 * len(cuts["cuts"])
-    assert report["n_bases"] == 2 * sum(
+    assert sec["n_cuts"] == 2 * len(cuts["cuts"])
+    assert sec["n_bases"] == 2 * sum(
         1 for _ in (ctx.root / "bases").glob("*/label.json")
     )
-    assert len(report["grid"]) == 15
-    g = report["grid"][0]
+    assert len(sec["grid"]) == 15
+    g = sec["grid"][0]
     assert {
         "thresholds",
         "cuts",
@@ -1081,11 +1155,11 @@ def test_report_builds_records_runs_the_grid_and_writes_json_and_markdown(verifi
         g["bases"]["overall"]["false_alarms"] == 0
     )  # perfect transcripts of faithful audio
     assert g["bases"]["overall"]["unavailable"] == 0
-    assert g["cuts"]["overall"]["n"] == report["n_cuts"]
+    assert g["cuts"]["overall"]["n"] == sec["n_cuts"]
     # perfect cut transcripts: nothing is reconstructed
-    assert {r["level"] for r in report["reconstruction"]} == {"none"}
-    assert all(r["clean_hits"] is not None for r in report["reconstruction"])
-    assert all(r["audio_residue_tokens"] == 0 for r in report["reconstruction"])
+    assert {r["level"] for r in sec["reconstruction"]} == {"none"}
+    assert all(r["clean_hits"] is not None for r in sec["reconstruction"])
+    assert all(r["audio_residue_tokens"] == 0 for r in sec["reconstruction"])
     md = (ctx.root / "reports/dev.md").read_text()
     for needle in (
         "## Grid summary",
@@ -1100,19 +1174,20 @@ def test_report_builds_records_runs_the_grid_and_writes_json_and_markdown(verifi
         assert needle in md
     # reports are never overwritten
     with pytest.raises(cr.Refused, match="already exists"):
-        cr.step_report(ctx, policies=["default"], name="dev")
+        cr.step_report(ctx, split="all", policies=["default"], name="dev")
 
 
 def test_report_splits_and_requires_a_policy(verified):
     rig, ctx, cuts = verified
-    cr.step_asr(ctx, kinds=["base", "cut"], policies=["low"], workers=4)
+    asr(ctx, kinds=["base", "cut"], policies=["low"], workers=4)
     with pytest.raises(cr.Refused, match="--policy is required"):
-        cr.step_report(ctx, policies=[])
+        cr.step_report(ctx, split="all", policies=[])
     dev = cr.step_report(ctx, split="dev", policies=["low"], name="d")
     hold = cr.step_report(ctx, split="holdout", policies=["low"], name="h")
     both = cr.step_report(ctx, split="all", policies=["low"], name="a")
-    assert dev["n_cuts"] + hold["n_cuts"] == both["n_cuts"] > 0
-    assert set(dev["grid"][0]["cuts"]["by_split"]) == {"dev"}
+    n = lambda r: r["sections"][0]["n_cuts"]  # noqa: E731
+    assert n(dev) + n(hold) == n(both) > 0
+    assert set(dev["sections"][0]["grid"][0]["cuts"]["by_split"]) == {"dev"}
 
 
 def test_report_counts_unavailable_apart_and_flags_a_confirmed_reconstruction(verified):
@@ -1137,12 +1212,13 @@ def test_report_counts_unavailable_apart_and_flags_a_confirmed_reconstruction(ve
         return t
 
     rig.services.transcriber = flaky
-    cr.step_asr(ctx, kinds=["base", "cut"], policies=["default"], workers=2)
-    report = cr.step_report(ctx, policies=["default"], name="r")
-    recon = {r["record_id"]: r for r in report["reconstruction"]}
+    asr(ctx, kinds=["base", "cut"], policies=["default"], workers=2)
+    report = cr.step_report(ctx, split="all", policies=["default"], name="r")
+    (sec,) = report["sections"]
+    recon = {r["record_id"]: r for r in sec["reconstruction"]}
     assert recon[f"{victim['cut_id']}:default-0"]["level"] == "confirmed"
-    assert other not in {r["record_id"].split(":")[0] for r in report["reconstruction"]}
-    g = report["grid"][-1]
+    assert other not in {r["record_id"].split(":")[0] for r in sec["reconstruction"]}
+    g = sec["grid"][-1]
     assert g["cuts"]["overall"]["unavailable"] == 1
     assert g["acceptance_ok"] is False and g["acceptance"]["cut_unavailable"] == 1
     # the reconstructed cut transcribes everything, so the verifier PASSES it
@@ -1202,8 +1278,10 @@ def test_levine_repro_whisper_asr_and_side_by_side_report(tmp_path):
     skipped = words[:30] + words[55:]
     rig.world.register(wav, skipped)
     assert cr.step_whisper(ctx, kinds=["repro"]) == {"ok": 2}
-    assert cr.step_asr(ctx, kinds=["repro"], policies=["default"]) == {"ok": 2}
-    report = cr.step_report(ctx, kind="repro", policies=["default"], name="repro")
+    assert asr(ctx, kinds=["repro"], policies=["default"]) == {"ok": 2}
+    report = cr.step_report(
+        ctx, kind="repro", split="dev", policies=["default"], name="repro"
+    )
     rows = {r["attempt"]: r for r in report["rows"]}
     assert rows["Charon-0"]["classification"].startswith("CONFIRMED")
     assert rows["Kore-0"]["classification"] == "no span in either"
@@ -1397,7 +1475,7 @@ def test_cli_budget_refusal_exits_2_with_a_clean_message(cli_rig, tmp_path):
     assert cli_rig.provider.calls == []
 
 
-def test_cli_refusals_exit_2_and_other_calibrate_errors_exit_1(cli_rig, tmp_path):
+def test_cli_refusals_exit_2(cli_rig, tmp_path):
     out = invoke(["--root", str(tmp_path / "t5"), "corpus"])
     assert out.exit_code == 2 and "exactly 4 distinct --rundown" in out.output
     out = invoke(["--root", str(tmp_path / "t5"), "cuts"])
@@ -1443,3 +1521,670 @@ def test_slots_cycle_through_every_combination():
     assert cr.plan_slots(10, "s", "dev") == cr.plan_slots(10, "s", "dev")
     assert cr.plan_slots(10, "s", "dev") != cr.plan_slots(10, "t", "dev")
     assert {f for f, _ in cr.COMBOS} == set(cal.FAMILIES)
+
+
+# =========================================================================== #
+# review round: ledger completeness, deadline failures, stale evidence,
+# hold-out discipline, exit codes, lock, timeouts, whisper client
+# =========================================================================== #
+
+
+def _manifest_writer(tokens, *, outcome="failed", reason="deadline", chunks=(1, 3)):
+    """A fake render that writes a manifest like render_episode, then raises."""
+    from pipeline.tts.render import TTSRenderError
+
+    def render(text, cfg, out, *, feed_slug, episode_id, manifest_dir, **kw):
+        d = manifest_dir / feed_slug
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{episode_id}-20260930T120000000000Z.json").write_text(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "gemini_phase": {
+                        "outcome": outcome,
+                        "reason": reason,
+                        "detail": "chunk 3 ran out of time",
+                        "failed_chunk": 3,
+                        "elapsed_s": 360.4,
+                        "budget_s": 360.0,
+                        "tokens": tokens,
+                        "chunks": [{"attempts": [{}] * n} for n in chunks],
+                    },
+                }
+            )
+        )
+        raise TTSRenderError("Gemini phase failed: deadline")
+
+    return render
+
+
+def test_deadline_reads_a_failed_phase_from_the_manifest_after_a_render_error(tmp_path):
+    rig, ctx = corpus_ctx(tmp_path)
+    toks = {"synth_audio": 50_000, "asr_input": 60_000, "asr_output": 4_000,
+            "asr_thinking": None}  # fmt: skip
+    rig.render_impl = _manifest_writer(toks)
+    rec = cr.step_deadline(ctx, model="gemini-3.8-flash-lite-tts")
+    assert rec["render_outcome"] == "failed" and "TTSRenderError" in rec["error"]
+    assert (rec["outcome"], rec["reason"], rec["failed_chunk"]) == (
+        "failed",
+        "deadline",
+        3,
+    )
+    assert rec["phase_elapsed_s"] == 360.4 and rec["budget_s"] == 360.0
+    assert rec["retries"] == 2  # (1-1) + (3-1)
+    assert rec["manifest"] and Path(rec["manifest"]).exists()
+    # tokens known (a completed call with no thinking count is 0): not worst case
+    expected = 50_000 / 1e6 * 6.1 + 60_000 / 1e6 + 4_000 / 1e6 * 5
+    assert rec["worst_case"] is False and rec["est_usd"] == pytest.approx(expected)
+    (entry,) = [e for e in ctx.ledger.entries() if e["kind"] == "deadline"]
+    assert entry["est_usd"] == pytest.approx(expected) and entry["worst_case"] is False
+
+
+def test_deadline_render_error_with_unknown_tokens_is_booked_at_the_worst_case(
+    tmp_path,
+):
+    rig, ctx = corpus_ctx(tmp_path)
+    rig.render_impl = _manifest_writer({"synth_audio": None, "asr_input": None})
+    rec = cr.step_deadline(ctx, model="gemini-3.8-flash-tts")
+    assert rec["worst_case"] is True and rec["reason"] == "deadline"
+    assert rec["est_usd"] == pytest.approx(
+        cr.est_deadline_worst(rec["chars"], "gemini-3.8-flash-tts")
+    )
+
+
+def test_deadline_interrupt_is_booked_then_reraised(tmp_path):
+    rig, ctx = corpus_ctx(tmp_path)
+    toks = {"synth_audio": 10_000, "asr_input": 10_000, "asr_output": 1_000}
+
+    def render(*a, **k):
+        _manifest_writer(toks)(*a, **k)  # writes the manifest, raises TTSRenderError
+
+    def interrupted(*a, **k):
+        try:
+            render(*a, **k)
+        except Exception:
+            raise KeyboardInterrupt from None
+
+    rig.render_impl = interrupted
+    with pytest.raises(KeyboardInterrupt):
+        cr.step_deadline(ctx, model="gemini-3.8-flash-tts")
+    (entry,) = [e for e in ctx.ledger.entries() if e["kind"] == "deadline"]
+    assert entry["usage"]["synth_audio"] == 10_000  # booked from the manifest
+    (line,) = (ctx.root / "deadline/summary.jsonl").read_text().splitlines()
+    assert json.loads(line)["render_outcome"] == "interrupted"
+
+
+def test_deadline_render_error_with_no_manifest_costs_the_worst_case(tmp_path):
+    from pipeline.tts.render import TTSRenderError
+
+    rig, ctx = corpus_ctx(tmp_path)
+
+    def boom(*a, **k):
+        raise TTSRenderError("no manifest was written")
+
+    rig.render_impl = boom
+    rec = cr.step_deadline(ctx, model="gemini-3.8-flash-tts")
+    assert rec["worst_case"] is True and rec["manifest"] is None
+
+
+def test_deadline_mp3_is_never_overwritten_and_a_torn_summary_line_is_tolerated(
+    tmp_path,
+):
+    rig, ctx = corpus_ctx(tmp_path)
+    toks = {"synth_audio": 1, "asr_input": 1, "asr_output": 1}
+    seen = []
+
+    def render(text, cfg, out, **kw):
+        seen.append(out)
+        out.write_bytes(b"NEW")
+        return FakeRenderResult(manifest(tmp_path, toks))
+
+    rig.render_impl = render
+    d = ctx.root / "deadline"
+    d.mkdir(parents=True)
+    precious = d / "levine-2026-09-24--lite--Kore--0.mp3"
+    precious.write_bytes(b"EARLIER RUN")
+    ok_line = json.dumps({"key": "other|k|v|9"})
+    (d / "summary.jsonl").write_text(ok_line + "\n" + '{"key": "levine-2026-09-24|gem')
+    rec = cr.step_deadline(ctx, model="gemini-3.8-flash-lite-tts")
+    assert precious.read_bytes() == b"EARLIER RUN"
+    assert seen[0].name == "levine-2026-09-24--lite--Kore--0-1.mp3" and rec["mp3"]
+    assert any("torn last line" in line for line in ctx.out)
+    lines = (d / "summary.jsonl").read_text().splitlines()
+    assert [json.loads(line)["key"] for line in lines][0] == "other|k|v|9"
+    assert len(lines) == 2 and all(json.loads(line) for line in lines)
+    assert (d / "summary.torn-1.txt").read_text().startswith('{"key": "levine')
+    # a bad line in the middle is an error, not something to skip
+    (d / "summary.jsonl").write_text("garbage\n" + ok_line + "\n")
+    with pytest.raises(cr.CalibrateError, match="line 1"):
+        cr.step_deadline(ctx, model="gemini-3.8-flash-lite-tts", attempt=5)
+
+
+# --- the ledger never misses a billed call -----------------------------------
+
+
+def _synth_x(ctx):
+    return cr.synth_one(
+        ctx,
+        item_id="x",
+        text="alpha beta gamma delta",
+        model="gemini-3.8-flash-tts",
+        voice="Kore",
+        out_dir=ctx.root / "bases" / "x",
+    )
+
+
+def test_synth_books_the_ledger_even_when_the_provider_blows_up(tmp_path):
+    rig, ctx = corpus_ctx(tmp_path)
+    rig.provider.script["Kore"] = [RuntimeError("boom")]
+    with pytest.raises(RuntimeError, match="boom"):
+        cr.step_synth(ctx, workers=1, ids=["levine-2026-09-21--c0--flash--Kore"])
+    (entry,) = ctx.ledger.entries()
+    assert entry["worst_case"] is True and entry["est_usd"] > 0
+    assert entry["note"] == "call did not complete"
+
+
+def test_synth_books_real_usage_even_when_saving_the_audio_fails(tmp_path, monkeypatch):
+    rig, ctx = corpus_ctx(tmp_path)
+    real = cr.write_new
+
+    def failing(path, data):
+        if path.name == "pcm.wav":
+            raise OSError("disk full")
+        return real(path, data)
+
+    monkeypatch.setattr(cr, "write_new", failing)
+    with pytest.raises(OSError, match="disk full"):
+        _synth_x(ctx)
+    (entry,) = ctx.ledger.entries()
+    assert entry["usage"]["audio_tokens"] == 1000 and entry["worst_case"] is False
+
+
+def test_an_interrupt_during_synth_is_booked_at_the_worst_case(tmp_path):
+    rig, ctx = corpus_ctx(tmp_path)
+    rig.provider.script["Kore"] = [KeyboardInterrupt()]
+    with pytest.raises(KeyboardInterrupt):
+        _synth_x(ctx)
+    (entry,) = ctx.ledger.entries()
+    assert entry["worst_case"] is True
+
+
+def test_asr_and_whisper_book_the_ledger_when_the_service_blows_up(verified):
+    rig, ctx, cuts = verified
+    base_id = next(p.parent.name for p in (ctx.root / "bases").glob("*/label.json"))
+    before = len(ctx.ledger.entries())
+    orig = rig._transcriber
+
+    def crashing(thinking, timeout):
+        t = orig(thinking, timeout)
+        t.crash = RuntimeError("asr exploded")
+        return t
+
+    rig.services.transcriber = crashing
+    with pytest.raises(RuntimeError, match="asr exploded"):
+        asr(ctx, kinds=["base"], ids=[base_id])
+    entry = ctx.ledger.entries()[before]
+    assert entry["kind"] == "asr" and entry["worst_case"] is True
+    # whisper: a non-ServiceError escapes, but the call is still on the ledger
+    victim = next((ctx.root / "bases").glob("*/whisper.json"))
+    victim.unlink()
+    rig.whisper.errors = [RuntimeError("whisper exploded")]
+    with pytest.raises(RuntimeError, match="whisper exploded"):
+        cr.step_whisper(ctx, kinds=["base"], ids=[victim.parent.name])
+    last = ctx.ledger.entries()[-1]
+    assert last["kind"] == "whisper" and last["worst_case"] is True
+
+
+def test_threaded_budget_refusal_never_oversubscribes_and_loses_no_ledger_line(
+    tmp_path,
+):
+    rig, ctx = corpus_ctx(tmp_path)
+    mine = [b for b in ctx.corpus()["bases"] if b["feed"] == "levine"]
+    worsts = [cr.est_synth_worst(b["chars"], b["model"]) for b in mine]
+    ctx.ledger.budget = 2.5 * max(worsts)  # a handful of calls may be in flight
+    rig.provider.delay = 0.05
+    ids = [b["base_id"] for b in mine]
+    with pytest.raises(cr.BudgetError):
+        cr.step_synth(ctx, workers=4, ids=ids)
+    entries = ctx.ledger.entries()
+    assert 1 <= len(rig.provider.calls) < len(ids)
+    assert len(entries) == len(rig.provider.calls)  # every call that went out is booked
+    # in-flight worst cases never exceeded the budget
+    assert rig.provider.max_inflight * min(worsts) <= ctx.ledger.budget
+    assert rig.provider.max_inflight < len(ids)
+    assert ctx.ledger.total() <= ctx.ledger.budget
+    assert rig.provider.inflight == 0
+
+
+# --- wall-clock bounds ---------------------------------------------------------
+
+
+def test_a_hung_asr_request_is_recorded_unavailable_and_the_step_finishes(
+    verified, monkeypatch
+):
+    rig, ctx, cuts = verified
+    base_id = next(p.parent.name for p in (ctx.root / "bases").glob("*/label.json"))
+    monkeypatch.setattr(cr, "ASR_WALL_S", 0.2)
+    gate = threading.Event()
+    orig = rig._transcriber
+
+    def hanging(thinking, timeout):
+        t = orig(thinking, timeout)
+        t.block = gate
+        return t
+
+    rig.services.transcriber = hanging
+    try:
+        out = asr(ctx, kinds=["base"], ids=[base_id])
+    finally:
+        gate.set()
+    assert out == {"unavailable": 1}
+    rec = cr.read_json(ctx.base_dir(base_id) / "asr" / "default-0.json")
+    assert rec["unavailable_reason"] == "asr_timeout" and "may linger" in rec["detail"]
+    entry = [e for e in ctx.ledger.entries() if e["kind"] == "asr"][-1]
+    assert entry["worst_case"] is True
+
+
+def test_a_hung_synth_is_a_transient_error_then_exhausts(tmp_path, monkeypatch):
+    rig, ctx = corpus_ctx(tmp_path)
+    monkeypatch.setattr(cr, "SYNTH_WALL_S", 0.1)
+    gate = threading.Event()
+    rig.provider.block = gate
+    try:
+        out = cr.step_synth(ctx, workers=1, ids=["levine-2026-09-21--c0--flash--Kore"])
+    finally:
+        gate.set()
+    assert out == {"failed": 1} and rig.sleeps == [2.0, 8.0]
+    rec = cr.read_json(
+        ctx.base_dir("levine-2026-09-21--c0--flash--Kore") / "synth.json"
+    )
+    assert [a["kind"] for a in rec["attempts"]] == ["infra"] * 3
+    assert (
+        all(e["worst_case"] for e in ctx.ledger.entries())
+        and len(ctx.ledger.entries()) == 3
+    )
+
+
+def test_a_hung_whisper_call_is_retried_then_fails(copy_of_staged, monkeypatch):
+    rig, ctx, *_ = copy_of_staged
+    victim = next((ctx.root / "bases").glob("*/whisper.json"))
+    victim.unlink()
+    monkeypatch.setattr(cr, "WHISPER_WALL_S", 0.1)
+    gate = threading.Event()
+    rig.whisper.block = gate
+    try:
+        out = cr.step_whisper(ctx, kinds=["base"], ids=[victim.parent.name])
+    finally:
+        gate.set()
+    assert out == {"failed": 1} and len(rig.whisper.calls) == 3
+    assert any("gave up" in line for line in ctx.out)
+
+
+def test_call_with_timeout_returns_raises_and_times_out():
+    assert cr.call_with_timeout(lambda: 7, 1) == 7
+    with pytest.raises(ValueError, match="x"):
+        cr.call_with_timeout(lambda: (_ for _ in ()).throw(ValueError("x")), 1)
+    gate = threading.Event()
+    try:
+        with pytest.raises(cr.WallClockTimeout, match="may linger"):
+            cr.call_with_timeout(lambda: gate.wait(5), 0.05)
+    finally:
+        gate.set()
+
+
+# --- the real whisper client, against a stub ------------------------------------
+
+
+class StubWhisperClient:
+    def __init__(self, result=None, error=None):
+        self.result, self.error = result, error
+        self.kwargs = None
+        self.closed = False
+        self.audio = self
+        self.transcriptions = self
+
+    def create(self, **kw):
+        self.kwargs = kw
+        if self.error:
+            raise self.error
+        return self.result
+
+    def close(self):
+        self.closed = True
+
+
+class StubResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def model_dump_json(self):
+        return json.dumps(self.payload)
+
+
+def test_openai_whisper_wrapper_sends_the_validated_request_and_returns_a_dict(
+    monkeypatch,
+):
+    from pipeline.tts import providers
+
+    payload = {"words": [{"word": "hi", "start": 0.0, "end": 0.4}], "duration": 1.0}
+    stub = StubWhisperClient(StubResponse(payload))
+    made = []
+    monkeypatch.setattr(
+        providers, "_make_openai_client", lambda timeout: made.append(timeout) or stub
+    )
+    out = cr._openai_whisper(b"RIFF....", "base.wav")
+    assert out == payload and stub.closed and made == [180.0]
+    kw = stub.kwargs
+    assert kw["model"] == "whisper-1" and kw["response_format"] == "verbose_json"
+    assert kw["timestamp_granularities"] == ["word"] and kw["language"] == "en"
+    assert kw["file"] == ("base.wav", b"RIFF....", "audio/wav")
+
+
+def _status_error(cls, status, body=None):
+    import httpx
+
+    req = httpx.Request("POST", "https://api.openai.com/v1/audio/transcriptions")
+    return cls("x", response=httpx.Response(status, request=req), body=body)
+
+
+@pytest.mark.parametrize(
+    ("make", "kind"),
+    [
+        (
+            lambda o, h: h.APIConnectionError(
+                request=__import__("httpx").Request("POST", "http://x")
+            ),
+            "transient",
+        ),
+        (lambda o, h: _status_error(o.RateLimitError, 429), "transient"),
+        (lambda o, h: _status_error(o.InternalServerError, 503), "transient"),
+        (lambda o, h: _status_error(o.AuthenticationError, 401), "fatal"),
+        (lambda o, h: _status_error(o.BadRequestError, 400), "fatal"),
+        (
+            lambda o, h: _status_error(
+                o.RateLimitError, 429, {"code": "insufficient_quota", "message": "x"}
+            ),
+            "fatal",
+        ),
+    ],
+)
+def test_openai_whisper_wrapper_classifies_errors_and_still_closes(
+    monkeypatch, make, kind
+):
+    import openai
+
+    from pipeline.tts import providers
+
+    stub = StubWhisperClient(error=make(openai, openai))
+    monkeypatch.setattr(providers, "_make_openai_client", lambda timeout: stub)
+    with pytest.raises(cr.ServiceError) as exc_info:
+        cr._openai_whisper(b"x", "a.wav")
+    assert exc_info.value.kind == kind and stub.closed
+
+
+# --- stale evidence ---------------------------------------------------------------
+
+
+def _first_base(ctx):
+    return next(p.parent.name for p in (ctx.root / "bases").glob("*/label.json"))
+
+
+def test_asr_refuses_stale_records_before_any_call_unless_told(verified):
+    rig, ctx, cuts = verified
+    base_id = _first_base(ctx)
+    asr(ctx, kinds=["base"], ids=[base_id])
+    calls = len(rig.asr_calls)
+    wav_path = ctx.base_dir(base_id) / "pcm.wav"
+    original = wav_path.read_bytes()
+    wav_path.write_bytes(cal.wav_bytes(b"\x07\x00" * 20_000))  # a different render
+    with pytest.raises(cr.Refused, match="stale.*audio changed"):
+        asr(ctx, kinds=["base"], ids=[base_id])
+    assert len(rig.asr_calls) == calls  # nothing was sent
+    # a different ASR policy string under the same policy name is stale too
+    wav_path.write_bytes(original)
+    orig = rig._transcriber
+
+    def other_policy(thinking, timeout):
+        t = orig(thinking, timeout)
+        t.policy = "some-other-model|thinking-default"
+        return t
+
+    rig.services.transcriber = other_policy
+    with pytest.raises(cr.Refused, match="ASR policy"):
+        asr(ctx, kinds=["base"], ids=[base_id])
+    assert len(rig.asr_calls) == calls
+    # --retry-stale redoes it and keeps the old record
+    assert asr(ctx, kinds=["base"], ids=[base_id], retry_stale=True) == {"ok": 1}
+    d = ctx.base_dir(base_id) / "asr"
+    assert (d / "default-0.stale-1.json").exists()
+    assert (
+        cr.read_json(d / "default-0.json")["asr_policy"]
+        == "some-other-model|thinking-default"
+    )
+
+
+def test_report_refuses_mixed_asr_policy_strings_and_stale_audio(verified):
+    rig, ctx, cuts = verified
+    base_id = _first_base(ctx)
+    asr(ctx, kinds=["base"], ids=[base_id], repeat=2)
+    f = ctx.base_dir(base_id) / "asr" / "default-1.json"
+    rec = cr.read_json(f)
+    rec["asr_policy"] = "tampered|thinking-default"
+    f.write_text(json.dumps(rec))
+    with pytest.raises(cr.Refused, match="different ASR policy strings"):
+        cr.step_report(ctx, split="all", policies=["default"], name="x")
+    rec["asr_policy"] = "fake-asr|thinking-default"
+    f.write_text(json.dumps(rec))
+    rep_ok = cr.step_report(ctx, split="all", policies=["default"], name="ok")
+    assert rep_ok["sections"][0]["asr_policies"] == ["fake-asr|thinking-default"]
+    wav_path = ctx.base_dir(base_id) / "pcm.wav"
+    wav_path.write_bytes(cal.wav_bytes(b"\x07\x00" * 20_000))
+    with pytest.raises(cr.Refused, match="stale"):
+        cr.step_report(ctx, split="all", policies=["default"], name="y")
+
+
+def test_cuts_refuse_an_existing_cut_wav_that_differs(copy_of_staged):
+    rig, ctx, _, cuts = copy_of_staged
+    ctx.cuts_path.unlink()
+    victim = ctx.cut_dir(cuts["cuts"][0]["cut_id"]) / "cut.wav"
+    victim.write_bytes(victim.read_bytes()[:-2] + b"\x00\x00")
+    before = victim.read_bytes()
+    with pytest.raises(cr.Refused, match="differs"):
+        cr.step_cuts(ctx)
+    assert victim.read_bytes() == before and not ctx.cuts_path.exists()
+
+
+def test_label_refuses_a_chunk_file_that_does_not_match_the_corpus(copy_of_staged):
+    rig, ctx, *_ = copy_of_staged
+    base_id = _first_base(ctx)
+    (ctx.base_dir(base_id) / "label.json").unlink()
+    (ctx.base_dir(base_id) / "chunk.txt").write_text("not the chunk")
+    with pytest.raises(cr.Refused, match="does not match the corpus chunk"):
+        cr.step_label(ctx, ids=[base_id])
+
+
+# --- hold-out discipline -------------------------------------------------------------
+
+
+def test_asr_split_is_required_and_all_is_refused(verified):
+    rig, ctx, cuts = verified
+    with pytest.raises(TypeError):
+        cr.step_asr(ctx, kinds=["base"])  # type: ignore[call-arg]
+    with pytest.raises(cr.Refused, match="dev or holdout"):
+        cr.step_asr(ctx, kinds=["base"], split="all")
+    out = invoke_ctx_free = None  # noqa: F841
+    assert rig.asr_calls == []
+
+
+def test_holdout_run_writes_a_marker_first_and_later_runs_warn(verified, monkeypatch):
+    rig, ctx, cuts = verified
+    monkeypatch.setattr(cr, "git_head", lambda: "deadbeef")
+    hold = next(b["base_id"] for b in ctx.corpus()["bases"] if b["split"] == "holdout")
+    marker = ctx.root / "holdout-run.json"
+    # a dev run never touches the marker
+    dev = next(b["base_id"] for b in ctx.corpus()["bases"] if b["split"] == "dev")
+    cr.step_asr(ctx, kinds=["base"], split="dev", ids=[dev])
+    assert not marker.exists()
+    assert cr.step_asr(ctx, kinds=["base"], split="holdout", ids=[hold]) == {"ok": 1}
+    doc = cr.read_json(marker)
+    assert doc["git_head"] == "deadbeef" and doc["policies"] == ["default"]
+    assert doc["kinds"] == ["base"] and doc["first_run"]
+    assert not any("WARNING" in line for line in ctx.out)
+    calls = len(rig.asr_calls)
+    # resuming: nothing new is sent, but the warning lists the marker
+    assert cr.step_asr(ctx, kinds=["base"], split="holdout", ids=[hold]) == {
+        "skipped": 1
+    }
+    assert len(rig.asr_calls) == calls
+    warn = [line for line in ctx.out if "WARNING" in line]
+    assert warn and "deadbeef" in warn[0] and "already run" in warn[0]
+    assert cr.read_json(marker) == doc  # the marker is never rewritten
+
+
+def test_holdout_with_no_targets_writes_no_marker(verified):
+    rig, ctx, cuts = verified
+    cr.step_asr(ctx, kinds=["base"], split="holdout", ids=["no-such-base"])
+    assert not (ctx.root / "holdout-run.json").exists()
+
+
+def test_policies_are_deduplicated(verified):
+    rig, ctx, cuts = verified
+    base_id = _first_base(ctx)
+    asr(ctx, kinds=["base"], ids=[base_id], policies=["default", "default"])
+    assert rig.made == ["default"] and len(rig.asr_calls) == 1
+
+
+# --- report: sections per policy, provenance, cut points ----------------------
+
+
+def test_report_with_several_policies_makes_separate_unpooled_sections(
+    verified, monkeypatch
+):
+    rig, ctx, cuts = verified
+    monkeypatch.setattr(cr, "git_head", lambda: "cafe1234")
+    low_victim = (ctx.cut_dir(cuts["cuts"][2]["cut_id"]) / "cut.wav").read_bytes()
+    orig = rig._transcriber
+
+    def flaky(thinking, timeout):
+        t = orig(thinking, timeout)
+        if thinking == "low":
+            t.fail[wav_sha(low_victim)] = "asr_incomplete"
+        return t
+
+    rig.services.transcriber = flaky
+    asr(ctx, kinds=["base", "cut"], policies=["default", "low"], workers=4)
+    report = cr.step_report(
+        ctx, split="all", policies=["default", "low", "low"], name="both"
+    )
+    d, low = report["sections"]
+    assert (d["policy"], low["policy"]) == ("default", "low")
+    assert d["asr_policies"] == ["fake-asr|thinking-default"]
+    assert low["asr_policies"] == ["fake-asr|thinking-low"]
+    assert d["n_cuts"] == low["n_cuts"] == len(cuts["cuts"])  # not 2x: unpooled
+    assert d["grid"][0]["cuts"]["overall"]["unavailable"] == 0
+    assert low["grid"][0]["cuts"]["overall"]["unavailable"] == 1
+    # acceptance is per policy: the clean policy is never dragged down by the other
+    assert d["grid"][-1]["acceptance"]["cut_unavailable"] == 0
+    assert low["grid"][-1]["acceptance"]["cut_unavailable"] == 1
+    md = (ctx.root / "reports/both.md").read_text()
+    assert "# ASR policy `default`" in md and "# ASR policy `low`" in md
+    assert "fake-asr|thinking-low" in md
+    # provenance
+    meta = report["meta"]
+    assert meta["corpus_sha256"] == cr.sha256_hex(ctx.corpus_path.read_bytes())
+    assert meta["cuts_sha256"] == cr.sha256_hex(ctx.cuts_path.read_bytes())
+    assert meta["git_head"] == "cafe1234"
+    from pipeline.tts import asr as asr_mod
+    from pipeline.tts import verify
+
+    assert meta["verifier_policy"] == verify.VERIFIER_POLICY
+    assert meta["default_asr_policy"] == asr_mod.ASR_POLICY
+    assert f"corpus.json sha256 `{meta['corpus_sha256']}`" in md
+
+
+def test_snap_energy_is_surfaced_in_cuts_json_verified_json_and_the_report(verified):
+    rig, ctx, cuts = verified
+    # white-noise test audio has no quiet frame: every snapped point is loud
+    entry = cuts["cuts"][0]
+    assert entry["max_snap_energy_ratio"] is not None
+    doc = cr.read_json(ctx.verified_path)["cuts"][entry["cut_id"]]
+    assert doc["max_snap_energy_ratio"] == pytest.approx(entry["max_snap_energy_ratio"])
+    assert doc["snap_energy_ratios"] and doc["discarded"] is False
+    assert any("snapped point above" in line for line in ctx.out)
+    asr(ctx, kinds=["base", "cut"], policies=["default"], workers=4)
+    report = cr.step_report(ctx, split="all", policies=["default"], name="e")
+    pts = {p["cut_id"]: p for p in report["cut_points"]}
+    assert pts[entry["cut_id"]]["max_energy_ratio"] == pytest.approx(
+        entry["max_snap_energy_ratio"]
+    )
+    assert "Cut-point energy" in (ctx.root / "reports/e.md").read_text()
+
+
+# --- exit codes and the lock ---------------------------------------------------
+
+
+def test_cli_exits_1_after_finishing_when_items_failed(cli_rig, tmp_path):
+    ctx = cli_rig.ctx(tmp_path / "t5")
+    run_corpus(cli_rig, ctx, tmp_path)
+    ids = [
+        "--ids",
+        "levine-2026-09-21--c0--flash--Kore,levine-2026-09-22--c0--flash--Charon",
+    ]
+    cli_rig.provider.script["Kore"] = [TTSProviderError("HTTP 400", kind="fatal")]
+    out = invoke(["--root", str(tmp_path / "t5"), "synth", "--workers", "1", *ids])
+    assert out.exit_code == 1
+    assert "1 failed" in out.output and "FAILED" in out.output
+    # the healthy base was still synthesized and saved
+    assert (ctx.base_dir("levine-2026-09-22--c0--flash--Charon") / "pcm.wav").exists()
+    # whisper: one item fails for good -> exit 1, the other is saved
+    cli_rig.whisper.errors = [cr.ServiceError("HTTP 401", "fatal")]
+    out = invoke(["--root", str(tmp_path / "t5"), "whisper", "--workers", "1"])
+    assert out.exit_code == 1 and "1 failed" in out.output
+    # a clean run exits 0
+    out = invoke(["--root", str(tmp_path / "t5"), "whisper"])
+    assert out.exit_code == 0
+
+
+def test_cli_asr_unavailable_exits_1_and_split_is_required(cli_rig, tmp_path):
+    rig = cli_rig
+    ctx = rig.ctx(tmp_path / "t5")
+    run_corpus(rig, ctx, tmp_path)
+    base_id = "levine-2026-09-21--c0--flash--Kore"
+    root = ["--root", str(tmp_path / "t5")]
+    assert invoke([*root, "synth", "--ids", base_id]).exit_code == 0
+    assert invoke([*root, "whisper", "--ids", base_id]).exit_code == 0
+    assert invoke([*root, "label", "--ids", base_id]).exit_code == 0
+    wav = (ctx.base_dir(base_id) / "pcm.wav").read_bytes()
+    orig = rig._transcriber
+
+    def flaky(thinking, timeout):
+        t = orig(thinking, timeout)
+        t.fail[wav_sha(wav)] = "asr_incomplete"
+        return t
+
+    rig.services.transcriber = flaky
+    out = invoke([*root, "asr", "--kind", "base", "--ids", base_id])
+    assert out.exit_code == 2 and "--split" in out.output  # required
+    out = invoke([*root, "asr", "--kind", "base", "--split", "all", "--ids", base_id])
+    assert out.exit_code == 2  # all is not a choice
+    out = invoke([*root, "asr", "--kind", "base", "--split", "dev", "--ids", base_id])
+    assert out.exit_code == 1 and "1 unavailable" in out.output
+    out = invoke([*root, "report", "--policy", "default"])
+    assert out.exit_code == 2 and "--split" in out.output
+
+
+def test_two_steps_cannot_run_on_one_root_at_once(cli_rig, tmp_path):
+    ctx = cli_rig.ctx(tmp_path / "t5")
+    other = cli_rig.ctx(tmp_path / "t5")
+    with ctx.locked():
+        with pytest.raises(cr.Refused, match="one step at a time"):
+            with other.locked():
+                pass  # pragma: no cover
+        out = invoke(["--root", str(tmp_path / "t5"), "cuts"])
+        assert (
+            out.exit_code == 2 and "another tts-calibrate step is running" in out.output
+        )
+        # reading the ledger needs no lock
+        assert invoke(["--root", str(tmp_path / "t5"), "ledger"]).exit_code == 0
+    with other.locked():  # released
+        pass

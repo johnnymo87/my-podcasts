@@ -176,17 +176,24 @@ Imports only stdlib and `pipeline.tts.*`. Functions (names indicative):
 - `map_words_to_script(script_tokens, whisper_words) -> list[WordMap]`: normalize each whisper
   word to tokens (a word can yield 0..n tokens), align token streams with `difflib`, and return
   for each script token the matched whisper word index and its start/end seconds (or None).
-- `screen_base(script_text, whisper) -> BaseLabel` (decision 2).
-- `choose_cuts(base, family, size, rng) -> CutSpec | None` (decision 3): only intervals whose
-  boundary tokens are exactly matched; `mid_fluent` avoids sentence boundaries; `sentence` snaps to
+- `screen_base(script_text, whisper, *, total_samples, base_id="", sample_rate=24000) -> BaseLabel` (decision 2). `total_samples` is required and must be the sample count of the PCM the label will cut (whisper's rounded `duration` is not used); `whisper` may be a verbose_json dict or a bare words list.
+- `choose_cuts(base, family, size, rng, *, seed=None) -> CutSpec | None` (decision 3): only intervals whose
+  boundary tokens are exactly matched *and* trustworthy in time (`boundary_eligibility`: the word and both neighbours last >= 50 ms, nothing overlaps; real whisper timestamps abut, and ~4% of words are zero-length); `mid_fluent` avoids sentence boundaries; `sentence` snaps to
   sentence boundaries; `predictable` requires a quote or a repeated >=3-gram; `multi` is 3
   separated ~8-token intervals. Returns sample intervals and the frozen label.
-- `reconstruction(label, script_text, clean_transcript, cut_transcript) -> dict` (decision 6).
-- `evaluate(records, thresholds_grid) -> table` replaying `verify.analyze` over saved transcripts
+- `reconstruction(label, script_text, clean_transcript, cut_transcript, *, min_run=3, audio_residue=None) -> dict` (decision 6): levels are per interval (overall = the maximum); `audio_residue` is whisper's transcript of the cut audio and is subtracted from the hits.
+- `evaluate(records, thresholds_grid) -> list[dict]` (one result per grid point, with `acceptance_ok`/`acceptance`; `caught_localized` counts a cut only when EVERY removed interval overlaps a flagged span) replaying `verify.analyze` over saved transcripts
   for every grid point; per family/bin/feed/model/split counts; false alarms per faithful base
   and per ASR repeat.
 - `simulate(transcript_tokens, script_tokens, spec, rng)` (decision 4) producing synthetic
   transcripts with known deleted script intervals.
+- API added after review (all in `calibrate.py`; none changes a signature above):
+  `finalize_cut(spec, pcm, *, base_energy=None)` snaps each cut point to the lowest-energy 10 ms frame within
+  +/-100 ms (clamped to the midpoints of the adjacent words) and records the nominal and snapped points and each
+  snapped frame's RMS relative to the base (`CutSpec.apply` refuses an unsnapped spec);
+  `verify_cut_audio(spec, script_text, whisper_cut, *, base=None, window=5)` is the post-cut check on whisper of the
+  CUT audio (removed words still audible, kept boundary words missing); `removed_sanity(expected_tokens, whisper_removed)`;
+  `replay(record, thresholds) -> Outcome`; `default_grid()`; a cut may not remove more than half the chunk.
 - Tests (offline, synthetic PCM and token lists): cut byte math and boundaries, overlapping or
   out-of-range intervals rejected, word mapping with numbers ("$1.5 billion") and a whisper word
   normalizing to 0 tokens, each family's constraints, the exact blind spot through `simulate`, a
