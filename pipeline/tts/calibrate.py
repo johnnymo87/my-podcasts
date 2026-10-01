@@ -1686,10 +1686,14 @@ def replay(record: EvalRecord, thresholds: VerifyThresholds) -> Outcome:
     )
 
 
+DEFAULT_DEFICITS: tuple[int | None, ...] = (None, 12, 16, 20, 24)
+DEFAULT_FLOORS: tuple[float, ...] = (0.85, 0.90, 0.93)
+
+
 def default_grid(
     *,
-    deficits: Sequence[int | None] = (None, 12, 16, 20, 24),
-    floors: Sequence[float] = (0.85, 0.90, 0.93),
+    deficits: Sequence[int | None] = DEFAULT_DEFICITS,
+    floors: Sequence[float] = DEFAULT_FLOORS,
     base: VerifyThresholds = DEFAULT_THRESHOLDS,
 ) -> list[VerifyThresholds]:
     """Decision 5's grid; ``None`` (rule off) is included as the reference row."""

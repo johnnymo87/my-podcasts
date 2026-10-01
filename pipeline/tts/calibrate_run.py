@@ -2910,9 +2910,11 @@ def build_report(
     *,
     policy: str,
     asr_policies: Sequence[str] = (),
+    grid: Sequence[Any] | None = None,
 ) -> dict:
-    """One report SECTION: one policy name's records evaluated over the grid."""
-    grid = cal.default_grid()
+    """One report SECTION: one policy name's records evaluated over the grid
+    (``cal.default_grid()`` unless one is given)."""
+    grid = cal.default_grid() if grid is None else list(grid)
     results = cal.evaluate(records, grid)
     by_id = {r.record_id: r for r in records}
     recon_rows = []
@@ -3274,15 +3276,29 @@ def step_report(
     name: str | None = None,
     allow_unverified: bool = False,
     max_boundary_error: int = DEFAULT_MAX_BOUNDARY_ERROR,
+    deficits: Sequence[int | None] | None = None,
+    floors: Sequence[float] | None = None,
 ) -> dict:
     """Write ``reports/<name>.json`` and ``.md``. With several policies, one
     SECTION per policy: each is evaluated on its own records and has its own
-    acceptance; they are never pooled."""
+    acceptance; they are never pooled.
+
+    ``deficits`` (``None`` = rule off) and ``floors`` override the matching axis
+    of ``cal.default_grid()``; the effective axes are recorded in the report
+    args."""
     from pipeline.tts import asr, verify
 
     policies = tuple(dict.fromkeys(policies))
     if not policies:
         raise Refused("--policy is required (default or low)")
+    deficits = cal.DEFAULT_DEFICITS if deficits is None else tuple(deficits)
+    floors = cal.DEFAULT_FLOORS if floors is None else tuple(floors)
+    if not deficits or not floors:
+        raise Refused("the grid needs at least one deficit and one floor")
+    try:
+        grid = cal.default_grid(deficits=deficits, floors=floors)
+    except ValueError as exc:
+        raise Refused(f"bad grid: {exc}") from exc
     name = name or f"report-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
     json_path = ctx.root / "reports" / f"{name}.json"
     md_path = ctx.root / "reports" / f"{name}.md"
@@ -3302,7 +3318,9 @@ def step_report(
                 max_boundary_error=max_boundary_error,
             )
             sections.append(
-                build_report(records, recon, policy=policy, asr_policies=strings)
+                build_report(
+                    records, recon, policy=policy, asr_policies=strings, grid=grid
+                )
             )
         report = {
             "version": 2,
@@ -3312,6 +3330,8 @@ def step_report(
                 "split": split,
                 "policy": list(policies),
                 "max_boundary_error": max_boundary_error,
+                "deficits": list(deficits),
+                "floors": list(floors),
             },
             "meta": {
                 "corpus_sha256": _file_sha(ctx.corpus_path),
@@ -3589,6 +3609,27 @@ _ids_option = click.option(
     help="Only these ids (repeatable or comma-separated).",
 )
 
+
+class _DeficitType(click.ParamType):
+    """An integer >= 1, or ``none`` (-> None, the net-deficit rule off)."""
+
+    name = "M|none"
+
+    def convert(self, value, param, ctx):
+        if value is None or isinstance(value, int):
+            return value
+        if str(value).strip().lower() == "none":
+            return None
+        try:
+            m = int(value)
+        except ValueError:
+            self.fail(f"{value!r} is not an integer or 'none'", param, ctx)
+        if m < 1:
+            self.fail(f"{value!r} must be >= 1 (or 'none')", param, ctx)
+        return m
+
+
+_DEFICIT = _DeficitType()
 
 _boundary_option = click.option(
     "--max-boundary-error",
@@ -3908,10 +3949,33 @@ def asr_cmd(
 )
 @click.option("--name", default=None)
 @click.option("--unverified", "allow_unverified", is_flag=True)
+@click.option(
+    "--deficit",
+    "deficits",
+    multiple=True,
+    type=_DEFICIT,
+    help="Repeatable net-deficit rule values M (an integer >= 1, or `none` for the "
+    "rule off) replacing the default grid axis (none,12,16,20,24).",
+)
+@click.option(
+    "--floor",
+    "floors",
+    multiple=True,
+    type=click.FloatRange(0.0, 1.0),
+    help="Repeatable recall floors R replacing the default grid axis (0.85,0.90,0.93).",
+)
 @_boundary_option
 @click.pass_obj
 def report_cmd(
-    c: Ctx, kind, split, policies, name, allow_unverified, max_boundary_error
+    c: Ctx,
+    kind,
+    split,
+    policies,
+    name,
+    allow_unverified,
+    max_boundary_error,
+    deficits,
+    floors,
 ) -> None:
     """Replay the verifier over stored ASR runs: reports/<name>.json and .md."""
     with _guard(c):
@@ -3923,6 +3987,8 @@ def report_cmd(
             name=name,
             allow_unverified=allow_unverified,
             max_boundary_error=max_boundary_error,
+            deficits=tuple(deficits) or None,
+            floors=tuple(floors) or None,
         )
 
 

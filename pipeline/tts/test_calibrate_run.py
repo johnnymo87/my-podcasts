@@ -1273,6 +1273,91 @@ def test_report_builds_records_runs_the_grid_and_writes_json_and_markdown(verifi
         cr.step_report(ctx, split="all", policies=["default"], name="dev")
 
 
+def test_report_grid_overrides_replace_the_default_and_are_recorded(verified):
+    rig, ctx, cuts = verified
+    asr(ctx, kinds=["base", "cut"], policies=["default"], repeat=1, workers=4)
+    default = cr.step_report(ctx, split="all", policies=["default"], name="d0")
+    assert default["args"]["deficits"] == [None, 12, 16, 20, 24]
+    assert default["args"]["floors"] == [0.85, 0.90, 0.93]
+    rep = cr.step_report(
+        ctx,
+        split="all",
+        policies=["default"],
+        name="d1",
+        deficits=(None, 6, 10),
+        floors=(0.95, 0.96),
+    )
+    assert rep["args"]["deficits"] == [None, 6, 10]
+    assert rep["args"]["floors"] == [0.95, 0.96]
+    (sec,) = rep["sections"]
+    assert [
+        (g["thresholds"]["net_deficit_min"], g["thresholds"]["recall_floor"])
+        for g in sec["grid"]
+    ] == [(m, f) for m in (None, 6, 10) for f in (0.95, 0.96)]
+    md = (ctx.root / "reports/d1.md").read_text()
+    assert '"deficits": [null, 6, 10]' in md
+    # each override is independent of the other
+    only_floor = cr.step_report(
+        ctx, split="all", policies=["default"], name="d2", floors=(0.9,)
+    )
+    assert only_floor["args"]["deficits"] == [None, 12, 16, 20, 24]
+    assert len(only_floor["sections"][0]["grid"]) == 5
+
+
+def test_report_grid_overrides_are_validated(verified):
+    rig, ctx, cuts = verified
+    for bad in (
+        {"deficits": (0,)},
+        {"floors": (1.5,)},
+        {"deficits": ()},
+        {"floors": ()},
+    ):
+        with pytest.raises((cr.Refused, ValueError)):
+            cr.step_report(ctx, split="all", policies=["default"], name="bad", **bad)
+    assert not (ctx.root / "reports/bad.json").exists()
+
+
+def test_report_cli_parses_repeatable_deficit_and_floor(cli_rig, tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cr, "step_report", lambda ctx, **kw: seen.update(kw))
+    root = ["--root", str(tmp_path / "t5")]
+    out = invoke(
+        [
+            *root,
+            "report",
+            "--split",
+            "dev",
+            "--policy",
+            "low",
+            "--deficit",
+            "none",
+            "--deficit",
+            "6",
+            "--deficit",
+            "16",
+            "--floor",
+            "0.85",
+            "--floor",
+            "0.96",
+        ]  # fmt: skip
+    )
+    assert out.exit_code == 0, out.output
+    assert seen["deficits"] == (None, 6, 16)
+    assert seen["floors"] == (0.85, 0.96)
+    seen.clear()
+    out = invoke([*root, "report", "--split", "dev", "--policy", "low"])
+    assert out.exit_code == 0, out.output
+    assert seen["deficits"] is None and seen["floors"] is None
+    for bad in (
+        ["--deficit", "x"],
+        ["--deficit", "0"],
+        ["--floor", "1.2"],
+        ["--floor", "no"],
+    ):
+        out = invoke([*root, "report", "--split", "dev", "--policy", "low", *bad])
+        assert out.exit_code == 2, (bad, out.output)
+
+
 def test_report_splits_and_requires_a_policy(verified):
     rig, ctx, cuts = verified
     asr(ctx, kinds=["base", "cut"], policies=["low"], workers=4)
