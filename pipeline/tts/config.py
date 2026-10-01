@@ -124,7 +124,8 @@ FEED_VOICES: dict[str, RenderConfig] = {
     "silver": _openai("echo"),
     # Owner's listening-gate decision (my-podcasts-9p3.6, 2026-10-01). The
     # fallback is the feed's previous OpenAI voice, so a fallback episode
-    # sounds exactly like the pre-Gemini feed. Rollback: restore _openai("nova").
+    # sounds exactly like the pre-Gemini feed. Rollback: git revert the T6
+    # commit (golden tests pin this entry), then restart the consumer.
     "the-rundown": RenderConfig(
         primary=GeminiConfig(
             model="gemini-3.8-flash-lite-tts",

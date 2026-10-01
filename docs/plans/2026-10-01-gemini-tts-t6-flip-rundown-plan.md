@@ -58,13 +58,33 @@ today's. No other feed, no renderer, verifier or cache-version change.
    `max_net_missing` and unmatched tokens on short chunks.
 4. Full suite + ruff; code review; adversarial review (astra probe, opus fallback); PR.
 
+## Deploy order (owner): two restarts, not one
+
+**Production is not running main.** The consumer was last restarted 2026-09-30 10:57 EDT, right
+after T1 (#23); every production manifest is `renderer_version: "1"` with the old config shape.
+#24-#30 were merged but never deployed. So a single restart after this PR would ship, at once:
+per-feed `FEED_VOICES` resolution on every path, `RENDERER_VERSION` 2 (every feed's render cache
+goes cold), the new manifest schema, the Gemini phase/verifier/alert worker, and the flip. A
+problem from any of those would be indistinguishable from a Gemini problem in the 5-episode
+review, and "revert T6" would land on a state (#30 on OpenAI) that has never served an episode.
+
+1. **Restart on main without T6** (5861e75 or later): every feed stays OpenAI with today's voices.
+   Let at least one 04:30 cycle (Rundown on nova, FP Digest) and a few email-feed renders run;
+   check that manifests show `renderer_version: "2"` and `rendered_config` OpenAI, with no
+   failed jobs.
+2. **Then merge T6 and restart again.** The next Rundown renders Gemini. No dependency changes
+   since 11f342f (`google-genai` is already in the venv), so `uv sync` at start is a no-op.
+
+Rollback after step 2: `git revert` the T6 commit on main (it also reverts the golden tests),
+restart. A step-1 problem is a bug in #24-#30 (same voices, new renderer) to fix forward before
+flipping.
+
 ## After merge (owner)
 
-Deploy is the owner's `systemctl restart my-podcasts-consumer`. Then review ~5 episodes
+Then review ~5 episodes
 (manifests in `/persist/my-podcasts/tts-renders/the-rundown/`, Telegram fallback alerts):
 fallback rate, retries, omissions, real cost including verification, and the v3 watch item
 (unmatched tokens on chunks under 300 tokens; revisit if a faithful chunk exceeds 12).
-Rollback is reverting the one `FEED_VOICES` line.
 
 ## Smoke result (2026-10-01, this branch)
 
