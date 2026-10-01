@@ -243,6 +243,13 @@ repetitions or added speech.
   so all controls pass and all cuts are caught; ambiguous cases are checked by ear, not by tuning N
   until they pass. We also attempt to reproduce the real skip (repeat Flash on the Levine chunk) and
   keep any reproduction as a fixture.
+- **Calibrated (T5, 2026-09-30; evidence `docs/plans/2026-09-30-gemini-tts-t5-evidence.md`).**
+  Added a net-deficit span rule (`net_missing >= 6`) alongside the original span rule; recall
+  floor 0.95; ASR `thinking_level=LOW`; verifier v2. Hold-out: 39 labeled cuts all caught, 0
+  false alarms on 23 clean chunks; 10/10 published OpenAI episodes pass. Labels came from an
+  independent ASR (whisper) plus the owner by ear, not from the evaluated ASR. The real Levine
+  skip reproduced on Flash in 5 of 9 renders and is caught. Not claimed: contiguous omissions of
+  5 tokens or fewer.
 
 ## Telemetry
 
