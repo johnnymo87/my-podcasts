@@ -76,6 +76,10 @@ def ramp_pcm(n_samples: int) -> bytes:
     return b"".join(struct.pack("<h", i % 30000) for i in range(n_samples))
 
 
+def _word(n: int) -> str:
+    return "w" + "".join(chr(97 + (n // 26**k) % 26) for k in range(3)) + "x"
+
+
 def ts(whisper: dict) -> int:
     """The sample count of the audio a fake whisper response describes."""
     return round(whisper["duration"] * RATE)
@@ -566,6 +570,17 @@ def test_number_tokens_never_bound_a_cut():
         assert wm[s].exact and wm[e - 1].exact
         for i in (s, e - 1):
             assert lab.script_tokens[i] not in ("point", "dollars", "twenty")
+
+
+def test_a_cut_never_removes_most_of_the_chunk():
+    para = " ".join(f"{_word(i)}" for i in range(80)) + "."
+    lab = faithful(para, base_id="one-paragraph")
+    # the only paragraph / sentence IS the chunk: removing it would empty the audio
+    assert choose_cuts(lab, "paragraph", 80, rng(0)) is None
+    assert choose_cuts(lab, "sentence", 80, rng(0)) is None
+    spec = choose_cuts(lab, "mid_fluent", 10, rng(0))
+    assert spec is not None and spec.total_tokens <= 0.5 * len(lab.script_tokens)
+    assert choose_cuts(lab, "mid_fluent", 60, rng(0)) is None
 
 
 def test_cut_spec_apply_matches_its_labels(base):

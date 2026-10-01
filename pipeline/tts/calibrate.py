@@ -89,6 +89,9 @@ SNAP_FRAME_S = 0.01
 BOUNDARY_WINDOW = 5
 # whisper may report words slightly past the end of the PCM; more means the wrong audio.
 MAX_WHISPER_OVERRUN_S = 1.0
+# A cut may remove at most this share of the chunk: a "paragraph" cut of a chunk
+# that is one paragraph would otherwise delete the whole audio.
+MAX_REMOVED_FRACTION = 0.5
 # decision 3: removed-clip whisper token count must be within 25 percent.
 REMOVED_SANITY_TOLERANCE = 0.25
 RECON_MIN_RUN = 3
@@ -773,6 +776,9 @@ def _finalize(
     for a, b in zip(intervals, intervals[1:], strict=False):
         if b.sample_start < a.sample_end:
             return None
+    removed = sum(i.normalized_tokens for i in intervals)
+    if removed > MAX_REMOVED_FRACTION * len(base.script_tokens):
+        return None
     return CutSpec(
         cut_id=f"{base.base_id}--{family}-{size}",
         base_id=base.base_id,
@@ -865,6 +871,9 @@ def choose_cuts(
     - ``predictable``: contains a quotation, or a >=3-gram that also occurs
       elsewhere in the chunk (``notes["predictable"]`` says which).
     - ``multi``: ``size`` is the TOTAL, split into 3 separated cuts (gap >= 20 tokens).
+
+    Whatever the family, a cut that would remove more than MAX_REMOVED_FRACTION
+    of the chunk is not offered.
     """
     if family not in FAMILIES:
         raise ValueError(f"unknown family {family!r}; expected one of {FAMILIES}")
@@ -908,7 +917,8 @@ def choose_cuts(
             [([(s, s + size)], {}) for s in fixed(size) if s + size > n - EDGE_TOKENS]
         )
     if family == "mid_fluent":
-        inside, across = [], []
+        inside: list = []
+        across: list = []
         for s in fixed(size):
             e = s + size
             if s in sent_starts or e in sentence_bounds:
