@@ -129,7 +129,7 @@ SUMMARY_TOKENS = 12  # script / heard excerpt length in the omission summary
 # that flags an omission is itself fallible (T5: whisper dropped words in 9 of 10
 # clips it flagged). Omissions are rare, so this is cheap.
 MAX_OMISSION_CLIPS = 4  # per phase
-MAX_OMISSION_CLIP_BYTES = 24_000_000  # ~12.5 min of 24 kHz s16 PCM; a chunk is ~3
+MAX_OMISSION_CLIP_BYTES = 24_000_000  # ~8.3 min of 24 kHz s16 PCM (48,000 B/s)
 
 # --- fallback reasons: a closed set --------------------------------------------
 
@@ -392,9 +392,12 @@ def _omission_summary(verdict) -> str:
         if not spans:
             return head
         top = max(spans, key=lambda s: s.net_missing)
+        # A recall-floor-only omission has no flagged span: say so, or "max net 3"
+        # reads as a gap that was near the flag rather than scattered loss.
+        unflagged = "" if any(s.flagged for s in spans) else " (no flagged span)"
         return (
-            f'{head}, max net {top.net_missing}: script "{_trim_tokens(top.excerpt)}" '
-            f'heard "{_trim_tokens(top.heard)}"'
+            f"{head}, max net {top.net_missing}{unflagged}: "
+            f'script "{_trim_tokens(top.excerpt)}" heard "{_trim_tokens(top.heard)}"'
         )
     except Exception:  # noqa: BLE001
         return plain
@@ -1011,54 +1014,63 @@ def _read_progress(scratch: Path | None, n_chunks: int) -> list[dict[str, Any]]:
 
 
 def _collect_omission_audio(
-    scratch: Path | None, records: Any
+    scratch: Path | None, records: Any, failed_chunk: int | None = None
 ) -> tuple[tuple[int, int, bytes], ...]:
     """The rejected audio the child kept, from its progress ``records``.
 
-    A clip is taken only if its attempt names exactly ``omission_name(chunk, n)``
-    and the file is a regular, non-empty, even-length file of at most
-    ``MAX_OMISSION_CLIP_BYTES`` (checked before reading). At most
-    ``MAX_OMISSION_CLIPS``, in (chunk, n) order. Telemetry: this never raises;
-    any problem yields fewer clips.
+    A clip is a candidate only if its attempt names exactly
+    ``omission_name(chunk, n)`` and the file is a regular, non-empty,
+    even-length file of at most ``MAX_OMISSION_CLIP_BYTES`` (checked with
+    ``lstat`` before anything is read). At most ``MAX_OMISSION_CLIPS`` are
+    kept: the failing chunk's first (``failed_chunk``, the chunk that ended the
+    phase, whose audio is the one you most need), then the earliest of the
+    rest; a candidate that then fails to read is replaced by the next. The
+    result is always in (chunk, n) order. Telemetry: this never raises; any
+    problem yields fewer clips.
     """
-    clips: list[tuple[int, int, bytes]] = []
+    kept: list[tuple[int, int, bytes]] = []
     try:
         if scratch is None or not isinstance(records, list):
             return ()
+        candidates: list[tuple[int, int, Path]] = []
         for i, rec in enumerate(records):
             attempts = rec.get("attempts") if isinstance(rec, dict) else None
             if not isinstance(attempts, list):
                 continue
-            wanted = []
+            wanted = set()
             for attempt in attempts:
                 if not isinstance(attempt, dict):
                     continue
                 n = attempt.get("n")
-                if not _is_int(n) or attempt.get("omission_audio") != omission_name(
-                    i, n
-                ):
-                    continue
-                wanted.append(n)
-            for n in sorted(set(wanted)):
-                if len(clips) >= MAX_OMISSION_CLIPS:
-                    return tuple(clips)
+                if _is_int(n) and attempt.get("omission_audio") == omission_name(i, n):
+                    wanted.add(n)
+            for n in sorted(wanted):
                 try:
                     path = scratch / omission_name(i, n)
                     st = path.lstat()  # lstat: a symlink is not followed
-                    if (
-                        not stat.S_ISREG(st.st_mode)
-                        or not 0 < st.st_size <= MAX_OMISSION_CLIP_BYTES
-                        or st.st_size % 2
-                    ):
-                        continue
-                    data = path.read_bytes()
-                except Exception:  # noqa: BLE001 -- one bad clip costs only itself
+                except Exception:  # noqa: BLE001
                     continue
-                if 0 < len(data) <= MAX_OMISSION_CLIP_BYTES and not len(data) % 2:
-                    clips.append((i, n, data))
+                if (
+                    stat.S_ISREG(st.st_mode)
+                    and 0 < st.st_size <= MAX_OMISSION_CLIP_BYTES
+                    and not st.st_size % 2
+                ):
+                    candidates.append((i, n, path))
+        # sorted() is stable: the failing chunk first, everything else in order.
+        failing = failed_chunk if _is_int(failed_chunk) else None
+        candidates.sort(key=lambda c: c[0] != failing)
+        for i, n, path in candidates:
+            if len(kept) >= MAX_OMISSION_CLIPS:
+                break
+            try:
+                data = path.read_bytes()
+            except Exception:  # noqa: BLE001 -- one bad clip costs only itself
+                continue
+            if 0 < len(data) <= MAX_OMISSION_CLIP_BYTES and not len(data) % 2:
+                kept.append((i, n, data))
     except Exception:  # noqa: BLE001
         pass
-    return tuple(clips)
+    return tuple(sorted(kept, key=lambda c: (c[0], c[1])))
 
 
 def _read_started(scratch: Path | None) -> float | None:
@@ -1218,7 +1230,7 @@ def run_gemini_phase(
         child_started = _read_started(scratch)
         records = _read_progress(scratch, len(chunks))
         try:  # read now: the scratch dir goes as soon as this returns
-            clips = _collect_omission_audio(scratch, records)
+            clips = _collect_omission_audio(scratch, records, failed_chunk)
         except Exception:  # noqa: BLE001 -- diagnostics never cost the phase
             clips = ()
         return PhaseOutcome(

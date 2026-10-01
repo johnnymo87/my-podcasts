@@ -2127,3 +2127,185 @@ def test_a_clip_collection_bug_never_fails_the_phase(phase, monkeypatch):
     monkeypatch.setattr(gp, "_collect_omission_audio", boom)
     outcome, _, _ = phase(lambda a: FakeProc(a, on_start=run_child_inline, exits=True))
     assert outcome.ok and outcome.omission_audio == ()
+
+
+# --- review round -----------------------------------------------------------------
+
+
+def _many_records(scratch, per_chunk):
+    """Files and records for ``per_chunk`` = {chunk: [n, ...]} (PCM tags chunk/n)."""
+    records = []
+    for i in range(max(per_chunk) + 1):
+        attempts = []
+        for n in per_chunk.get(i, []):
+            name = gp.omission_name(i, n)
+            (scratch / name).write_bytes(bytes([i + 1, n]) * 10)
+            attempts.append({"n": n, "omission_audio": name})
+        records.append({"index": i, "attempts": attempts})
+    return records
+
+
+def test_the_failing_chunks_clips_win_a_full_cap(scratch):
+    # Four earlier clips would fill the cap by themselves; the chunk that failed
+    # the phase must not lose its clips to them.
+    recs = _many_records(scratch, {0: [1, 2], 1: [1, 2], 2: [1, 2]})
+    clips = gp._collect_omission_audio(scratch, recs, failed_chunk=2)
+    got = [(i, n) for i, n, _ in clips]
+    assert len(got) == gp.MAX_OMISSION_CLIPS
+    assert {(2, 1), (2, 2)} <= set(got)
+    assert got == sorted(got)  # output is always in (chunk, n) order
+
+
+def test_the_remaining_cap_goes_to_the_earliest_other_clips(scratch):
+    recs = _many_records(scratch, {0: [1, 2], 1: [1, 2], 2: [1, 2]})
+    clips = gp._collect_omission_audio(scratch, recs, failed_chunk=2)
+    assert [(i, n) for i, n, _ in clips] == [(0, 1), (0, 2), (2, 1), (2, 2)]
+
+
+def test_without_a_failed_chunk_the_cap_keeps_the_earliest(scratch):
+    recs = _many_records(scratch, {0: [1, 2], 1: [1, 2], 2: [1, 2]})
+    clips = gp._collect_omission_audio(scratch, recs)
+    assert [(i, n) for i, n, _ in clips] == [(0, 1), (0, 2), (1, 1), (1, 2)]
+    assert gp._collect_omission_audio(scratch, recs, failed_chunk=None) == clips
+
+
+def test_an_unusable_failing_chunk_clip_is_replaced_by_the_next_candidate(scratch):
+    recs = _many_records(scratch, {0: [1, 2], 1: [1, 2], 2: [1]})
+    (scratch / gp.omission_name(2, 1)).write_bytes(b"\x01")  # odd length
+    clips = gp._collect_omission_audio(scratch, recs, failed_chunk=2)
+    assert [(i, n) for i, n, _ in clips] == [(0, 1), (0, 2), (1, 1), (1, 2)]
+
+
+def test_a_failed_chunk_that_is_not_an_index_changes_nothing(scratch):
+    recs = _many_records(scratch, {0: [1], 1: [1]})
+    base = gp._collect_omission_audio(scratch, recs)
+    for bogus in (99, -1, "x", True, 1.5):
+        assert gp._collect_omission_audio(scratch, recs, failed_chunk=bogus) == base
+
+
+def test_the_runner_prioritises_the_failed_chunk_through_the_real_child(phase):
+    # Chunks 0-3 each omit once and then pass (up to four clips); chunk 4 omits
+    # twice and fails the phase, so the cap is over-subscribed whenever the
+    # others finish first. The failing chunk's two clips must always be there.
+    # (Which earlier clips exist is a race between workers; the unit tests above
+    # pin the selection deterministically.)
+    def start(proc):
+        texts = make_chunks(5)
+
+        class Prov:  # shared across chunk threads, so it keys on the text
+            def synthesize_detailed(self, text, cfg, *, timeout=None):
+                i = int(text.split()[1])
+                return Synthesis(
+                    pcm=fake_pcm(i),
+                    finish_reason="STOP",
+                    prompt_tokens=1,
+                    audio_tokens=1,
+                    elapsed_s=0.0,
+                )
+
+        seen: dict[int, int] = {}
+
+        def make_asr(timeout):
+            def transcribe(audio, mime):
+                i = int.from_bytes(audio[44:46], "little") - 1  # first sample
+                seen[i] = seen.get(i, 0) + 1
+                bad = i == 4 or seen[i] == 1
+                text = texts[i]
+                if bad:
+                    text = " ".join(text.split()[:8])
+                return Transcription(text, "fake-asr", "0", "STOP", 0.0, 1, 1, 0)
+
+            return transcribe
+
+        gp._write_input(proc.scratch, texts, LEAF)
+        chunks, leaf = gp._read_input(proc.scratch)
+        gp._run_child(
+            chunks, leaf, time.monotonic() + 30, proc.scratch, (Prov, make_asr)
+        )
+
+    outcome, _, _ = phase(lambda a: FakeProc(a, on_start=start, exits=True), n=5)
+    assert outcome.reason == gp.REASON_SECOND_OMISSION and outcome.failed_chunk == 4
+    got = [(i, n) for i, n, _ in outcome.omission_audio]
+    assert {(4, 1), (4, 2)} <= set(got) and len(got) <= gp.MAX_OMISSION_CLIPS
+    assert got == sorted(got)
+
+
+def test_a_kill_after_a_clip_was_written_still_returns_the_clip(phase, release):
+    # Chunk 0: first attempt is an omission (clip written), the re-render hangs,
+    # the deadline passes. The runner must hand back the clip it can still read.
+    class HangingSecondCall:
+        def __init__(self):
+            self.calls = 0
+
+        def synthesize_detailed(self, text, cfg, *, timeout=None):
+            self.calls += 1
+            if self.calls == 2:
+                release.wait(30)
+            return Synthesis(
+                pcm=PCM_REJECTED,
+                finish_reason="STOP",
+                prompt_tokens=1,
+                audio_tokens=1,
+                elapsed_s=0.0,
+            )
+
+    provider = HangingSecondCall()
+    asr = Asr([OMITTED])
+
+    def start(proc):
+        gp._write_input(proc.scratch, [TEXT], LEAF)
+        chunks, leaf = gp._read_input(proc.scratch)
+        gp._run_child(
+            chunks,
+            leaf,
+            time.monotonic() + 0.4,
+            proc.scratch,
+            (lambda: provider, asr.make),
+        )
+
+    outcome, _, roots = phase(
+        lambda a: FakeProc(a, on_start=start, exits=True), n=1, chunks=[TEXT]
+    )
+    assert outcome.reason == gp.REASON_DEADLINE
+    assert outcome.omission_audio == ((0, 1, PCM_REJECTED),)
+    assert list(roots.iterdir()) == []
+
+
+def test_a_killed_child_leaves_its_clip_readable_in_the_progress_files(phase):
+    # The kill case proper: the child never reports, the parent kills at its
+    # deadline; the clip the child had already written is still collected.
+    def start(proc):
+        pcm_path = proc.scratch / gp.omission_name(0, 1)
+        pcm_path.write_bytes(PCM_REJECTED)
+        attempt = {
+            "n": 1,
+            "outcome": "omission",
+            "omission_audio": gp.omission_name(0, 1),
+        }
+        gp._atomic_write_json(
+            proc.scratch / gp.progress_name(0),
+            {"schema": 1, "index": 0, "attempts": [attempt, {"n": 2}]},
+        )
+
+    outcome, procs, _ = phase(lambda a: FakeProc(a, on_start=start), n=1, budget_s=0.3)
+    assert outcome.reason == gp.REASON_DEADLINE and procs[0].killed == 1
+    assert outcome.omission_audio == ((0, 1, PCM_REJECTED),)
+
+
+def test_a_recall_floor_only_summary_says_there_was_no_flagged_span(scratch):
+    words = TEXT.split()
+    for i in range(5, len(words), 10):
+        words[i] = f"zz{chr(97 + i % 26)}"
+    failure = _fail(
+        Provider([PCM, PCM]), Asr([" ".join(words), " ".join(words)]), scratch
+    )
+    assert failure.reason == gp.REASON_SECOND_OMISSION
+    assert "(recall_below_floor) recall " in failure.detail
+    assert " (no flagged span): script " in failure.detail
+
+
+def test_a_flagged_summary_does_not_say_no_flagged_span():
+    verdict = verify_audio(
+        b"", "audio/wav", TEXT, transcriber=_fixed_transcriber(DROPPED)
+    )
+    assert "no flagged span" not in gp._omission_summary(verdict)

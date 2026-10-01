@@ -216,7 +216,10 @@ The inline text above stays; where it disagrees with these, these win.
   passes, the margin to trend), the spans with the script excerpt and what the ASR heard, and on
   an omission the capped transcript; the `second_omission` failure detail and the fallback alert
   name the dropped passage; and the rejected audio of every omission attempt (at most 4 per
-  render) is kept as an mp3 under `tts-renders/<feed>/omission-audio/` for 60 days. Nothing here
+  render, the failing chunk's first) is kept as a low-bitrate mp3 under
+  `tts-renders/<feed>/omission-audio/` for 60 days. Clips are encoded after the episode audio
+  exists (or has failed) but before the manifest and cache store, so they are bounded: 30 s per
+  encode, 60 s in total, the rest skipped and noted. Nothing here
   changes what is flagged, so `VERIFIER_VERSION` stays `"2"` and the cache key is unchanged;
   all of it is best-effort and cannot fail or delay the episode audio.
 

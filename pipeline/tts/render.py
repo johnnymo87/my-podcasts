@@ -574,11 +574,17 @@ def _fallback_alert_text(
     )
 
 
-ALERT_DETAIL_CHARS = 240
+# Room for the full omission summary: boilerplate plus two 12-token excerpts is
+# about 200-300 characters with long words, and a cut would end the alert
+# mid-quote exactly where it says what was dropped.
+ALERT_DETAIL_CHARS = 320
 
 
 def _omission_note(reason: str, detail: object, failed_chunk: int | None) -> str:
-    """`` (chunk <n>: <detail>)`` for a ``second_omission`` only, else "".
+    """`` (chunk index <n>: <detail>)`` for a ``second_omission`` only, else "".
+
+    ``<n>`` is the 0-based chunk index, the same number as the manifest's
+    ``gemini_phase.failed_chunk``.
 
     Only that reason's detail is a one-line summary of what the model dropped;
     the others are tracebacks or SDK errors, and the manifest has them. Diagnostic
@@ -593,8 +599,15 @@ def _omission_note(reason: str, detail: object, failed_chunk: int | None) -> str
     if not text:
         return ""
     if isinstance(failed_chunk, int) and not isinstance(failed_chunk, bool):
-        return f" (chunk {failed_chunk}: {text})"
+        return f" (chunk index {failed_chunk}: {text})"
     return f" ({text})"
+
+
+# Clips are encoded on the render's critical path (the manifest and cache store
+# wait for them), so they are bounded hard: each encode has its own short
+# timeout, and the whole save has a total budget after which the rest are skipped.
+OMISSION_CLIP_TIMEOUT_SECONDS = 30.0
+OMISSION_CLIPS_BUDGET_SECONDS = 60.0
 
 
 def _save_omission_audio(
@@ -604,11 +617,17 @@ def _save_omission_audio(
 
     Only ever called after the episode audio was produced or has failed, never
     before. A human has to listen to settle whether an omission was real (the
-    ASR that flagged it is itself fallible). Each clip's absolute path goes on
-    the matching attempt as ``omission_audio_file``; a clip that cannot be
-    encoded leaves ``gemini_phase.omission_audio_error`` (the first one, capped)
-    and the others are still tried. Does nothing without a ``omission_dir`` (dry
-    runs keep nothing). Telemetry: nothing in here may raise.
+    ASR that flagged it is itself fallible). Saved paths go on the matching
+    attempt as ``omission_audio_file`` and in ``gemini_phase.omission_audio_files``
+    (so a degraded phase record, which has no attempts, still names them).
+
+    Bounded: each encode gets ``OMISSION_CLIP_TIMEOUT_SECONDS`` (less if the
+    total is nearly spent) and the whole save ``OMISSION_CLIPS_BUDGET_SECONDS``;
+    once that is spent the remaining clips are skipped. A clip that fails (or
+    times out) leaves ``gemini_phase.omission_audio_error`` (the first failure,
+    capped, plus a count of clips skipped for budget) and the others are still
+    tried. Does nothing without an ``omission_dir`` (dry runs keep nothing).
+    Telemetry: nothing in here may raise.
     """
     try:
         clips = getattr(outcome, "omission_audio", ()) or ()
@@ -616,21 +635,39 @@ def _save_omission_audio(
             return
         phase = record.get("gemini_phase")
         error: str | None = None
+        saved: list[dict] = []
+        skipped = 0
         stamp = _manifest_mod.utc_stamp()
+        started = time.monotonic()
         for index, n, pcm in clips:
+            left = OMISSION_CLIPS_BUDGET_SECONDS - (time.monotonic() - started)
+            if left <= 0:
+                skipped += 1
+                continue
             try:
                 omission_dir.mkdir(parents=True, exist_ok=True)
                 path = _manifest_mod.omission_clip_path(
                     omission_dir, episode_id, stamp, chunk=index, attempt=n
                 )
-                encode_mp3(pcm, path)
-                _attach_clip(phase, index, n, os.path.abspath(path))
+                encode_mp3(pcm, path, timeout=min(OMISSION_CLIP_TIMEOUT_SECONDS, left))
+                abspath = os.path.abspath(path)
+                saved.append({"chunk": index, "attempt": n, "file": abspath})
+                _attach_clip(phase, index, n, abspath)
             except Exception as exc:  # noqa: BLE001 -- one clip costs only itself
                 log.warning("omission clip c%s a%s not kept: %r", index, n, exc)
                 if error is None:
                     error = f"{type(exc).__name__}: {_exc_text(exc)}"[:300]
-        if error is not None and isinstance(phase, dict):
-            phase["omission_audio_error"] = error
+        if skipped:
+            note = (
+                f"{skipped} clip(s) skipped: the "
+                f"{OMISSION_CLIPS_BUDGET_SECONDS:.0f}s clip budget was spent"
+            )
+            error = f"{error}; {note}" if error else note
+        if isinstance(phase, dict):
+            if saved:
+                phase["omission_audio_files"] = saved
+            if error is not None:
+                phase["omission_audio_error"] = error[:400]
     except Exception:  # noqa: BLE001 -- diagnostics never cost the render
         log.warning("keeping omission audio failed", exc_info=True)
 

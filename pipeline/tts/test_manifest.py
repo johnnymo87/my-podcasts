@@ -129,3 +129,13 @@ def test_prune_covers_manifests_and_clips_together(tmp_path) -> None:
     old_clip = _clip(tmp_path, "s", "old-c0000-a1.mp3", age_days=90)
     manifest.prune_manifests(tmp_path, max_age_days=60)
     assert not old_manifest.exists() and not old_clip.exists()
+
+
+def test_prune_removes_stale_encode_temp_files_in_the_clip_dir(tmp_path) -> None:
+    # encode_mp3 writes ``<clip>.mp3.<random>.tmp`` and renames it on success; a
+    # killed encode would otherwise leave it forever.
+    old = _clip(tmp_path, "fp-digest", "ep-c0000-a1.mp3.abc123.tmp", age_days=90)
+    new = _clip(tmp_path, "fp-digest", "ep-c0001-a1.mp3.def456.tmp", age_days=0.01)
+    manifest.prune_manifests(tmp_path, max_age_days=60)
+    assert not old.exists()
+    assert new.exists()  # same age rule: a live encode's temp file is left alone

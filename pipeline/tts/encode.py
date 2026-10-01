@@ -18,12 +18,16 @@ ENCODE_TIMEOUT_SECONDS = 600
 _STDERR_TAIL_CHARS = 2000
 
 
-def encode_mp3(pcm: bytes, out_mp3: Path) -> None:
+def encode_mp3(
+    pcm: bytes, out_mp3: Path, timeout: float = ENCODE_TIMEOUT_SECONDS
+) -> None:
     """Encode ``pcm`` to ``out_mp3`` atomically.
 
     ffmpeg writes a temp sibling that is renamed into place only on success, so
     a failed or killed encode never leaves a truncated file at ``out_mp3`` (a
     later reuse would otherwise ship it) and never clobbers a previous good one.
+    ``timeout`` bounds the ffmpeg run (``subprocess.TimeoutExpired`` on expiry);
+    the default is the episode-sized ``ENCODE_TIMEOUT_SECONDS``.
     """
     rate = str(PCM_SAMPLE_RATE)
     # Unique per call: two encodes targeting one out_mp3 must not share a temp.
@@ -64,7 +68,7 @@ def encode_mp3(pcm: bytes, out_mp3: Path) -> None:
                 input=pcm,
                 check=True,
                 capture_output=True,
-                timeout=ENCODE_TIMEOUT_SECONDS,
+                timeout=timeout,
             )
         except subprocess.CalledProcessError as e:
             stderr = (e.stderr or b"").decode("utf-8", errors="replace")

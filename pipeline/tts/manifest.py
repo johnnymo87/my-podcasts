@@ -91,11 +91,18 @@ def write_manifest(
 
 
 def prune_manifests(manifest_dir: Path, *, max_age_days: int = RETENTION_DAYS) -> None:
-    """Remove manifests, and kept omission clips (``*/omission-audio/*.mp3``),
-    older than ``max_age_days`` (by mtime). Never raises."""
+    """Remove manifests, kept omission clips (``*/omission-audio/*.mp3``) and stale
+    clip encode temp files (``*.tmp`` there), older than ``max_age_days`` (by
+    mtime). Never raises."""
     try:
         cutoff = time.time() - max_age_days * 86400
-        for pattern in ("*/*.json", f"*/{OMISSION_AUDIO_DIRNAME}/*.mp3"):
+        # *.tmp in the clip dir: ``encode_mp3``'s temp file, left behind only if
+        # an encode was killed. Same age rule, so a live encode's is untouched.
+        for pattern in (
+            "*/*.json",
+            f"*/{OMISSION_AUDIO_DIRNAME}/*.mp3",
+            f"*/{OMISSION_AUDIO_DIRNAME}/*.tmp",
+        ):
             for path in manifest_dir.glob(pattern):
                 with contextlib.suppress(OSError):
                     if path.stat().st_mtime < cutoff:
