@@ -1233,6 +1233,32 @@ def _load_transcript_file(
     )
 
 
+@cli.command(
+    "tts-calibrate",
+    context_settings={
+        "ignore_unknown_options": True,
+        "allow_extra_args": True,
+        "help_option_names": [],
+    },
+    add_help_option=False,
+)
+@click.pass_context
+def tts_calibrate_command(ctx: click.Context) -> None:
+    """T5 omission-detector calibration harness (paid, resumable steps).
+
+    Everything after ``tts-calibrate`` is handed to the harness's own command
+    group, which is imported only now so the daily CLI never loads it:
+
+        uv run python -m pipeline tts-calibrate --help
+        uv run python -m pipeline tts-calibrate [--root R] [--budget 15] STEP ...
+    """
+    from pipeline.tts import calibrate_run
+
+    calibrate_run.calibrate_group.main(
+        args=list(ctx.args), prog_name="python -m pipeline tts-calibrate"
+    )
+
+
 @cli.command("tts-verify")
 @click.option(
     "--audio",
