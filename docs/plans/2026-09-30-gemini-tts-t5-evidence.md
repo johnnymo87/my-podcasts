@@ -138,7 +138,7 @@ of 15 or fewer tokens in a chunk under 300 tokens) is outside the claimed scope:
 only detector of a cut. Verifier v3 therefore pads the floor.
 
 **Scope.** v3 changes any chunk under 300 tokens, not only tails: in the Rundown/FP archive 197 of
-1,456 chunks (about 14%) are under 300 tokens, 156 tails plus 41 non-final chunks of 186-299 tokens.
+1,456 chunks (about 14%) are under 300 tokens, 156 tails plus 41 non-final chunks of 141-299 tokens.
 
 Raw numbers: `/persist/my-podcasts/tts-eval/tail-recall/` (`notes/EVIDENCE.md`; `tails.json`,
 `texts/`, `renders/`, `ledger.jsonl`, `reports/tails.{json,txt}`, `clips/`). Code: `36e1316`,
