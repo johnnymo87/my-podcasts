@@ -1,20 +1,23 @@
 """Large-omission detector: align an ASR transcript against the script.
 
 Changing normalization, alignment, or DEFAULT_THRESHOLDS changes verifier
-policy: bump VERIFIER_VERSION. The ASR side (model, prompt, generation config)
-is covered by asr.ASR_POLICY; bump asr.ASR_PROMPT_VERSION on any prompt text
-change. T3 must fold VERIFIER_POLICY (both halves), not just VERIFIER_VERSION,
-into the render cache key.
+policy: bump VERIFIER_VERSION (v2: the thresholds calibrated in T5). The ASR
+side (model, prompt, generation config) is covered by asr.ASR_POLICY; bump
+asr.ASR_PROMPT_VERSION on any prompt text change. T3 must fold VERIFIER_POLICY
+(both halves), not just VERIFIER_VERSION, into the render cache key.
 
-Claimed scope: catches LARGE omissions. It does not detect changed numbers,
-negations, repetitions or added speech. See the design doc, "Verification".
+Claimed scope: catches omissions of about 6 or more contiguous script tokens
+(see VerifyThresholds for the calibration claim and its limits). It does not
+detect changed numbers, negations, repetitions or added speech. See the design
+doc, "Verification".
 
 Alignment: difflib matching blocks over normalized tokens. Blocks of at least
 ``anchor_min`` tokens are anchors; the script-side gaps between consecutive
 anchors (and before the first / after the last) are candidate spans. A span is
 flagged when it is long (>= min_span_words script tokens) and the transcript
-side is much shorter (<= max_span_ratio of it), or, when ``net_deficit_min`` is
-set, when script tokens minus transcript tokens in the gap reach it. Recall
+side is much shorter (<= max_span_ratio of it), OR when its net deficit (script
+tokens minus transcript tokens in the gap, ``net_missing``) reaches
+``net_deficit_min`` (None turns that rule off). Recall
 counts ALL matched script tokens, not only anchored ones. Coordinates are
 indices into the normalized token lists, not characters or seconds.
 """
@@ -30,7 +33,7 @@ from pipeline.tts.asr import ASR_POLICY, Transcription, TranscriptionUnavailable
 from pipeline.tts.normalize import normalize_tokens
 
 
-VERIFIER_VERSION = "1"
+VERIFIER_VERSION = "2"
 
 
 def verifier_policy(asr_policy: str = ASR_POLICY) -> str:
@@ -44,16 +47,28 @@ _EXCERPT_TOKENS = 30
 
 @dataclass(frozen=True)
 class VerifyThresholds:
-    """Placeholders until T5 calibrates them on real audio-level cuts."""
+    """Calibrated in T5 (``DEFAULT_THRESHOLDS``, verifier v2).
+
+    Chosen on labeled audio-level evidence, not guessed; the evidence, its
+    scope and its limits are in ``docs/plans/2026-09-30-gemini-tts-t5-evidence.md``.
+    In short: on faithful dev renders (policy ``thinking-low``) no span had
+    ``net_missing`` above 2 and recall was never below 0.973, while every
+    labeled cut (10 to 80+ tokens, seven families) left a span with
+    ``net_missing`` of at least 8. ``net_deficit_min=6`` sits between the two;
+    ``recall_floor=0.95`` catches scattered losses that never form one span.
+    The claim is "caught every labeled cut of these sizes and families", never
+    "catches every omission of N tokens"; see the evidence doc for what the
+    evidence does not cover.
+    """
 
     anchor_min: int = 3
     min_span_words: int = 12
     max_span_ratio: float = 0.5
-    recall_floor: float = 0.85
-    # Optional additive rule: also flag a span whose net_missing (script tokens
-    # minus transcript tokens in the gap) reaches this. None = off. It catches
-    # a cut merged with nearby substitution noise, where the ratio test misses.
-    net_deficit_min: int | None = None
+    recall_floor: float = 0.95
+    # Also flag a span whose net_missing (script tokens minus transcript tokens
+    # in the gap) reaches this. None = off. It catches a cut merged with nearby
+    # substitution noise, where the ratio test misses (the T2 blind spot).
+    net_deficit_min: int | None = 6
 
     def __post_init__(self) -> None:
         if self.anchor_min < 1:

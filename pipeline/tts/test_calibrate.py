@@ -80,6 +80,10 @@ def _word(n: int) -> str:
     return "w" + "".join(chr(97 + (n // 26**k) % 26) for k in range(3)) + "x"
 
 
+# the placeholders the verifier had before T5 calibrated it (verifier v1)
+OLD_THRESHOLDS = VerifyThresholds(recall_floor=0.85, net_deficit_min=None)
+
+
 def ts(whisper: dict) -> int:
     """The sample count of the audio a fake whisper response describes."""
     return round(whisper["duration"] * RATE)
@@ -634,14 +638,15 @@ def test_simulate_reproduces_the_t2_blind_spot_exactly():
     assert len(res.tokens) == len(TOKENS) - 40
     assert len(res.noise_positions) == 15
     # the ratio rule alone misses it (85 script vs 45 transcript tokens)...
-    a = analyze(SCRIPT, res.text)
+    a = analyze(SCRIPT, res.text, OLD_THRESHOLDS)
     assert a.status == "pass"
     blind = [s for s in a.spans if s.script_words > 40]
     assert [(s.script_words, s.transcript_words, s.net_missing) for s in blind] == [
         (85, 45, 40)
     ]
-    # ...and the additive net-deficit rule catches it
-    th = replace(DEFAULT_THRESHOLDS, net_deficit_min=40)
+    # ...and the additive net-deficit rule catches it, at the calibrated value too
+    assert analyze(SCRIPT, res.text).status == "omission"
+    th = replace(OLD_THRESHOLDS, net_deficit_min=40)
     assert analyze(SCRIPT, res.text, th).status == "omission"
     assert analyze(SCRIPT, res.text, replace(th, net_deficit_min=41)).status == "pass"
 
@@ -866,9 +871,11 @@ def test_replay_matches_verify_analyze_and_localizes():
     recs = {r.record_id: r for r in _records()}
     o = replay(recs["c1"], DEFAULT_THRESHOLDS)
     assert o.status == "omission" and o.localized and o.flagged_spans == 1
-    o = replay(recs["c2"], DEFAULT_THRESHOLDS)
+    o = replay(recs["c2"], OLD_THRESHOLDS)
     assert o.status == "pass" and not o.localized
-    o = replay(recs["c2"], replace(DEFAULT_THRESHOLDS, net_deficit_min=40))
+    o = replay(recs["c2"], replace(OLD_THRESHOLDS, net_deficit_min=40))
+    assert o.status == "omission" and o.localized
+    o = replay(recs["c2"], DEFAULT_THRESHOLDS)  # the calibrated default catches it
     assert o.status == "omission" and o.localized
     assert replay(recs["c3"], DEFAULT_THRESHOLDS).status == "unavailable"
     assert replay(_rec("e", "base", "... ---"), DEFAULT_THRESHOLDS).reasons == (
@@ -908,7 +915,7 @@ def test_heard_tokens_falls_back_to_text_for_a_dict_without_words():
 
 
 def test_evaluate_counts_detection_false_alarms_and_availability_separately():
-    off, on = (replace(DEFAULT_THRESHOLDS, net_deficit_min=m) for m in (None, 40))
+    off, on = (replace(OLD_THRESHOLDS, net_deficit_min=m) for m in (None, 40))
     r_off, r_on = evaluate(_records(), [off, on])
 
     cuts = r_off["cuts"]
