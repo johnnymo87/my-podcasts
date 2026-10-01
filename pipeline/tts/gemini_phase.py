@@ -19,6 +19,12 @@ Files, all in the parent-created scratch directory and all written atomically
 ``chunk-NNNN.pcm``
     A *verified* chunk's raw PCM (24 kHz mono s16le). Only verified audio is
     ever written here.
+``omission-NNNN-N.pcm``
+    The raw PCM of chunk NNNN's TTS attempt N when ASR rejected it as an
+    omission, written best-effort and atomically *before* the progress record
+    that names it (``attempt["omission_audio"]``). Never used as episode audio;
+    the runner reads at most 4 of them into ``PhaseOutcome.omission_audio`` for
+    a human to listen to. The parent's validation ignores them.
 ``progress-NNNN.json``
     ``{"schema": 1, "index": i, "attempts": [attempt, ...]}``, rewritten before
     each stage starts so a kill leaves the record of what was in flight. An
@@ -34,7 +40,8 @@ Files, all in the parent-created scratch directory and all written atomically
                         "elapsed_s": None|float, "input_tokens": None|int,
                         "output_tokens": None|int, "thinking_tokens": None|int},
          "outcome": None|"transient_error"|"fatal"|"omission"|
-                    "asr_unavailable"|"verified"}
+                    "asr_unavailable"|"verified",
+         "omission_audio": <omission-NNNN-N.pcm>}  # only on a kept omission
 
     A span is ``{"script_start", "script_end", "script_words",
     "transcript_words", "net_missing", "flagged", "excerpt", "heard"}``:
@@ -76,6 +83,7 @@ import multiprocessing
 import os
 import queue
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -116,6 +124,12 @@ MAX_RECORDED_SPANS = 8  # an omission records its flagged spans, then clues, up 
 MIN_RECORDED_OMISSION_SPANS = 3  # an omission records at least this many (if any exist)
 MAX_RECORDED_TRANSCRIPT_CHARS = 6000  # omission only; a 3000-char chunk is ~3000
 SUMMARY_TOKENS = 12  # script / heard excerpt length in the omission summary
+
+# The audio an omission verdict rejected is kept, so a human can listen: the ASR
+# that flags an omission is itself fallible (T5: whisper dropped words in 9 of 10
+# clips it flagged). Omissions are rare, so this is cheap.
+MAX_OMISSION_CLIPS = 4  # per phase
+MAX_OMISSION_CLIP_BYTES = 24_000_000  # ~12.5 min of 24 kHz s16 PCM; a chunk is ~3
 
 # --- fallback reasons: a closed set --------------------------------------------
 
@@ -172,6 +186,11 @@ def chunk_name(i: int) -> str:
 
 def progress_name(i: int) -> str:
     return f"progress-{i:04d}.json"
+
+
+def omission_name(i: int, n: int) -> str:
+    """Chunk ``i``'s rejected audio from TTS attempt ``n`` (raw PCM, like a chunk)."""
+    return f"omission-{i:04d}-{n}.pcm"
 
 
 # Module attributes, so in-process tests can replace them without patching the
@@ -552,6 +571,15 @@ def _render_chunk_inner(
             )
         # omission: the audio is discarded; re-render once if the counter allows
         attempt["outcome"] = "omission"
+        # Best effort and before the save() that records the outcome, so a name
+        # in the progress file always has a whole file behind it (the write is
+        # atomic). Never changes the chunk's outcome.
+        name = omission_name(i, attempt["n"])
+        try:
+            _atomic_write(scratch / name, pcm)
+            attempt["omission_audio"] = name
+        except Exception as exc:  # noqa: BLE001
+            print(f"gemini-phase: {name} not saved: {exc!r}", file=sys.stderr)
         save()
         omissions += 1
         last_problem = _omission_summary(verdict)
@@ -855,6 +883,10 @@ class PhaseOutcome:
     failed_chunk: int | None = None
     child_pid: int | None = None
     child_started_s: float | None = None
+    # (chunk index, attempt n, PCM) for each omission attempt whose rejected audio
+    # was kept: at most MAX_OMISSION_CLIPS, in (chunk, n) order, collected whether
+    # or not the phase succeeded. Diagnostic only; may be empty for any reason.
+    omission_audio: tuple[tuple[int, int, bytes], ...] = ()
 
 
 class _InvalidResult(Exception):
@@ -976,6 +1008,57 @@ def _read_progress(scratch: Path | None, n_chunks: int) -> list[dict[str, Any]]:
         else:
             records.append({"index": i, "attempts": [], "progress": "unreadable"})
     return records
+
+
+def _collect_omission_audio(
+    scratch: Path | None, records: Any
+) -> tuple[tuple[int, int, bytes], ...]:
+    """The rejected audio the child kept, from its progress ``records``.
+
+    A clip is taken only if its attempt names exactly ``omission_name(chunk, n)``
+    and the file is a regular, non-empty, even-length file of at most
+    ``MAX_OMISSION_CLIP_BYTES`` (checked before reading). At most
+    ``MAX_OMISSION_CLIPS``, in (chunk, n) order. Telemetry: this never raises;
+    any problem yields fewer clips.
+    """
+    clips: list[tuple[int, int, bytes]] = []
+    try:
+        if scratch is None or not isinstance(records, list):
+            return ()
+        for i, rec in enumerate(records):
+            attempts = rec.get("attempts") if isinstance(rec, dict) else None
+            if not isinstance(attempts, list):
+                continue
+            wanted = []
+            for attempt in attempts:
+                if not isinstance(attempt, dict):
+                    continue
+                n = attempt.get("n")
+                if not _is_int(n) or attempt.get("omission_audio") != omission_name(
+                    i, n
+                ):
+                    continue
+                wanted.append(n)
+            for n in sorted(set(wanted)):
+                if len(clips) >= MAX_OMISSION_CLIPS:
+                    return tuple(clips)
+                try:
+                    path = scratch / omission_name(i, n)
+                    st = path.lstat()  # lstat: a symlink is not followed
+                    if (
+                        not stat.S_ISREG(st.st_mode)
+                        or not 0 < st.st_size <= MAX_OMISSION_CLIP_BYTES
+                        or st.st_size % 2
+                    ):
+                        continue
+                    data = path.read_bytes()
+                except Exception:  # noqa: BLE001 -- one bad clip costs only itself
+                    continue
+                if 0 < len(data) <= MAX_OMISSION_CLIP_BYTES and not len(data) % 2:
+                    clips.append((i, n, data))
+    except Exception:  # noqa: BLE001
+        pass
+    return tuple(clips)
 
 
 def _read_started(scratch: Path | None) -> float | None:
@@ -1133,12 +1216,18 @@ def run_gemini_phase(
         failed_chunk: int | None = None,
     ) -> PhaseOutcome:
         child_started = _read_started(scratch)
+        records = _read_progress(scratch, len(chunks))
+        try:  # read now: the scratch dir goes as soon as this returns
+            clips = _collect_omission_audio(scratch, records)
+        except Exception:  # noqa: BLE001 -- diagnostics never cost the phase
+            clips = ()
         return PhaseOutcome(
             ok=reason is None,
             reason=reason,
             detail=detail,
             pcm_parts=pcm,
-            chunk_records=_read_progress(scratch, len(chunks)),
+            chunk_records=records,
+            omission_audio=clips,
             elapsed_s=time.monotonic() - t0,
             spawn_s=spawn_s,
             failed_chunk=failed_chunk,

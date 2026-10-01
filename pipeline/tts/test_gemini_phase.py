@@ -1870,3 +1870,260 @@ def test_a_killed_asr_request_leaves_a_same_shaped_started_record(scratch):
         "max_net_missing",
     ):
         assert started[key] is None
+
+
+# --- keeping the audio of every omission attempt -----------------------------------
+
+PCM_REJECTED = fake_pcm(5)  # told apart from PCM, the audio that passes
+
+
+def test_omission_name_is_the_documented_one():
+    assert gp.omission_name(0, 1) == "omission-0000-1.pcm"
+    assert gp.omission_name(12, 2) == "omission-0012-2.pcm"
+
+
+def test_an_omission_attempt_keeps_its_rejected_pcm_and_records_the_name(scratch):
+    _run(Provider([PCM_REJECTED, PCM]), Asr([OMITTED, TEXT]), scratch)
+    first, second = _progress(scratch)["attempts"]
+    assert first["outcome"] == "omission"
+    assert first["omission_audio"] == "omission-0000-1.pcm"
+    assert (scratch / "omission-0000-1.pcm").read_bytes() == PCM_REJECTED
+    assert "omission_audio" not in second  # a verified attempt keeps nothing
+    assert (scratch / "chunk-0000.pcm").read_bytes() == PCM  # the audio that shipped
+    assert not list(scratch.glob("*.tmp"))
+
+
+def test_a_second_omission_keeps_both_attempts(scratch):
+    failure = _fail(Provider([PCM_REJECTED, PCM]), Asr([OMITTED, OMITTED]), scratch)
+    assert failure.reason == gp.REASON_SECOND_OMISSION
+    names = [a["omission_audio"] for a in _progress(scratch)["attempts"]]
+    assert names == ["omission-0000-1.pcm", "omission-0000-2.pcm"]
+    assert (scratch / "omission-0000-1.pcm").read_bytes() == PCM_REJECTED
+    assert (scratch / "omission-0000-2.pcm").read_bytes() == PCM
+    assert list(scratch.glob("chunk-*")) == []  # still no unverified chunk audio
+
+
+def test_the_clip_is_on_disk_before_the_progress_that_names_it(scratch, monkeypatch):
+    seen: list[bool] = []
+    real = gp._atomic_write_json
+
+    def spy(path, obj):
+        for attempt in obj.get("attempts", []) if isinstance(obj, dict) else []:
+            name = attempt.get("omission_audio")
+            if name:
+                seen.append((scratch / name).exists())
+        real(path, obj)
+
+    monkeypatch.setattr(gp, "_atomic_write_json", spy)
+    _run(Provider([PCM_REJECTED, PCM]), Asr([OMITTED, TEXT]), scratch)
+    assert seen and all(seen)
+
+
+def test_a_failing_clip_write_changes_nothing_about_the_chunk(
+    scratch, monkeypatch, capsys
+):
+    real = gp._atomic_write
+
+    def flaky(path, data):
+        if Path(path).name.startswith("omission-"):
+            raise OSError("disk full")
+        real(path, data)
+
+    monkeypatch.setattr(gp, "_atomic_write", flaky)
+    rec, _, abort = _run(Provider([PCM_REJECTED, PCM]), Asr([OMITTED, TEXT]), scratch)
+    assert rec["file"] == "chunk-0000.pcm" and not abort.is_set()
+    first, _second = _progress(scratch)["attempts"]
+    assert first["outcome"] == "omission" and "omission_audio" not in first
+    assert not list(scratch.glob("omission-*"))
+    assert "omission-0000-1.pcm not saved" in capsys.readouterr().err
+
+
+def test_a_failing_clip_write_does_not_change_a_second_omission_failure(
+    scratch, monkeypatch
+):
+    real = gp._atomic_write
+
+    def flaky(path, data):
+        if Path(path).name.startswith("omission-"):
+            raise OSError("disk full")
+        real(path, data)
+
+    monkeypatch.setattr(gp, "_atomic_write", flaky)
+    failure = _fail(Provider([PCM, PCM]), Asr([OMITTED, OMITTED]), scratch)
+    assert failure.reason == gp.REASON_SECOND_OMISSION
+
+
+def _records_with_clips(scratch, spec):
+    """``spec``: {chunk: [(n, data-or-None)]}; writes the files, returns records."""
+    records = []
+    for i in range(max(spec) + 1):
+        attempts = []
+        for n, data in spec.get(i, []):
+            name = gp.omission_name(i, n)
+            if data is not None:
+                (scratch / name).write_bytes(data)
+            attempts.append({"n": n, "outcome": "omission", "omission_audio": name})
+        records.append({"index": i, "attempts": attempts})
+    return records
+
+
+def test_clips_are_collected_in_chunk_then_attempt_order(scratch):
+    spec = {0: [(1, fake_pcm(1)), (2, fake_pcm(2))], 2: [(1, fake_pcm(3))]}
+    recs = _records_with_clips(scratch, spec)
+    assert gp._collect_omission_audio(scratch, recs) == (
+        (0, 1, fake_pcm(1)),
+        (0, 2, fake_pcm(2)),
+        (2, 1, fake_pcm(3)),
+    )
+
+
+def test_at_most_four_clips_are_collected(scratch):
+    spec = {i: [(1, fake_pcm(i)), (2, fake_pcm(i))] for i in range(3)}
+    clips = gp._collect_omission_audio(scratch, _records_with_clips(scratch, spec))
+    assert gp.MAX_OMISSION_CLIPS == 4
+    assert [(i, n) for i, n, _ in clips] == [(0, 1), (0, 2), (1, 1), (1, 2)]
+
+
+def test_unusable_clip_files_are_skipped_not_fatal(scratch, monkeypatch):
+    monkeypatch.setattr(gp, "MAX_OMISSION_CLIP_BYTES", 100)
+    spec = {
+        0: [
+            (1, b"\x01\x00" * 10),  # good
+            (2, b"\x01\x00\x01"),  # odd length
+        ],
+        1: [(1, b""), (2, None)],  # empty; missing
+        2: [(1, b"\x01\x00" * 51)],  # 102 bytes: over the cap
+    }
+    recs = _records_with_clips(scratch, spec)
+    assert gp._collect_omission_audio(scratch, recs) == ((0, 1, b"\x01\x00" * 10),)
+
+
+def test_a_clip_with_a_name_that_is_not_the_canonical_one_is_ignored(scratch):
+    (scratch / "other.pcm").write_bytes(b"\x01\x00" * 10)
+    (scratch.parent / "outside.pcm").write_bytes(b"\x01\x00" * 10)
+    recs = [
+        {
+            "index": 0,
+            "attempts": [
+                {"n": 1, "omission_audio": "other.pcm"},
+                {"n": 1, "omission_audio": "../outside.pcm"},
+                {"n": 2, "omission_audio": gp.omission_name(0, 1)},  # wrong attempt
+                {"n": 1, "omission_audio": None},
+                {"n": 1},
+            ],
+        }
+    ]
+    (scratch / gp.omission_name(0, 1)).write_bytes(b"\x01\x00" * 10)
+    assert gp._collect_omission_audio(scratch, recs) == ()
+
+
+def test_a_symlinked_clip_is_not_followed(scratch):
+    target = scratch.parent / "secret.pcm"
+    target.write_bytes(b"\x01\x00" * 10)
+    (scratch / gp.omission_name(0, 1)).symlink_to(target)
+    recs = [
+        {"index": 0, "attempts": [{"n": 1, "omission_audio": gp.omission_name(0, 1)}]}
+    ]
+    assert gp._collect_omission_audio(scratch, recs) == ()
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        [{"index": 0, "attempts": [], "progress": "missing"}],
+        [{"index": 0, "attempts": [], "progress": "unreadable"}],
+        [{"index": 0, "attempts": "nope"}],
+        [{"index": 0, "attempts": [None, "str", 7]}],
+        [{"index": 0, "attempts": [{"n": "1", "omission_audio": "x"}]}],
+        [{"index": 0, "attempts": [{"n": True, "omission_audio": "x"}]}],
+        ["not a dict", None, 3],
+        None,
+    ],
+)
+def test_malformed_progress_yields_no_clips_and_never_raises(scratch, records):
+    assert gp._collect_omission_audio(scratch, records) == ()
+
+
+def test_collecting_clips_never_raises_when_the_scratch_dir_is_gone(tmp_path):
+    recs = [
+        {"index": 0, "attempts": [{"n": 1, "omission_audio": gp.omission_name(0, 1)}]}
+    ]
+    assert gp._collect_omission_audio(tmp_path / "gone", recs) == ()
+    assert gp._collect_omission_audio(None, recs) == ()
+
+
+def test_a_read_failure_on_one_clip_keeps_the_others(scratch, monkeypatch):
+    recs = _records_with_clips(scratch, {0: [(1, fake_pcm(1)), (2, fake_pcm(2))]})
+    real = Path.read_bytes
+
+    def flaky(self):
+        if self.name == gp.omission_name(0, 1):
+            raise OSError("io error")
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", flaky)
+    assert gp._collect_omission_audio(scratch, recs) == ((0, 2, fake_pcm(2)),)
+
+
+def test_an_omission_file_in_scratch_does_not_make_a_good_result_invalid(scratch):
+    result = _good_result(scratch, 2)
+    (scratch / gp.omission_name(0, 1)).write_bytes(b"\x01\x00" * 10)
+    (scratch / "omission-garbage.pcm").write_bytes(b"\x01")  # even an odd one
+    assert gp._validate_result(result, scratch, 2) == [fake_pcm(0), fake_pcm(1)]
+
+
+def test_phase_outcome_defaults_to_no_omission_audio():
+    out = gp.PhaseOutcome(
+        ok=False,
+        reason="deadline",
+        detail="",
+        pcm_parts=None,
+        chunk_records=[],
+        elapsed_s=0.0,
+        spawn_s=0.0,
+    )
+    assert out.omission_audio == ()
+
+
+def test_the_runner_hands_back_the_rejected_audio_of_a_failed_phase(phase):
+    outcome, _, roots = phase(
+        lambda a: FakeProc(a, on_start=run_child_inline, exits=True),
+        n=2,
+        fac=factories("omission_on_chunk", chunk=1),
+    )
+    assert outcome.reason == gp.REASON_SECOND_OMISSION and outcome.failed_chunk == 1
+    assert outcome.omission_audio == ((1, 1, fake_pcm(1)), (1, 2, fake_pcm(1)))
+    assert list(roots.iterdir()) == []  # read before the scratch dir went
+
+
+def test_a_clean_phase_has_no_omission_audio(phase):
+    outcome, _, _ = phase(lambda a: FakeProc(a, on_start=run_child_inline, exits=True))
+    assert outcome.ok and outcome.omission_audio == ()
+
+
+def test_the_runner_keeps_the_audio_of_an_omission_that_a_rerender_fixed(phase):
+    # chunk 0: first attempt dropped words, the re-render passes: the phase is ok
+    # and the rejected audio is still returned for listening.
+    def start(proc):
+        def provider():
+            return Provider([PCM_REJECTED, fake_pcm(0)])
+
+        asr = Asr([OMITTED, TEXT])
+        gp._write_input(proc.scratch, [TEXT], LEAF)
+        chunks, leaf = gp._read_input(proc.scratch)
+        gp._run_child(
+            chunks, leaf, time.monotonic() + 30, proc.scratch, (provider, asr.make)
+        )
+
+    outcome, _, _ = phase(lambda a: FakeProc(a, on_start=start, exits=True), n=1)
+    assert outcome.ok
+    assert outcome.omission_audio == ((0, 1, PCM_REJECTED),)
+
+
+def test_a_clip_collection_bug_never_fails_the_phase(phase, monkeypatch):
+    def boom(scratch, records):
+        raise RuntimeError("collector broke")
+
+    monkeypatch.setattr(gp, "_collect_omission_audio", boom)
+    outcome, _, _ = phase(lambda a: FakeProc(a, on_start=run_child_inline, exits=True))
+    assert outcome.ok and outcome.omission_audio == ()

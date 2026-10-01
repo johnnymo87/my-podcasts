@@ -1005,3 +1005,218 @@ def test_a_failed_fallback_still_names_the_dropped_passage(env):
     assert (
         f"second_omission (chunk 1: {OMISSION_DETAIL}) -> OpenAI nova FAILED: " in alert
     )
+
+
+# --- the rejected audio of omission attempts is kept ---------------------------------
+
+CLIP_PCM = b"\x09\x00" * 4_800  # distinguishable from the episode audio
+
+
+def with_clips(outcome, *clips):
+    """``outcome`` with ``(chunk, n, pcm)`` clips, and the matching attempts marked."""
+    records = [
+        dict(r, attempts=[dict(a) for a in r["attempts"]])
+        for r in outcome.chunk_records
+    ]
+    for i, n, _ in clips:
+        for a in records[i]["attempts"]:
+            if a["n"] == n:
+                a["outcome"] = "omission"
+                a["omission_audio"] = gp.omission_name(i, n)
+    return dataclasses.replace(outcome, chunk_records=records, omission_audio=clips)
+
+
+def clip_files(env):
+    return sorted((env.tmp / "m" / "fp-digest" / "omission-audio").glob("*.mp3"))
+
+
+def test_clips_are_encoded_next_to_the_manifests_and_recorded_on_the_attempt(env):
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (1, 1, CLIP_PCM))
+    result = env.render()
+    assert result.provider == "gemini"
+    [clip] = clip_files(env)
+    assert clip.name.startswith("2026-09-30-fp-") and clip.name.endswith(
+        "-c0001-a1.mp3"
+    )
+    assert clip.read_bytes() == b"ID3" + CLIP_PCM[:10]  # what encode_mp3 produced
+    attempt = env.manifests()[0]["gemini_phase"]["chunks"][1]["attempts"][0]
+    assert attempt["omission_audio_file"] == str(clip) and clip.is_absolute()
+    assert "omission_audio_error" not in env.manifests()[0]["gemini_phase"]
+
+
+def test_the_episode_audio_is_encoded_before_any_clip(env):
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (0, 1, CLIP_PCM))
+    env.render()
+    assert env.encoded[0] == b"".join(gemini_pcm(i) for i in range(N_GEMINI))
+    assert env.encoded[1:] == [CLIP_PCM]
+
+
+def test_clips_of_a_fallback_render_are_saved_after_the_openai_audio(env):
+    env.outcome = lambda chunks: with_clips(
+        failed_outcome("second_omission", chunks=3), (1, 1, CLIP_PCM), (1, 2, CLIP_PCM)
+    )
+    result = env.render()
+    assert result.provider == "openai" and result.fallback_reason == "second_omission"
+    assert env.encoded[0] == OPENAI_PCM * len(env.openai.calls)
+    assert env.encoded[1:] == [CLIP_PCM, CLIP_PCM]
+    assert [c.name.rsplit("-", 2)[1:] for c in clip_files(env)] == [
+        ["c0001", "a1.mp3"],
+        ["c0001", "a2.mp3"],
+    ]
+    attempts = env.manifests()[0]["gemini_phase"]["chunks"][1]["attempts"]
+    assert "omission_audio_file" in attempts[0]
+
+
+def test_clips_are_saved_even_when_the_fallback_fails_too(env):
+    env.outcome = lambda chunks: with_clips(
+        failed_outcome("second_omission", chunks=3), (1, 1, CLIP_PCM)
+    )
+    env.openai.script = [TTSProviderError("401 bad key", retryable=False)]
+    with pytest.raises(render.TTSRenderError):
+        env.render()
+    assert len(clip_files(env)) == 1
+    [m] = env.manifests()
+    assert m["status"] == "failed"
+    assert "omission_audio_file" in m["gemini_phase"]["chunks"][1]["attempts"][0]
+
+
+def test_clips_are_saved_when_there_is_no_fallback_and_the_phase_failed(env):
+    env.outcome = lambda chunks: with_clips(
+        failed_outcome("second_omission", chunks=3), (1, 1, CLIP_PCM)
+    )
+    with pytest.raises(render.TTSRenderError, match="Gemini phase failed"):
+        env.render(CFG_NO_FALLBACK)
+    assert len(clip_files(env)) == 1
+
+
+def test_a_keyboard_interrupt_saves_no_clips_and_still_propagates(env):
+    env.outcome = lambda chunks: with_clips(
+        failed_outcome("second_omission", chunks=3), (1, 1, CLIP_PCM)
+    )
+    env.openai.script = [KeyboardInterrupt()]
+    with pytest.raises(KeyboardInterrupt):
+        env.render()
+    assert clip_files(env) == [] and CLIP_PCM not in env.encoded
+
+
+def test_without_a_manifest_dir_nothing_is_kept(env):
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (1, 1, CLIP_PCM))
+    result = env.render(manifest_dir=None)
+    assert result.provider == "gemini" and result.manifest_path is None
+    assert CLIP_PCM not in env.encoded
+    assert list(env.tmp.rglob("omission-audio")) == []
+    assert list((env.tmp / "m").rglob("*.mp3")) == []
+
+
+def test_a_clip_encode_failure_is_noted_and_the_episode_still_renders(env, monkeypatch):
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (1, 1, CLIP_PCM))
+    real = render.encode_mp3
+
+    def encode(pcm, out):
+        if pcm == CLIP_PCM:
+            raise RuntimeError("ffmpeg exploded")
+        real(pcm, out)
+
+    monkeypatch.setattr(render, "encode_mp3", encode)
+    result = env.render()
+    assert result.provider == "gemini" and (env.tmp / "out.mp3").exists()
+    [m] = env.manifests()
+    assert m["status"] == "rendered"
+    assert m["gemini_phase"]["omission_audio_error"].startswith("RuntimeError: ffmpeg")
+    assert "omission_audio_file" not in m["gemini_phase"]["chunks"][1]["attempts"][0]
+    assert env.cache_result()["verification"] == "passed"
+
+
+def test_a_clip_encode_failure_does_not_break_a_fallback_render(env, monkeypatch):
+    env.outcome = lambda chunks: with_clips(
+        failed_outcome("second_omission", chunks=3), (1, 1, CLIP_PCM)
+    )
+    real = render.encode_mp3
+
+    def encode(pcm, out):
+        if pcm == CLIP_PCM:
+            raise OSError("no space left on device")
+        real(pcm, out)
+
+    monkeypatch.setattr(render, "encode_mp3", encode)
+    result = env.render()
+    assert result.provider == "openai" and (env.tmp / "out.mp3").exists()
+    [m] = env.manifests()
+    assert m["status"] == "rendered" and m["alert_sent"] is True
+    assert m["gemini_phase"]["omission_audio_error"].startswith("OSError: no space")
+
+
+def test_one_bad_clip_does_not_cost_the_others(env, monkeypatch):
+    other = b"\x07\x00" * 4_800
+    env.outcome = lambda chunks: with_clips(
+        ok_outcome(chunks), (0, 1, CLIP_PCM), (1, 1, other)
+    )
+    real = render.encode_mp3
+
+    def encode(pcm, out):
+        if pcm == CLIP_PCM:
+            raise RuntimeError("bad clip")
+        real(pcm, out)
+
+    monkeypatch.setattr(render, "encode_mp3", encode)
+    env.render()
+    [clip] = clip_files(env)
+    assert clip.name.endswith("-c0001-a1.mp3")
+    phase = env.manifests()[0]["gemini_phase"]
+    assert phase["omission_audio_error"].startswith("RuntimeError: bad clip")
+    assert "omission_audio_file" in phase["chunks"][1]["attempts"][0]
+
+
+def test_an_unusable_clip_dir_is_a_noted_error_not_a_crash(env):
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (1, 1, CLIP_PCM))
+    feed_dir = env.tmp / "m" / "fp-digest"
+    feed_dir.mkdir(parents=True)
+    (feed_dir / "omission-audio").write_text("a file where the dir should be")
+    result = env.render()
+    assert result.provider == "gemini"
+    assert "omission_audio_error" in env.manifests()[0]["gemini_phase"]
+
+
+def test_the_error_note_is_capped(env, monkeypatch):
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (1, 1, CLIP_PCM))
+    real = render.encode_mp3
+
+    def encode(pcm, out):
+        if pcm == CLIP_PCM:
+            raise RuntimeError("x" * 2000)
+        real(pcm, out)
+
+    monkeypatch.setattr(render, "encode_mp3", encode)
+    env.render()
+    assert len(env.manifests()[0]["gemini_phase"]["omission_audio_error"]) <= 300
+
+
+def test_a_phase_with_no_clips_adds_nothing_to_the_manifest(env):
+    env.outcome = ok_outcome
+    env.render()
+    assert clip_files(env) == []
+    assert not (env.tmp / "m" / "fp-digest" / "omission-audio").exists()
+    assert "omission_audio_error" not in env.manifests()[0]["gemini_phase"]
+
+
+def test_the_clip_attach_survives_a_degraded_phase_record(env, monkeypatch):
+    # If the manifest's gemini_phase fell back to the minimal record (no chunks),
+    # the clip is still saved and nothing raises.
+    monkeypatch.setattr(
+        render, "_phase_totals", lambda r: (_ for _ in ()).throw(RuntimeError("x"))
+    )
+    env.outcome = lambda chunks: with_clips(ok_outcome(chunks), (1, 1, CLIP_PCM))
+    result = env.render()
+    assert result.provider == "gemini" and len(clip_files(env)) == 1
+    phase = env.manifests()[0]["gemini_phase"]
+    assert phase["chunks"] == [] and "telemetry_error" in phase
+
+
+def test_saving_clips_never_raises_whatever_the_record_looks_like(tmp_path):
+    outcome = with_clips(ok_outcome(["a", "b"]), (1, 1, CLIP_PCM))
+    for record in ({}, {"gemini_phase": None}, {"gemini_phase": "nope"}):
+        render._save_omission_audio(outcome, tmp_path / "d", "ep", record)
+    # and with nothing to do, it does nothing at all
+    render._save_omission_audio(outcome, None, "ep", {})
+    render._save_omission_audio(ok_outcome(["a"]), tmp_path / "e", "ep", {})
+    assert not (tmp_path / "e").exists()

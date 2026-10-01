@@ -597,6 +597,56 @@ def _omission_note(reason: str, detail: object, failed_chunk: int | None) -> str
     return f" ({text})"
 
 
+def _save_omission_audio(
+    outcome, omission_dir: Path | None, episode_id: str, record: dict
+) -> None:
+    """Keep the audio the verifier rejected, as mp3s in ``omission_dir``.
+
+    Only ever called after the episode audio was produced or has failed, never
+    before. A human has to listen to settle whether an omission was real (the
+    ASR that flagged it is itself fallible). Each clip's absolute path goes on
+    the matching attempt as ``omission_audio_file``; a clip that cannot be
+    encoded leaves ``gemini_phase.omission_audio_error`` (the first one, capped)
+    and the others are still tried. Does nothing without a ``omission_dir`` (dry
+    runs keep nothing). Telemetry: nothing in here may raise.
+    """
+    try:
+        clips = getattr(outcome, "omission_audio", ()) or ()
+        if omission_dir is None or not clips:
+            return
+        phase = record.get("gemini_phase")
+        error: str | None = None
+        stamp = _manifest_mod.utc_stamp()
+        for index, n, pcm in clips:
+            try:
+                omission_dir.mkdir(parents=True, exist_ok=True)
+                path = _manifest_mod.omission_clip_path(
+                    omission_dir, episode_id, stamp, chunk=index, attempt=n
+                )
+                encode_mp3(pcm, path)
+                _attach_clip(phase, index, n, os.path.abspath(path))
+            except Exception as exc:  # noqa: BLE001 -- one clip costs only itself
+                log.warning("omission clip c%s a%s not kept: %r", index, n, exc)
+                if error is None:
+                    error = f"{type(exc).__name__}: {_exc_text(exc)}"[:300]
+        if error is not None and isinstance(phase, dict):
+            phase["omission_audio_error"] = error
+    except Exception:  # noqa: BLE001 -- diagnostics never cost the render
+        log.warning("keeping omission audio failed", exc_info=True)
+
+
+def _attach_clip(phase: Any, index: int, n: int, path: str) -> None:
+    """Record ``path`` on attempt ``n`` of chunk ``index`` in a ``gemini_phase``
+    record, if that record still holds the attempt (a degraded one may not)."""
+    if not isinstance(phase, dict):
+        return
+    for chunk in phase.get("chunks") or ():
+        if isinstance(chunk, dict) and chunk.get("index") == index:
+            for attempt in chunk.get("attempts") or ():
+                if isinstance(attempt, dict) and attempt.get("n") == n:
+                    attempt["omission_audio_file"] = path
+
+
 def _render_gemini_primary(
     text: str,
     config: RenderConfig,
@@ -607,6 +657,7 @@ def _render_gemini_primary(
     notify_fallback: bool,
     record: dict,
     chunk_records: list[dict],
+    omission_dir: Path | None = None,
 ) -> tuple[OpenAIConfig | GeminiConfig, str, str | None]:
     """Render with a Gemini primary; returns ``(leaf, verification, fallback_reason)``.
 
@@ -655,47 +706,60 @@ def _render_gemini_primary(
             )
     record["gemini_phase"] = _phase_record(outcome, budget_s=budget_s)
 
-    if outcome.ok:
-        record["chunk_count"] = len(gemini_chunks)
-        chunk_records.extend(_shipped_chunk_records(gemini_chunks, outcome))
-        encode_mp3(b"".join(outcome.pcm_parts), out_mp3)
-        return primary, "passed", None
+    def finish() -> tuple[OpenAIConfig | GeminiConfig, str, str | None]:
+        if outcome.ok:
+            record["chunk_count"] = len(gemini_chunks)
+            chunk_records.extend(_shipped_chunk_records(gemini_chunks, outcome))
+            encode_mp3(b"".join(outcome.pcm_parts), out_mp3)
+            return primary, "passed", None
 
-    reason = outcome.reason or "unknown"
-    if config.fallback is None:
-        raise TTSRenderError(f"Gemini phase failed: {reason}") from runner_exc
+        reason = outcome.reason or "unknown"
+        if config.fallback is None:
+            raise TTSRenderError(f"Gemini phase failed: {reason}") from runner_exc
 
-    # All Gemini audio is discarded: the whole text is re-chunked for OpenAI and
-    # rendered from scratch, so no episode ever mixes two voices.
-    fallback = config.fallback
-    record["fallback_reason"] = reason
-    error: Exception | None = None
+        # All Gemini audio is discarded: the whole text is re-chunked for OpenAI
+        # and rendered from scratch, so no episode ever mixes two voices.
+        fallback = config.fallback
+        record["fallback_reason"] = reason
+        error: Exception | None = None
+        try:
+            pcm_parts = _synthesize_all(fallback, text, chunk_records, record)
+            encode_mp3(b"".join(pcm_parts), out_mp3)
+        except Exception as exc:  # noqa: BLE001 -- alerted, then re-raised below
+            error = exc
+        if notify_fallback:
+            # After the attempt, so the alert can say how it ended; also when it
+            # failed.
+            record["alert_sent"] = _deliver_alert(
+                feed_slug,
+                episode_id,
+                primary,
+                reason,
+                fallback,
+                error,
+                detail=outcome.detail,
+                failed_chunk=outcome.failed_chunk,
+            )
+        if error is not None:
+            if isinstance(error, TTSRenderError):
+                raise TTSRenderError(
+                    f"Gemini phase failed ({reason}) and the OpenAI fallback "
+                    f"failed: {_exc_text(error)}"
+                ) from error
+            error.add_note(f"after Gemini {reason}")
+            raise error
+        return fallback, "not_run_openai", reason
+
+    # Rejected-audio clips are saved only once the episode audio is produced or
+    # has failed (an Exception), so they never delay it. A KeyboardInterrupt or
+    # SystemExit propagates at once without spending time on ffmpeg.
     try:
-        pcm_parts = _synthesize_all(fallback, text, chunk_records, record)
-        encode_mp3(b"".join(pcm_parts), out_mp3)
-    except Exception as exc:  # noqa: BLE001 -- alerted, then re-raised below
-        error = exc
-    if notify_fallback:
-        # After the attempt, so the alert can say how it ended; also when it failed.
-        record["alert_sent"] = _deliver_alert(
-            feed_slug,
-            episode_id,
-            primary,
-            reason,
-            fallback,
-            error,
-            detail=outcome.detail,
-            failed_chunk=outcome.failed_chunk,
-        )
-    if error is not None:
-        if isinstance(error, TTSRenderError):
-            raise TTSRenderError(
-                f"Gemini phase failed ({reason}) and the OpenAI fallback "
-                f"failed: {_exc_text(error)}"
-            ) from error
-        error.add_note(f"after Gemini {reason}")
-        raise error
-    return fallback, "not_run_openai", reason
+        result = finish()
+    except Exception:
+        _save_omission_audio(outcome, omission_dir, episode_id, record)
+        raise
+    _save_omission_audio(outcome, omission_dir, episode_id, record)
+    return result
 
 
 def render_episode(
@@ -841,6 +905,13 @@ def render_episode(
                     fallback_reason=stored_reason,
                 )
 
+    # Kept rejected audio lives next to the manifests; a dry run (no manifest
+    # dir) keeps nothing.
+    omission_dir = (
+        _manifest_mod.omission_audio_dir(manifest_dir, feed_slug)
+        if manifest_dir is not None
+        else None
+    )
     leaf = config.primary  # becomes the fallback leaf if Gemini fails
     verification = "not_run_openai"
     fallback_reason: str | None = None
@@ -855,6 +926,7 @@ def render_episode(
                 notify_fallback=notify_fallback,
                 record=record,
                 chunk_records=chunk_records,
+                omission_dir=omission_dir,
             )
         else:
             pcm_parts = _synthesize_all(leaf, text, chunk_records, record)
