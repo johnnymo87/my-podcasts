@@ -152,6 +152,7 @@ The inline text above stays; where it disagrees with these, these win.
   alerts.
 - **Manual-publish defaults stay `nova`** (`publish_script`, CLI `--voice`) on every feed until
   T6 (`my-podcasts-9p3.7`) makes them fall through to `FEED_VOICES`.
+  (Superseded by the T6 prerequisites amendment below: they now fall through.)
 
 #### Amendments (T3b implementation, 2026-09-30)
 
@@ -203,6 +204,21 @@ The inline text above stays; where it disagrees with these, these win.
   `--out-dir` must not exist: the run creates it with one atomic `mkdir` (there is no `--force`), so
   files in a directory always come from a single run and concurrent runs into one path are refused.
   Plan: `docs/plans/2026-09-30-gemini-tts-t4-audition-plan.md`.
+
+#### Amendments (T6 prerequisites, 2026-10-01)
+
+- **T6 prerequisites landed** (`docs/plans/2026-10-01-gemini-tts-t6-prereqs-plan.md`). Manual
+  publishing (`publish_script`, `publish-script`, `episode`) now defaults to the feed's
+  `FEED_VOICES` config instead of OpenAI `nova` (`my-podcasts-9p3.16`), so the consumer-down
+  recovery renders what the consumer would, a Gemini primary with its fallback included; an
+  explicit `--voice` still forces OpenAI. Omission verdicts are diagnosable afterwards
+  (`my-podcasts-9p3.13`): each ASR attempt record keeps token counts, `max_net_missing` (also on
+  passes, the margin to trend), the spans with the script excerpt and what the ASR heard, and on
+  an omission the capped transcript; the `second_omission` failure detail and the fallback alert
+  name the dropped passage; and the rejected audio of every omission attempt (at most 4 per
+  render) is kept as an mp3 under `tts-renders/<feed>/omission-audio/` for 60 days. Nothing here
+  changes what is flagged, so `VERIFIER_VERSION` stays `"2"` and the cache key is unchanged;
+  all of it is best-effort and cannot fail or delay the episode audio.
 
 ### Completed-render reuse
 
