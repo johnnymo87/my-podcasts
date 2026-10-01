@@ -20,7 +20,11 @@ flagged when it is long (>= min_span_words script tokens) and the transcript
 side is much shorter (<= max_span_ratio of it), OR when its net deficit (script
 tokens minus transcript tokens in the gap, ``net_missing``) reaches
 ``net_deficit_min`` (None turns that rule off). Recall
-counts ALL matched script tokens, not only anchored ones. Coordinates are
+counts ALL matched script tokens, not only anchored ones. It is reported true
+(matched / script tokens); the ``recall_floor`` is applied to padded recall
+(unmatched tokens measured against at least ``recall_min_tokens``), so a chunk
+shorter than that gets an absolute bound (15 unmatched tokens at the defaults)
+instead of a proportion two misheard names can break. Coordinates are
 indices into the normalized token lists, not characters or seconds.
 
 ``Span.heard`` and ``Verdict.transcript`` are diagnostics only: they record what
@@ -76,6 +80,9 @@ class VerifyThresholds:
     # in the gap) reaches this. None = off. It catches a cut merged with nearby
     # substitution noise, where the ratio test misses (the T2 blind spot).
     net_deficit_min: int | None = 6
+    # v3: the recall floor measures unmatched tokens against at least this many
+    # tokens ("padded recall"). 1 reproduces the v2 rule at every length.
+    recall_min_tokens: int = 300
 
     def __post_init__(self) -> None:
         if self.anchor_min < 1:
@@ -92,9 +99,26 @@ class VerifyThresholds:
             raise ValueError(
                 f"net_deficit_min must be None or >= 1, got {self.net_deficit_min}"
             )
+        if self.recall_min_tokens < 1:
+            raise ValueError(
+                f"recall_min_tokens must be >= 1, got {self.recall_min_tokens}"
+            )
 
 
 DEFAULT_THRESHOLDS = VerifyThresholds()
+
+
+def _recall_fails(matched: int, total: int, th: VerifyThresholds) -> bool:
+    """The recall-floor rule (v3): unmatched tokens measured against at least
+    ``recall_min_tokens``. For ``total >= recall_min_tokens`` this is exactly
+    ``matched / total < recall_floor`` (the v2 rule, same float expression),
+    so long-chunk verdicts are unchanged; below it the floor is an absolute
+    bound of ``(1 - recall_floor) * recall_min_tokens`` unmatched tokens."""
+    if total <= 0:
+        return False
+    padded = max(total, th.recall_min_tokens)
+    return (padded - (total - matched)) / padded < th.recall_floor
+
 
 Status = Literal["pass", "omission"]
 
@@ -130,8 +154,9 @@ class Span:
 class Analysis:
     status: Status
     # "ok" | "empty_script" | "long_unmatched_span" | "recall_below_floor", and,
-    # from project_chunks only when the whole episode passed but a chunk's own
-    # recall fell below the floor: "chunk_recall_below_floor"
+    # from project_chunks only when the whole episode passed but a chunk failed
+    # the recall floor: "chunk_recall_below_floor". ``recall`` below is always
+    # the TRUE matched/total; the floor is applied to padded recall (_recall_fails).
     reasons: tuple[str, ...]
     recall: float | None  # None only when the script has no tokens
     script_tokens: int
@@ -220,7 +245,7 @@ def _analysis(
     reasons = []
     if any(s.flagged for s in spans):
         reasons.append("long_unmatched_span")
-    if recall < th.recall_floor:
+    if _recall_fails(n_matched, len(script), th):
         reasons.append("recall_below_floor")
     return Analysis(
         status="omission" if reasons else "pass",
@@ -277,7 +302,7 @@ def project_chunks(
             if s.flagged and _span_belongs_to_chunk(s, matched, start, end, thresholds)
         )
         recall = n / len(toks) if toks else None
-        bad = flagged > 0 or (recall is not None and recall < thresholds.recall_floor)
+        bad = flagged > 0 or (bool(toks) and _recall_fails(n, len(toks), thresholds))
         projections.append(
             ChunkProjection(
                 index=i,

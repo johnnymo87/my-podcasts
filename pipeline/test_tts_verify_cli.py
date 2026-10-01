@@ -461,6 +461,7 @@ def test_threshold_overrides_are_applied_and_echoed(
         "max_span_ratio": 0.25,
         "recall_floor": 0.9,
         "net_deficit_min": 6,  # not overridden: the calibrated default
+        "recall_min_tokens": 300,
     }
 
 
@@ -480,6 +481,7 @@ def test_defaults_echo_the_calibrated_thresholds(
         "max_span_ratio": 0.5,
         "recall_floor": 0.95,
         "net_deficit_min": 6,
+        "recall_min_tokens": 300,
     }
     assert report_of(result)["verifier_version"] == "2"
 
