@@ -1215,7 +1215,7 @@ def verify_cut_audio(
     runs = [run for _, run in spans]
 
     missing_all: set[int] = set()
-    per_interval = []
+    per_interval: list[dict[str, Any]] = []
     leftover_total = 0
     for s, e in spec.token_intervals:
         interval = script[s:e]
