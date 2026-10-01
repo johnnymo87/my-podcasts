@@ -173,6 +173,18 @@ def test_gemini_key_changes_with_verifier_policy(monkeypatch) -> None:
     assert cache.cache_key("t", cfg) != k
 
 
+def test_gemini_key_moves_with_the_asr_thinking_setting(monkeypatch) -> None:
+    """Renders verified under the old implicit thinking-default are not reused."""
+    from pipeline.tts import asr, verify
+
+    cfg = RenderConfig(GEMINI, OpenAIConfig("tts-1-hd", "echo"))
+    assert verify.VERIFIER_POLICY.endswith("|thinking-low")
+    k = cache.cache_key("t", cfg)
+    old = f"verifier-v{verify.VERIFIER_VERSION}|{asr.policy_for(thinking='default')}"
+    monkeypatch.setattr(verify, "VERIFIER_POLICY", old)
+    assert cache.cache_key("t", cfg) != k
+
+
 def test_openai_key_ignores_verifier_policy(monkeypatch) -> None:
     from pipeline.tts import verify
 

@@ -342,16 +342,19 @@ def test_net_deficit_off_is_identical_to_before_on_a_plain_skip():
 def test_production_policy_strings_are_pinned():
     from pipeline.tts import asr
 
-    assert asr.ASR_POLICY == "gemini-3.8-flash|prompt-v1|temp0|thinking-default"
+    assert asr.ASR_POLICY == "gemini-3.8-flash|prompt-v1|temp0|thinking-low"
     assert asr.ASR_POLICY == asr.policy_for()
     assert VERIFIER_POLICY == f"verifier-v1|{asr.ASR_POLICY}"
+    assert VERIFIER_POLICY == (
+        "verifier-v1|gemini-3.8-flash|prompt-v1|temp0|thinking-low"
+    )
 
 
 def test_verdict_records_the_policy_of_the_transcriber_actually_used():
     from pipeline.tts import asr
     from pipeline.tts.verify import verifier_policy
 
-    low = asr.policy_for(thinking="low")
+    low = asr.policy_for(thinking="default")
 
     def t(audio, mime_type):
         return Transcription(
@@ -377,7 +380,7 @@ def test_unavailable_verdict_uses_the_transcribers_policy_attribute():
     from pipeline.tts import asr
     from pipeline.tts.verify import verifier_policy
 
-    low = asr.GeminiTranscriber(thinking="low")
+    low = asr.GeminiTranscriber(thinking="default")
     exc = TranscriptionUnavailable("asr_timeout", "slow")
 
     def t(audio, mime_type):

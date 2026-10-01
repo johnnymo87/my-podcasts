@@ -1695,6 +1695,22 @@ def test_default_services_construct_without_touching_the_network():
     assert cr.est_deadline_worst(22_200, "gemini-3.8-flash-tts") < 15
 
 
+def test_calibration_policy_names_map_explicitly_to_thinking_settings():
+    """`default` means thinking-default (no thinking config), never the
+    production default (low); the mapping must not follow asr's defaults."""
+    from pipeline.tts import asr as asr_mod
+
+    assert asr_mod.ASR_POLICY.endswith("|thinking-low")
+    s = cr.default_services()
+    default = s.transcriber("default", 30.0)
+    low = s.transcriber("low", 30.0)
+    assert default.thinking == "default" and low.thinking == "low"
+    assert default.policy == asr_mod.policy_for(thinking="default")
+    assert default.policy.endswith("|thinking-default")
+    assert low.policy == asr_mod.policy_for(thinking="low") == asr_mod.ASR_POLICY
+    assert set(cr.ASR_POLICIES) == set(asr_mod.THINKING_SETTINGS)
+
+
 def test_slots_cycle_through_every_combination():
     slots = cr.plan_slots(2 * len(cr.COMBOS), "s", "dev")
     assert sorted(slots[: len(cr.COMBOS)]) == sorted(cr.COMBOS)

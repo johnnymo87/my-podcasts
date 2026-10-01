@@ -3061,7 +3061,7 @@ def render_markdown(report: dict) -> str:
         "",
         f"corpus.json sha256 `{meta['corpus_sha256']}`; cuts.json sha256 "
         f"`{meta['cuts_sha256']}`; git HEAD `{meta['git_head']}`",
-        f"verifier policy `{meta['verifier_policy']}`; default ASR policy "
+        f"verifier policy `{meta['verifier_policy']}`; production ASR policy "
         f"`{meta['default_asr_policy']}`",
         "",
         "Three things, reported separately: **detection** (cuts caught & localized), "

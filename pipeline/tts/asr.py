@@ -39,8 +39,11 @@ ASR_TEMPERATURE = 0
 DEFAULT_ASR_TIMEOUT_SECONDS = 90.0
 
 # "default" sends no thinking config (the model's own default applies); "low"
-# sends ThinkingLevel.LOW. gemini-3.8-flash rejects MINIMAL (HTTP 400).
+# sends ThinkingLevel.LOW. gemini-3.8-flash rejects MINIMAL (HTTP 400). Production
+# uses "low" (DEFAULT_THINKING); "default" stays selectable so the calibration
+# harness can still run the model's own behaviour as a comparison.
 THINKING_SETTINGS = ("default", "low")
+DEFAULT_THINKING = "low"
 
 
 def _check_thinking(thinking: str) -> str:
@@ -51,7 +54,7 @@ def _check_thinking(thinking: str) -> str:
     return thinking
 
 
-def policy_for(model: str = ASR_MODEL, thinking: str = "default") -> str:
+def policy_for(model: str = ASR_MODEL, thinking: str = DEFAULT_THINKING) -> str:
     """The ASR policy string for a model and thinking setting."""
     _check_thinking(thinking)
     return (
@@ -61,17 +64,24 @@ def policy_for(model: str = ASR_MODEL, thinking: str = "default") -> str:
 
 
 # Everything that decides which audio passes, on the ASR side, for the
-# production default: "gemini-3.8-flash|prompt-v1|temp0|thinking-default". It is
+# production default: "gemini-3.8-flash|prompt-v1|temp0|thinking-low". It is
 # derived from policy_for() (never retyped) so the two cannot drift. Changing
 # ASR_MODEL, ASR_PROMPT (bump ASR_PROMPT_VERSION with it) or the generation
 # config changes it, and with it verify.VERIFIER_POLICY, which is folded into
 # the render cache key. A GeminiTranscriber built with another model or
 # thinking setting reports its own string as ``.policy`` and on every
 # Transcription, and verify_audio records that in the verdict.
+#
+# Why "low": the T5 thinking pilot (8 faithful dev bases + 8 dev cuts, 2
+# repeats, both settings) found identical detection, zero false alarms and zero
+# confirmed reconstructions either way, but "low" is about 2x faster (median
+# ~3.4 s vs ~5.4 s per chunk) with no thinking tokens, and its worst clean-base
+# margin was tighter (net_missing 2 over a 5-token span vs 4 over 12 for the
+# model default). Before this was "thinking-default", an implicit setting.
 ASR_POLICY = policy_for()
 
 
-def _generation_config(thinking: str = "default") -> types.GenerateContentConfig:
+def _generation_config(thinking: str = DEFAULT_THINKING) -> types.GenerateContentConfig:
     """The one place the request's generation config is built (see ASR_POLICY)."""
     _check_thinking(thinking)
     if thinking == "low":
@@ -143,7 +153,7 @@ class GeminiTranscriber:
         *,
         model: str = ASR_MODEL,
         timeout_s: float = DEFAULT_ASR_TIMEOUT_SECONDS,
-        thinking: str = "default",
+        thinking: str = DEFAULT_THINKING,
     ) -> None:
         self.model = model
         self.timeout_s = timeout_s
