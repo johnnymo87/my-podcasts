@@ -224,6 +224,13 @@ The inline text above stays; where it disagrees with these, these win.
   60 s total budget (30 s per encode; in practice about 1 s per clip, the rest skipped and noted),
   though never the audio itself.
 
+#### Amendments (verifier v3, 2026-10-01)
+
+- Verifier v3: the recall floor is measured against at least 300 tokens (`recall_min_tokens`; bead
+  `my-podcasts-9p3.14`), so short tail chunks no longer false-alarm on two misheard names. No T5
+  verdict changed (284 stored records, 0 differences). Evidence:
+  `docs/plans/2026-09-30-gemini-tts-t5-evidence.md` ("Short tail chunks").
+
 ### Completed-render reuse
 
 Replaces joinery's per-chunk cache, which today prevents an R2 upload failure from re-buying audio.
