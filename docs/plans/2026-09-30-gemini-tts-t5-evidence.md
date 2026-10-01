@@ -18,12 +18,16 @@ Raw artifacts (audio, transcripts, labels, ledger, reports):
 audio cuts (78 ASR runs)** across seven families (start, end, mid-sentence, whole sentence,
 paragraph, predictable text, multiple separated cuts) and size bins 10/20/40/80 tokens (multi:
 3x8 and 3x16), with **zero false alarms on 23 independently labeled clean chunks (46 runs)**, zero
-unavailable ASR, and no confirmed ASR reconstruction of removed words. It is **not** a guarantee
+unavailable ASR, and no confirmed ASR reconstruction of removed words (reconstruction was tested
+only on `predictable` cuts, i.e. intervals containing a quotation or a repeated 3-gram, not on
+familiar facts or idioms). It is **not** a guarantee
 that every omission of 6+ tokens is caught. Zero misses in 39 correlated positives bounds the
 miss rate only loosely (the one-sided 95% bound for 39 independent positives is about 7.4%).
 
-**Out of scope, measured:** a contiguous omission of 5 tokens or fewer is not flagged by the span
-rule; scattered small losses are caught only through recall (text simulation: 5 separate 5-token
+**Out of scope, measured:** the smallest contiguous labeled omission tested was 8 tokens (the
+3x8 multi cuts); per interval those aligned to a net deficit of 7, so detection clears M=6 by one
+token while clean chunks sit three tokens below it. A real 6-7-token skip is untested and often
+aligns to 5, which is missed; a contiguous omission of 5 tokens or fewer is not flagged; scattered small losses are caught only through recall (text simulation: 5 separate 5-token
 losses caught 22/23 at floor 0.95; 3 separate 4-token losses 0/23).
 
 ## Method (what was done, and the substitutions)
@@ -123,5 +127,15 @@ One run each: feasibility, not tail latency.
 - **Gemini ASR availability:** one 503 in about 320 ASR calls; each is a whole-episode fallback.
 - **5-token-or-smaller contiguous omissions** and small scattered losses below about 5% of a chunk
   are not claimed.
+- **Short tail chunks were not sampled** (chunks 0 and n//2 only). The recall floor is a fraction,
+  so on Levine's ~34-token sign-off chunk two mismatched names fail it; windowed replay of the
+  clean transcripts puts recall below 0.95 in about 6% of 34-token windows and 3% of 70-token
+  windows. Bead `my-podcasts-9p3.14`, before T6.
+- **Currency normalization is asymmetric:** `$15.51` normalizes to dollars-and-cents words, but a
+  transcript that drops the `$` reads "fifteen point five one", and Gemini ASR is not consistent
+  about `$`. A price list can produce a false omission. Rundown/FP scripts spell numbers out
+  (no `$`+digit in 132 recent Rundown scripts); Levine does not. Bead `my-podcasts-9p3.15`, before Levine flips.
+- **Production omission verdicts are not diagnosable yet:** the Gemini phase records only status,
+  reasons and recall, not the flagged span or transcript. Bead `my-podcasts-9p3.14`, before T6.
 - **Correlated evidence:** 12 source episodes, two voices, 3-minute chunks. Feeds with different
   text shapes (e.g. transcripts, tables) are untested.

@@ -248,8 +248,8 @@ repetitions or added speech.
   floor 0.95; ASR `thinking_level=LOW`; verifier v2. Hold-out: 39 labeled cuts all caught, 0
   false alarms on 23 clean chunks; 10/10 published OpenAI episodes pass. Labels came from an
   independent ASR (whisper) plus the owner by ear, not from the evaluated ASR. The real Levine
-  skip reproduced on Flash in 5 of 9 renders and is caught. Not claimed: contiguous omissions of
-  5 tokens or fewer.
+  skip reproduced on Flash in 5 of 9 renders and is caught. Smallest contiguous omission tested:
+  8 tokens; 7 or fewer is not claimed.
 
 ## Telemetry
 

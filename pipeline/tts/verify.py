@@ -6,8 +6,10 @@ side (model, prompt, generation config) is covered by asr.ASR_POLICY; bump
 asr.ASR_PROMPT_VERSION on any prompt text change. T3 must fold VERIFIER_POLICY
 (both halves), not just VERIFIER_VERSION, into the render cache key.
 
-Claimed scope: catches omissions of about 6 or more contiguous script tokens
-(see VerifyThresholds for the calibration claim and its limits). It does not
+Claimed scope: caught every labeled contiguous omission of 8 or more script
+tokens in calibration; 6-7 tokens is untested and a real 6-token skip often
+aligns to a net deficit of 5, so it may be missed (see VerifyThresholds for the
+calibration claim and its limits). It does not
 detect changed numbers, negations, repetitions or added speech. See the design
 doc, "Verification".
 
@@ -53,8 +55,9 @@ class VerifyThresholds:
     scope and its limits are in ``docs/plans/2026-09-30-gemini-tts-t5-evidence.md``.
     In short: on faithful dev renders (policy ``thinking-low``) no span had
     ``net_missing`` above 2 and recall was never below 0.973, while every
-    labeled cut (10 to 80+ tokens, seven families) left a span with
-    ``net_missing`` of at least 8. ``net_deficit_min=6`` sits between the two;
+    labeled cut (8 to 80+ tokens, seven families) left its largest span with
+    ``net_missing`` of at least 8 (single 8-token intervals of multi cuts
+    aligned to 7). ``net_deficit_min=6`` sits between the two;
     ``recall_floor=0.95`` catches scattered losses that never form one span.
     The claim is "caught every labeled cut of these sizes and families", never
     "catches every omission of N tokens"; see the evidence doc for what the
