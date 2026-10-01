@@ -1,0 +1,47 @@
+{
+ "fixture": "t5-levine-natural-omission",
+ "about": "Gemini-TTS skipped a 24-token list item of a Levine chunk (both ASRs agree). Trimmed window; the verifier must flag the skipped span.",
+ "script": "Money Stuff: Morgan Stanley Leaked Some Deals.\n\nMoney Stuff\n\nView in browser\n\nDeal list leak\n\nI always think of an investment banking group’s “pipeline” as a fairly aspirational document. “What deals do we have coming,” your boss asks you, so you go write down a list of: Deals on which you have a mandate; Deals on which you are pitching for a mandate; Companies that you talk to regularly and that might do a deal one of these days; Companies that you’ve been meaning to call but you’ve been busy; Companies that someone told you might be doing a deal with another bank; Companies that you’ve never talked to but, based on public information, they really should do a deal; and Other companies that exist.\n\nAnd you hand your boss the list, and she looks at it and says “ah, good, you are keeping busy,” and leaves you alone for another day. This view might be extremely biased by my own experience of being an investment banker. I was bad at it. I’m sure other people just wrote down like 20 deals they were actually doing. Not me.\n\nAnyway here’s a fascinating natural experiment:\n\nBlock quote begins.\n\nA Morgan Stanley employee accidentally leaked an internal document listing more than 100 investment-banking deals the firm is pitching and monitoring in Asia, revealing details of the bank’s pipeline, according to people familiar with the matter.\n\nThe list contained candidates for initial public offerings, spanning from China to South Korea and India, according to a copy",
+ "transcript": "Money Stuff: Morgan Stanley Leaked Some Deals Money Stuff: View in browser Deal list leak I always think of an investment banking group's \"pipeline\" as a fairly aspirational document. \"What deals do we have coming?\" your boss asks you, so you go write down a list of: deals on which you have a mandate, deals on which you are pitching for a mandate, companies that you talk to regularly and that might do a deal one of these days, companies that you've never talked to, but based on public information they really should do a deal, and other companies that exist. And you hand your boss the list and she looks at it and says \"Ah, good, you are keeping busy,\" and leaves you alone for another day. This view might be extremely biased by my own experience of being an investment banker (I was bad at it). I'm sure other people just wrote down like 20 deals they were actually doing. Not me! Anyway, here is a fascinating natural experiment: A Morgan Stanley employee accidentally leaked an internal document listing more than 100 investment-banking deals the firm is pitching and monitoring in Asia, revealing details of the bank's pipeline, according to people familiar with the matter. The list contained candidates for initial public offerings, spanning from China to South Korea and India, according to a copy",
+ "span": {
+  "script_start": 79,
+  "script_end": 103,
+  "tokens": 24
+ },
+ "window": {
+  "words_before_span": 79,
+  "words_after_span": 150,
+  "chunk_token_start": 0,
+  "chunk_token_end": 255,
+  "span_in_chunk_tokens": [
+   79,
+   103
+  ]
+ },
+ "confirmed_by": {
+  "gemini_asr": "flagged span net_missing 24 in the full chunk",
+  "whisper_suspect_spans_in_chunk_tokens": [
+   [
+    79,
+    103,
+    24
+   ]
+  ]
+ },
+ "provenance": {
+  "source_root": "/persist/my-podcasts/tts-eval/t5",
+  "attempt": "levine-repro/Charon-2",
+  "script_source": "/persist/my-podcasts/tts-eval/t4/set/levine/script.txt",
+  "script_sha256": "561d3a35112bd237df8108104c59dd2d60fa635e201bdbc8565343953c45edcf",
+  "chunk_index": 0,
+  "chunk_sha256": "542f6cd23024cd3a7ede50191411850387f36eb73663138b546c15d3b831a124",
+  "model": "gemini-3.8-flash-tts",
+  "voice": "Charon",
+  "style": "calm, measured news anchor",
+  "transcript": "levine-repro/Charon-2/asr/low-0.json",
+  "audio": "levine-repro/Charon-2/pcm.wav",
+  "audio_sha256": "7d69c20cc8559de8b6de02fcdcdc9c7378c7f3d5103f167425816b05752f460f",
+  "asr_policy": "gemini-3.8-flash|prompt-v1|temp0|thinking-low",
+  "note": "script and transcript are TRIMMED windows (<=150 words either side of the span) of a Bloomberg Money Stuff chunk; the full text is not stored in the repo."
+ }
+}

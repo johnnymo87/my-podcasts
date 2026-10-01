@@ -1,0 +1,57 @@
+{
+ "fixture": "t5-cut",
+ "about": "A real DEV cut: audio removed by construction from a faithful Gemini render, then transcribed by Gemini (policy thinking-low). Under the calibrated defaults (verifier v2) the verifier must flag a span over every removed interval.",
+ "script": "Not everyone agrees. Some users say Fable still handles deeply nested reasoning and hard-to-read intent better. The researcher Yuchen Jin wasn't impressed, and argued that frontier coding ability has plateaued and the competition is now about intelligence per dollar. Mowshowitz answers that claims like that usually come down to a skill issue or a lack of ambition. One user warned that about one percent of the time the model does something drastic, like crashing a staging server or killing every running app on a laptop. Mowshowitz also calls the choice to offer Opus five point five with zero data retention unprincipled. Since it is at least as capable as Fable five point one, and stronger on cyber, he argues that either both models should get that option or neither should. His recommendation: make Opus five point five your default. Use Fable for expert-domain correctness and unusual creative work. Use Astra for ambitious coding where readable code doesn't matter, and for web search.\n\nNow to critical minerals. Namibia's president, Netumbo Nandi-Ndaitwah, told Semafor at an Invest Africa event on the sidelines of the UN General Assembly that foreign investors have to build processing plants in her country or look elsewhere. Quote: when you are coming to Namibia, you don't want to be a briefcase business. Namibia is a major uranium producer and has lithium, rare earths, copper, and graphite. She's offering a long-term partnership in return, and points to thirty-six years of peace since independence.\n\nSemafor says her pitch fits a hardening line across Africa. About a dozen countries, including Guinea, Malawi, and Zimbabwe, have restricted exports of unprocessed minerals to force refining at home, borrowing from Indonesia's approach to nickel. Nandi-Ndaitwah says required local partnerships for foreign investors are, in her words, going into the law. Semafor notes that promise has a long history. An empowerment framework approved by the cabinet in twenty fifteen was supposed to become law by twenty eighteen and stalled, and officials called it at an advanced stage as recently as last October. Mining is moving faster: new licenses have required fifteen percent local ownership since twenty twenty-one. Officials floated fifty-one percent last year, and the Chamber of Mines pushed back. Behind her position is unemployment. She says more than forty percent of Namibians are out of work, and called it a time bomb. She won in twenty twenty-four on a pledge to create five hundred thousand jobs by twenty twenty-nine, a steep target for a country of three million people with a GDP of about fourteen billion dollars.",
+ "transcript": "Not everyone agrees. Some users say Fable still handles deeply nested reasoning and hard-to-read intent better. The researcher Yuchen Jin wasn't impressed and argued that frontier coding ability has plateaued, and the competition is now about intelligence per dollar. Moshowitz answers that claims like that usually come down to a skill issue or a lack of ambition. One user warned that about 1% of the time, the model does something drastic, like crashing a staging server or killing every running choice to offer Opus 5.5 with zero data retention unprincipled, since it is at least as capable as Fable 5.1 and stronger on cyber. He argues that either both models should get that option or neither should. His recommendation: make Opus 5.5 your default. Use Fable for expert domain correctness and unusual creative work. Use Astra for ambitious coding where readable code doesn't matter and for web search. Now to critical minerals. Namibia's President Netumbo Nandi-Ndaitwah told Semafor at an Invest Africa event on the sidelines of the UN General Assembly that foreign investors have to build processing plants in her country or look elsewhere. Quote, \"When you are coming to Namibia, you don't want to be a briefcase business.\" Namibia is a major uranium producer and has lithium, rare earths, copper, and graphite. She's offering a long-term partnership in return and points to 36 years of peace since independence. Semafor says her pitch fits a hardening line across Africa. About a dozen countries, including Guinea, Malawi, and Zimbabwe, have restricted exports of unprocessed minerals to force refining at home, borrowing from Indonesia's approach to nickel. Nandi-Ndaitwah says required local partnerships for foreign investors are, in her words, \"going into the law.\" Semafor notes that promise has a long history. An empowerment framework approved by the Cabinet in 2015 was supposed to become law by 2018 and stalled. And officials called it at an advanced stage as recently as last October. Mining is moving faster. New licenses have required 15% local ownership since 2021. Officials floated 51% last year, and the Chamber of Mines pushed back. Behind her position is unemployment. She says work and called it a time bomb. She won in 2024 on a pledge to create 500,000 jobs by 2029, a steep target. GDP of about $14 billion",
+ "cut": {
+  "cut_id": "rundown-2026-09-28--c2--flash--Kore--multi-24",
+  "family": "multi",
+  "size_bin": 24,
+  "split": "dev",
+  "feed": "rundown",
+  "model": "flash",
+  "voice": "Kore",
+  "label_status": "approx",
+  "label": {
+   "nominal_tokens": 24,
+   "lower_tokens": 24,
+   "upper_tokens": 26,
+   "boundary_error": 2
+  },
+  "intervals": [
+   {
+    "script_start": 83,
+    "script_end": 91,
+    "tokens": 8,
+    "removed_text": "app on a laptop. Mowshowitz also calls the"
+   },
+   {
+    "script_start": 381,
+    "script_end": 389,
+    "tokens": 8,
+    "removed_text": "more than forty percent of Namibians are out"
+   },
+   {
+    "script_start": 419,
+    "script_end": 427,
+    "tokens": 8,
+    "removed_text": "for a country of three million people with"
+   }
+  ]
+ },
+ "provenance": {
+  "source_root": "/persist/my-podcasts/tts-eval/t5",
+  "set": "main",
+  "chunk": "bases/rundown-2026-09-28--c2--flash--Kore/chunk.txt",
+  "chunk_sha256": "37335f90d2ca13700f03376a1359e776baf329adbc39bec717a850bfa57e7b61",
+  "transcript": "cuts/rundown-2026-09-28--c2--flash--Kore--multi-24/asr/low-0.json",
+  "audio": "cuts/rundown-2026-09-28--c2--flash--Kore--multi-24/cut.wav",
+  "audio_sha256": "e57f13b7cf5d15a40a438393b4f579fe2d11cd1c5b3fb46c4806412b004d36ff",
+  "asr_policy": "gemini-3.8-flash|prompt-v1|temp0|thinking-low",
+  "cuts_file": "cuts.json",
+  "cuts_sha256": "1fa995aa4d6d195d0895005e0904403889e62a45081775e417ac3b5cc23de61f",
+  "verified_file": "cuts-verified.json",
+  "verified_sha256": "fa28d439bbf8349458cea5d41f168be4f532c664373c441b0413cb63fc8784c3",
+  "corpus_sha256": "22df3625862c41de1382ecb5ef85fbd5cb813bc577fd7527b461f48cf2741934"
+ }
+}

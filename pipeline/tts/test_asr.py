@@ -365,3 +365,80 @@ def test_policy_string_names_model_prompt_version_and_generation_config():
     assert asr.ASR_MODEL in asr.ASR_POLICY
     assert f"prompt-v{asr.ASR_PROMPT_VERSION}" in asr.ASR_POLICY
     assert f"temp{asr.ASR_TEMPERATURE}" in asr.ASR_POLICY
+
+
+def test_production_default_sends_thinking_level_low_and_policy_says_so():
+    t, client, p = transcriber_with(response("hello world"))
+    with p:
+        t(b"x", "audio/wav")
+    config = client.models.calls[0]["config"]
+    assert config.thinking_config.thinking_level == types.ThinkingLevel.LOW
+    assert config == asr._generation_config("low")
+    assert t.thinking == "low"
+    assert t.policy == asr.ASR_POLICY
+    assert asr.policy_for() == asr.ASR_POLICY
+    assert asr.ASR_POLICY.endswith("|thinking-low")
+
+
+def test_explicit_default_thinking_sends_no_thinking_config():
+    """ "default" stays selectable for calibration; it is not the production default."""
+    client = FakeClient(response("hello world"))
+    t = GeminiTranscriber(timeout_s=30, thinking="default")
+    with patch.object(asr, "_make_genai_client", lambda timeout_s: client):
+        t(b"x", "audio/wav")
+    config = client.models.calls[0]["config"]
+    assert config == types.GenerateContentConfig(temperature=0)
+    assert config == asr._generation_config("default")
+    assert config.thinking_config is None
+    assert t.policy == asr.policy_for(thinking="default")
+    assert t.policy.endswith("|thinking-default") and t.policy != asr.ASR_POLICY
+
+
+def test_low_thinking_sends_thinking_level_low():
+    client = FakeClient(response("hello world"))
+    t = GeminiTranscriber(timeout_s=30, thinking="low")
+    with patch.object(asr, "_make_genai_client", lambda timeout_s: client):
+        t(b"x", "audio/wav")
+    config = client.models.calls[0]["config"]
+    assert config.temperature == 0
+    assert config.thinking_config.thinking_level == types.ThinkingLevel.LOW
+    assert config == asr._generation_config("low")
+
+
+def test_policy_differs_between_thinking_settings_and_tracks_model():
+    default = GeminiTranscriber(thinking="default")
+    low = GeminiTranscriber(thinking="low")
+    assert default.policy != low.policy
+    assert low.policy == asr.ASR_POLICY
+    assert default.policy == asr.ASR_POLICY.replace("thinking-low", "thinking-default")
+    other = GeminiTranscriber(model="gemini-x", thinking="low")
+    assert other.policy.startswith("gemini-x|")
+
+
+@pytest.mark.parametrize("bad", ["minimal", "", "LOW", None])
+def test_unknown_thinking_is_a_value_error(bad):
+    with pytest.raises(ValueError):
+        GeminiTranscriber(thinking=bad)
+    with pytest.raises(ValueError):
+        asr._generation_config(bad)
+
+
+def test_transcription_carries_the_transcribers_policy():
+    t, _, p = transcriber_with(response("hello world"))
+    with p:
+        assert t(b"x", "audio/wav").policy == asr.ASR_POLICY
+    default = GeminiTranscriber(timeout_s=30, thinking="default")
+    with patch.object(
+        asr, "_make_genai_client", lambda timeout_s: FakeClient(response())
+    ):
+        out = default(b"x", "audio/wav")
+    assert out.policy == default.policy and "thinking-default" in out.policy
+
+
+def test_default_policy_string_is_pinned_and_derived():
+    assert asr.ASR_POLICY == "gemini-3.8-flash|prompt-v1|temp0|thinking-low"
+    assert asr.ASR_POLICY == asr.policy_for("gemini-3.8-flash", "low")
+    assert asr.policy_for(thinking="default") == (
+        "gemini-3.8-flash|prompt-v1|temp0|thinking-default"
+    )
+    assert asr.ASR_PROMPT_VERSION == "1"

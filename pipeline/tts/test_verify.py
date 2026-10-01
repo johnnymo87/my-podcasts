@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from pipeline.tts.asr import Transcription, TranscriptionUnavailable
+from pipeline.tts.normalize import normalize_tokens
 from pipeline.tts.verify import (
     DEFAULT_THRESHOLDS,
     VERIFIER_POLICY,
@@ -86,7 +87,9 @@ def test_several_short_cuts_trip_the_recall_floor():
     t = as_asr(SCRIPT)
     for start in (700, 550, 400, 250, 120):  # 5 cuts x 10 words = ~6% of tokens
         t = drop_words(t, start, 10)
-    a = analyze(SCRIPT, t, replace(DEFAULT_THRESHOLDS, recall_floor=0.97))
+    # the span rule off: each 10-word cut is its own span and would flag
+    th = replace(DEFAULT_THRESHOLDS, net_deficit_min=None, recall_floor=0.97)
+    a = analyze(SCRIPT, t, th)
     assert a.status == "omission"
     assert a.reasons == ("recall_below_floor",)
 
@@ -115,6 +118,8 @@ def test_span_coordinates_are_normalized_token_indices():
 @pytest.mark.parametrize(
     "kwargs",
     [
+        {"net_deficit_min": 0},
+        {"net_deficit_min": -5},
         {"anchor_min": 0},
         {"min_span_words": 0},
         {"max_span_ratio": -0.1},
@@ -184,7 +189,9 @@ def test_chunk_failure_with_passing_whole_uses_chunk_reason():
     small = "Alpha bravo charlie delta echo foxtrot golf hotel india juliet."
     chunks.insert(1, small)
     transcript = " ".join(as_asr(c) for c in chunks if c != small)
-    th = replace(DEFAULT_THRESHOLDS, recall_floor=0.85, min_span_words=50)
+    th = replace(
+        DEFAULT_THRESHOLDS, recall_floor=0.85, min_span_words=50, net_deficit_min=None
+    )
     whole, per_chunk = project_chunks(chunks, transcript, th)
     assert per_chunk[1].status == "omission"
     assert whole.status == "omission"
@@ -268,3 +275,170 @@ def test_unavailable_verdict_also_carries_policy():
     t, _ = fake_transcriber(exc=TranscriptionUnavailable("asr_timeout", "slow"))
     v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
     assert v.verifier_policy == VERIFIER_POLICY
+
+
+def _t2_blind_spot_transcript() -> str:
+    """40 tokens cut, then every 3rd of the next 45 substituted.
+
+    No 3-token anchor survives, so the cut and the noise merge into one span of
+    85 script tokens against 45 transcript tokens: net_missing 40, but the
+    transcript side is over half the script side, so the ratio test misses it.
+    """
+    toks = normalize_tokens(SCRIPT)
+    mid = len(toks) // 2
+    noisy = [
+        "xyzzy" if i % 3 == 2 else t for i, t in enumerate(toks[mid + 40 : mid + 85])
+    ]
+    return " ".join(toks[:mid] + noisy + toks[mid + 85 :])
+
+
+def test_the_t2_blind_spot_passes_with_the_rule_off_and_is_caught_by_default():
+    assert analyze(SCRIPT, _t2_blind_spot_transcript()).status == "omission"
+    off = replace(DEFAULT_THRESHOLDS, net_deficit_min=None, recall_floor=0.85)
+    a = analyze(SCRIPT, _t2_blind_spot_transcript(), off)
+    assert a.status == "pass"
+    blind = [s for s in a.spans if s.script_words > 40]
+    assert [(s.script_words, s.transcript_words, s.net_missing) for s in blind] == [
+        (85, 45, 40)
+    ]
+
+
+@pytest.mark.parametrize("m", [6, 12, 24, 40])
+def test_net_deficit_rule_flags_the_t2_blind_spot(m):
+    th = replace(DEFAULT_THRESHOLDS, net_deficit_min=m, recall_floor=0.85)
+    a = analyze(SCRIPT, _t2_blind_spot_transcript(), th)
+    assert a.status == "omission"
+    assert a.reasons == ("long_unmatched_span",)
+    assert [s.net_missing for s in a.spans if s.flagged] == [40]
+
+
+def test_net_deficit_above_the_deficit_does_not_flag():
+    th = replace(DEFAULT_THRESHOLDS, net_deficit_min=41, recall_floor=0.85)
+    assert analyze(SCRIPT, _t2_blind_spot_transcript(), th).status == "pass"
+
+
+def test_net_deficit_is_about_missing_tokens_not_substitutions():
+    # Substitutions keep net_missing near zero (a substituted word is still a
+    # transcript token), so the rule leaves a noisy but complete control alone.
+    words = as_asr(SCRIPT).split()
+    noisy = " ".join("xyzzy" if i % 3 == 2 else w for i, w in enumerate(words))
+    th = replace(DEFAULT_THRESHOLDS, net_deficit_min=12)
+    a = analyze(SCRIPT, noisy, th)
+    assert not any(s.flagged for s in a.spans)
+    assert "long_unmatched_span" not in a.reasons
+
+
+def test_net_deficit_does_not_change_the_clean_control():
+    th = replace(DEFAULT_THRESHOLDS, net_deficit_min=12)
+    assert analyze(SCRIPT, as_asr(SCRIPT), th).status == "pass"
+
+
+def test_a_plain_skip_is_flagged_with_or_without_the_net_deficit_rule():
+    skipped = drop_words(as_asr(SCRIPT), 300, 40)
+    on = analyze(SCRIPT, skipped)
+    off = analyze(SCRIPT, skipped, replace(DEFAULT_THRESHOLDS, net_deficit_min=None))
+    assert on.status == off.status == "omission"
+    assert on.spans == off.spans and on.reasons == off.reasons
+    assert VERIFIER_VERSION == "2"
+
+
+def test_calibrated_defaults_are_frozen():
+    assert DEFAULT_THRESHOLDS == VerifyThresholds(
+        anchor_min=3,
+        min_span_words=12,
+        max_span_ratio=0.5,
+        net_deficit_min=6,
+        recall_floor=0.95,
+    )
+
+
+def test_defaults_flag_a_6_token_contiguous_deletion_wherever_it_is():
+    words = as_asr(SCRIPT).split()
+    for start in (0, 100, len(words) // 2, len(words) - 6):
+        a = analyze(SCRIPT, drop_words(as_asr(SCRIPT), start, 6))
+        assert a.status == "omission", start
+        assert "long_unmatched_span" in a.reasons
+        assert any(s.flagged and s.net_missing >= 6 for s in a.spans)
+
+
+def test_the_claim_stops_at_6_tokens_a_5_token_deletion_is_not_flagged():
+    # scope of the calibration, kept honest: below the threshold is not claimed
+    a = analyze(SCRIPT, drop_words(as_asr(SCRIPT), 300, 5))
+    assert a.status == "pass"
+
+
+def test_defaults_pass_a_transcript_with_two_scattered_substitutions():
+    words = as_asr(SCRIPT).split()
+    noisy = " ".join("xyzzy" if i in (120, 480) else w for i, w in enumerate(words))
+    a = analyze(SCRIPT, noisy)
+    assert a.status == "pass" and a.reasons == ("ok",)
+    assert max((s.net_missing for s in a.spans), default=0) <= 2
+    assert a.recall is not None and a.recall >= 0.99
+
+
+def test_scattered_losses_trip_the_recall_floor_at_095_but_not_093():
+    # nine separated 5-token losses (~5% of this script): no span reaches
+    # net_missing 6, so only the recall floor can catch them (the calibration's
+    # reason for 0.95 rather than 0.93)
+    t = as_asr(SCRIPT)
+    for start in (810, 710, 610, 510, 410, 310, 210, 110, 30):
+        t = drop_words(t, start, 5)
+    a = analyze(SCRIPT, t)
+    assert a.status == "omission" and a.reasons == ("recall_below_floor",)
+    assert (
+        analyze(SCRIPT, t, replace(DEFAULT_THRESHOLDS, recall_floor=0.93)).status
+        == "pass"
+    )
+
+
+def test_production_policy_strings_are_pinned():
+    from pipeline.tts import asr
+
+    assert asr.ASR_POLICY == "gemini-3.8-flash|prompt-v1|temp0|thinking-low"
+    assert asr.ASR_POLICY == asr.policy_for()
+    assert VERIFIER_POLICY == f"verifier-v2|{asr.ASR_POLICY}"
+    assert VERIFIER_POLICY == (
+        "verifier-v2|gemini-3.8-flash|prompt-v1|temp0|thinking-low"
+    )
+
+
+def test_verdict_records_the_policy_of_the_transcriber_actually_used():
+    from pipeline.tts import asr
+    from pipeline.tts.verify import verifier_policy
+
+    low = asr.policy_for(thinking="default")
+
+    def t(audio, mime_type):
+        return Transcription(
+            as_asr(SCRIPT), "gemini-3.8-flash", "1", "STOP", 1.0, 1, 2, 3, policy=low
+        )
+
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.status == "pass"
+    assert v.asr.policy == low
+    assert v.verifier_policy == verifier_policy(low) != VERIFIER_POLICY
+    assert v.to_dict()["asr"]["policy"] == low
+    assert v.to_dict()["verifier_policy"] == f"verifier-v{VERIFIER_VERSION}|{low}"
+
+
+def test_verdict_without_a_transcription_policy_falls_back_to_the_default():
+    t, _ = fake_transcriber(as_asr(SCRIPT))
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.asr.policy is None
+    assert v.verifier_policy == VERIFIER_POLICY
+
+
+def test_unavailable_verdict_uses_the_transcribers_policy_attribute():
+    from pipeline.tts import asr
+    from pipeline.tts.verify import verifier_policy
+
+    low = asr.GeminiTranscriber(thinking="default")
+    exc = TranscriptionUnavailable("asr_timeout", "slow")
+
+    def t(audio, mime_type):
+        raise exc
+
+    t.policy = low.policy
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.status == "unavailable"
+    assert v.verifier_policy == verifier_policy(low.policy)

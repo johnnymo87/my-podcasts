@@ -1,0 +1,45 @@
+{
+ "fixture": "t5-cut",
+ "about": "A real DEV cut: audio removed by construction from a faithful Gemini render, then transcribed by Gemini (policy thinking-low). Under the calibrated defaults (verifier v2) the verifier must flag a span over every removed interval.",
+ "script": "A war has reopened in the Horn of Africa. Africanews, citing multiple AFP sources, reports that Tigrayan forces have seized the airports in Mekelle and Shire, and reportedly Axum, and are fighting federal troops in the neighboring Afar region. Ethiopian Airlines has suspended flights to all three cities. Two humanitarian workers said fighting broke out late Tuesday in the Afar towns of Abala and Erebti. One of them said, we are expecting it to expand. A foreign security source confirmed that the Tigray People's Liberation Front controls Abala, a mountain town on the Tigray border where federal forces had been based. A former senior TPLF official claimed six Afar towns and said federal forces were fast-retreating. AFP could not confirm that claim.\n\nThe two sides describe the start of the fighting in opposite terms. The Tigray regional government said on Facebook that it was answering intensive bombardment by aircraft, drones and artillery, and that its army had entered a defensive battle against what it called a genocidal invasion. Getachew Reda, a former TPLF leader who broke with his colleagues and joined the federal government, called the fighting heartbreaking. He said the TPLF had launched an all-out offensive against government positions in Afar and Amhara. Addis Ababa had not commented at the time of the report. On Sunday the TPLF announced it had joined a new alliance of anti-government armed groups from across Ethiopia. The federal government accuses it of allying with Eritrea. That puts Tuesday's news, the lifting of American sanctions on Eritrea's military, next to a front that is now active. AFP notes that the federal government has a significant military advantage because it has expanded drone production since the last war. Around one million people from that war are still displaced.\n\nAt the UN, Secretary-General Antonio Guterres told the General Assembly that Israeli violence, displacement and settlement expansion in the occupied West Bank are \"bulldozing the path to peace and raising the spectre of ethnic cleansing.\" We cannot allow the two-state solution to disappear before our eyes, he said. He called the Hamas attacks of October seventh abhorrent. He said they were followed by an onslaught on Gaza with a scale of killing and destruction unlike anything he has seen as secretary-general. He also said the region's so-called ceasefires have amounted to \"little more than lesser fires.\"",
+ "transcript": "A war has reopened in the Horn of Africa. Africanews, citing multiple AFP sources, reports that Tigrayan forces have seized the airports in Mekelle and Shire, and reportedly Axum, and are fighting federal troops in the neighboring Afar region. Ethiopian Airlines has suspended flights to all three cities. Two humanitarian workers said fighting broke out late Tuesday in the Afar towns of Abala and Erebti. One of them said, \"We are expecting it to expand.\" A foreign security source confirmed that the Tigray People's Liberation Front controls Abala, a mountain town on the Tigray border where federal forces had been based. A former senior TPLF official claimed six Afar towns and said federal forces were fast retreating. AFP could not confirm that claim. The two sides describe the start of the fighting in opposite terms. The Tigray regional government said on Facebook that it was answering intensive bombardment by aircraft, drones, and artillery, and that its army had entered a defensive battle against what it called a genocidal invasion. Getachew Reda, a former TPLF leader who broke with his colleagues and joined the federal government, called the fighting heartbreaking. He said the TPLF had launched an all-out offensive against government positions in Afar and Amhara. Addis Ababa had not commented at the time of the report. On Sunday, the TPLF announced it had joined a new alliance of anti-government armed groups from across Ethiopia. The federal government accuses it of allying with Eritrea. That puts Tuesday's news, the lifting of American sanctions on Eritrea's military, next to a front that is now active. AFP notes that the federal government has a significant military advantage because it has expanded drone production since the last war. Around 1 million people from that war are still displaced.",
+ "cut": {
+  "cut_id": "fp-2026-09-24--c2--lite--Charon--paragraph-80",
+  "family": "paragraph",
+  "size_bin": 80,
+  "split": "dev",
+  "feed": "fp",
+  "model": "lite",
+  "voice": "Charon",
+  "label_status": "exact",
+  "label": {
+   "nominal_tokens": 100,
+   "lower_tokens": 100,
+   "upper_tokens": 100,
+   "boundary_error": 0
+  },
+  "intervals": [
+   {
+    "script_start": 296,
+    "script_end": 396,
+    "tokens": 100,
+    "removed_text": "At the UN, Secretary-General Antonio Guterres told the General Assembly that Israeli violence, displacement and settlement expansion in the occupied West Bank are \"bulldozing the path to peace and raising the spectre of ethnic cleansing.\" We cannot allow the two-state solution to disappear before our eyes, he said. He called the Hamas attacks of October seventh abhorrent. He said they were followed by an onslaught on Gaza with a scale of killing and destruction unlike anything he has seen as secretary-general. He also said the region's so-called ceasefires have amounted to \"little more than lesser fires.\""
+   }
+  ]
+ },
+ "provenance": {
+  "source_root": "/persist/my-podcasts/tts-eval/t5",
+  "set": "main",
+  "chunk": "bases/fp-2026-09-24--c2--lite--Charon/chunk.txt",
+  "chunk_sha256": "1e0e0930b9b786d6f94befc8c77120302bcc1bf6a1e7179f3980a3cba44a2ee7",
+  "transcript": "cuts/fp-2026-09-24--c2--lite--Charon--paragraph-80/asr/low-0.json",
+  "audio": "cuts/fp-2026-09-24--c2--lite--Charon--paragraph-80/cut.wav",
+  "audio_sha256": "40000e4aabeff4b1ad5e53c2a00450adb94df57d8a6e11712275b890afb3048a",
+  "asr_policy": "gemini-3.8-flash|prompt-v1|temp0|thinking-low",
+  "cuts_file": "cuts.json",
+  "cuts_sha256": "1fa995aa4d6d195d0895005e0904403889e62a45081775e417ac3b5cc23de61f",
+  "verified_file": "cuts-verified.json",
+  "verified_sha256": "fa28d439bbf8349458cea5d41f168be4f532c664373c441b0413cb63fc8784c3",
+  "corpus_sha256": "22df3625862c41de1382ecb5ef85fbd5cb813bc577fd7527b461f48cf2741934"
+ }
+}

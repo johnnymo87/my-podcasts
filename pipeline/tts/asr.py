@@ -38,20 +38,59 @@ ASR_PROMPT = (
 ASR_TEMPERATURE = 0
 DEFAULT_ASR_TIMEOUT_SECONDS = 90.0
 
-# Everything that decides which audio passes, on the ASR side. No thinking
-# config is sent, so the model's default applies; say so, so a change to send
-# one is a visible edit here. Changing ASR_MODEL, ASR_PROMPT (bump
-# ASR_PROMPT_VERSION with it) or the generation config changes this string, and
-# with it verify.VERIFIER_POLICY, which T3 must fold into the render cache key.
-# (The string describes the DEFAULT model; a caller passing ``model=`` to
-# GeminiTranscriber is outside the policy and must say so in its own key.)
-ASR_POLICY = (
-    f"{ASR_MODEL}|prompt-v{ASR_PROMPT_VERSION}|temp{ASR_TEMPERATURE}|thinking-default"
-)
+# "default" sends no thinking config (the model's own default applies); "low"
+# sends ThinkingLevel.LOW. gemini-3.8-flash rejects MINIMAL (HTTP 400). Production
+# uses "low" (DEFAULT_THINKING); "default" stays selectable so the calibration
+# harness can still run the model's own behaviour as a comparison.
+THINKING_SETTINGS = ("default", "low")
+DEFAULT_THINKING = "low"
 
 
-def _generation_config() -> types.GenerateContentConfig:
+def _check_thinking(thinking: str) -> str:
+    if thinking not in THINKING_SETTINGS:
+        raise ValueError(
+            f"thinking must be one of {THINKING_SETTINGS}, got {thinking!r}"
+        )
+    return thinking
+
+
+def policy_for(model: str = ASR_MODEL, thinking: str = DEFAULT_THINKING) -> str:
+    """The ASR policy string for a model and thinking setting."""
+    _check_thinking(thinking)
+    return (
+        f"{model}|prompt-v{ASR_PROMPT_VERSION}|temp{ASR_TEMPERATURE}"
+        f"|thinking-{thinking}"
+    )
+
+
+# Everything that decides which audio passes, on the ASR side, for the
+# production default: "gemini-3.8-flash|prompt-v1|temp0|thinking-low". It is
+# derived from policy_for() (never retyped) so the two cannot drift. Changing
+# ASR_MODEL, ASR_PROMPT (bump ASR_PROMPT_VERSION with it) or the generation
+# config changes it, and with it verify.VERIFIER_POLICY, which is folded into
+# the render cache key. A GeminiTranscriber built with another model or
+# thinking setting reports its own string as ``.policy`` and on every
+# Transcription, and verify_audio records that in the verdict.
+#
+# Why "low": the T5 thinking pilot (8 faithful dev bases + 8 dev cuts, 2
+# repeats, both settings) found identical detection, zero false alarms and zero
+# confirmed reconstructions either way, but "low" is about 2x faster (median
+# ~3.4 s vs ~5.4 s per chunk) with no thinking tokens, and its worst clean-base
+# margin was tighter (net_missing 2 over a 5-token span vs 4 over 12 for the
+# model default). Before this was "thinking-default", an implicit setting.
+ASR_POLICY = policy_for()
+
+
+def _generation_config(thinking: str = DEFAULT_THINKING) -> types.GenerateContentConfig:
     """The one place the request's generation config is built (see ASR_POLICY)."""
+    _check_thinking(thinking)
+    if thinking == "low":
+        return types.GenerateContentConfig(
+            temperature=ASR_TEMPERATURE,
+            thinking_config=types.ThinkingConfig(
+                thinking_level=types.ThinkingLevel.LOW
+            ),
+        )
     return types.GenerateContentConfig(temperature=ASR_TEMPERATURE)
 
 
@@ -77,6 +116,9 @@ class Transcription:
     input_tokens: int | None
     output_tokens: int | None
     thinking_tokens: int | None
+    # The transcriber's policy string (model, prompt, generation config). None =
+    # unknown (a fake or an older caller); verify then assumes ASR_POLICY.
+    policy: str | None = None
 
 
 def _make_genai_client_unguarded(
@@ -107,12 +149,22 @@ class GeminiTranscriber:
     """
 
     def __init__(
-        self, *, model: str = ASR_MODEL, timeout_s: float = DEFAULT_ASR_TIMEOUT_SECONDS
+        self,
+        *,
+        model: str = ASR_MODEL,
+        timeout_s: float = DEFAULT_ASR_TIMEOUT_SECONDS,
+        thinking: str = DEFAULT_THINKING,
     ) -> None:
         self.model = model
         self.timeout_s = timeout_s
+        self.thinking = _check_thinking(thinking)
         self._client: genai.Client | None = None
         self._lock = threading.Lock()
+
+    @property
+    def policy(self) -> str:
+        """ASR policy string for this instance's model and thinking setting."""
+        return policy_for(self.model, self.thinking)
 
     def __enter__(self) -> GeminiTranscriber:
         return self
@@ -144,7 +196,7 @@ class GeminiTranscriber:
                     types.Part.from_bytes(data=audio, mime_type=mime_type),
                     ASR_PROMPT,
                 ],
-                config=_generation_config(),
+                config=_generation_config(self.thinking),
             )
         except (httpx.TimeoutException, TimeoutError) as exc:
             raise TranscriptionUnavailable("asr_timeout", repr(exc)) from exc
@@ -180,6 +232,7 @@ class GeminiTranscriber:
             input_tokens=getattr(usage, "prompt_token_count", None),
             output_tokens=getattr(usage, "candidates_token_count", None),
             thinking_tokens=getattr(usage, "thoughts_token_count", None),
+            policy=self.policy,
         )
 
     def close(self) -> None:

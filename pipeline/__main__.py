@@ -1233,6 +1233,32 @@ def _load_transcript_file(
     )
 
 
+@cli.command(
+    "tts-calibrate",
+    context_settings={
+        "ignore_unknown_options": True,
+        "allow_extra_args": True,
+        "help_option_names": [],
+    },
+    add_help_option=False,
+)
+@click.pass_context
+def tts_calibrate_command(ctx: click.Context) -> None:
+    """T5 omission-detector calibration harness (paid, resumable steps).
+
+    Everything after ``tts-calibrate`` is handed to the harness's own command
+    group, which is imported only now so the daily CLI never loads it:
+
+        uv run python -m pipeline tts-calibrate --help
+        uv run python -m pipeline tts-calibrate [--root R] [--budget 15] STEP ...
+    """
+    from pipeline.tts import calibrate_run
+
+    calibrate_run.calibrate_group.main(
+        args=list(ctx.args), prog_name="python -m pipeline tts-calibrate"
+    )
+
+
 @cli.command("tts-verify")
 @click.option(
     "--audio",
@@ -1287,6 +1313,13 @@ def _load_transcript_file(
 @click.option("--min-span-words", default=None, type=int)
 @click.option("--max-span-ratio", default=None, type=float)
 @click.option("--recall-floor", default=None, type=float)
+@click.option(
+    "--net-deficit-min",
+    "net_deficit_min",
+    default=None,
+    help="Flag a span whose net_missing reaches this: an integer >= 1, or "
+    "'none' to turn the rule off (default: the calibrated value).",
+)
 def tts_verify_command(**kwargs: Any) -> None:
     """Check rendered audio for large omissions against its script (offline).
 
@@ -1323,6 +1356,7 @@ def _tts_verify(
     min_span_words: int | None,
     max_span_ratio: float | None,
     recall_floor: float | None,
+    net_deficit_min: str | None,
 ) -> None:
     import dataclasses
     import hashlib
@@ -1351,16 +1385,31 @@ def _tts_verify(
             f"{save_transcript} already exists; pass --force to overwrite it"
         )
 
-    overrides = {
+    overrides: dict[str, Any] = {
         "anchor_min": anchor_min,
         "min_span_words": min_span_words,
         "max_span_ratio": max_span_ratio,
         "recall_floor": recall_floor,
     }
+    if net_deficit_min is not None:
+        if net_deficit_min.strip().lower() == "none":
+            overrides["net_deficit_min"] = None
+        else:
+            try:
+                overrides["net_deficit_min"] = int(net_deficit_min)
+            except ValueError:
+                raise click.BadParameter(
+                    f"net_deficit_min must be an integer or 'none', got "
+                    f"{net_deficit_min!r}"
+                ) from None
     try:
         thresholds = dataclasses.replace(
             verify.DEFAULT_THRESHOLDS,
-            **{k: v for k, v in overrides.items() if v is not None},
+            **{
+                k: v
+                for k, v in overrides.items()
+                if v is not None or k == "net_deficit_min"
+            },
         )
     except ValueError as exc:
         raise click.BadParameter(str(exc)) from exc

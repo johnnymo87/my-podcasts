@@ -460,7 +460,71 @@ def test_threshold_overrides_are_applied_and_echoed(
         "min_span_words": 20,
         "max_span_ratio": 0.25,
         "recall_floor": 0.9,
+        "net_deficit_min": 6,  # not overridden: the calibrated default
     }
+
+
+def test_defaults_echo_the_calibrated_thresholds(
+    tmp_path, script_file, audio_file, no_asr
+):
+    transcript = tmp_path / "clean.txt"
+    transcript.write_text(as_asr(SCRIPT))
+    result = run(
+        ["--audio", str(audio_file), "--script", str(script_file),
+         "--transcript", str(transcript)]
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    assert report_of(result)["thresholds"] == {
+        "anchor_min": 3,
+        "min_span_words": 12,
+        "max_span_ratio": 0.5,
+        "recall_floor": 0.95,
+        "net_deficit_min": 6,
+    }
+    assert report_of(result)["verifier_version"] == "2"
+
+
+def _net_deficit_run(tmp_path, script_file, audio_file, value):
+    transcript = tmp_path / "t.txt"
+    transcript.write_text(as_asr(SCRIPT))
+    return run(
+        ["--audio", str(audio_file), "--script", str(script_file),
+         "--transcript", str(transcript), "--net-deficit-min", value]
+    )  # fmt: skip
+
+
+def test_net_deficit_min_override_takes_an_int_or_none(
+    tmp_path, script_file, audio_file, no_asr
+):
+    result = _net_deficit_run(tmp_path, script_file, audio_file, "20")
+    assert result.exit_code == 0, result.output
+    assert report_of(result)["thresholds"]["net_deficit_min"] == 20
+    for spelling in ("none", "None", " NONE "):
+        result = _net_deficit_run(tmp_path, script_file, audio_file, spelling)
+        assert result.exit_code == 0, result.output
+        assert report_of(result)["thresholds"]["net_deficit_min"] is None
+
+
+def test_net_deficit_min_override_changes_the_verdict(
+    tmp_path, script_file, audio_file, no_asr
+):
+    words = as_asr(SCRIPT).split()
+    transcript = tmp_path / "skip.txt"
+    transcript.write_text(" ".join(words[:300] + words[308:]))  # 8 words lost
+    base = ["--audio", str(audio_file), "--script", str(script_file),
+            "--transcript", str(transcript)]  # fmt: skip
+    assert run(base).exit_code == 1  # default M=6 flags the 8-token span
+    off = run([*base, "--net-deficit-min", "none"])
+    assert off.exit_code == 0, off.output  # span rule off, recall 0.99: passes
+
+
+@pytest.mark.parametrize("bad", ["0", "-3", "six", "1.5"])
+def test_net_deficit_min_override_rejects_bad_values(
+    tmp_path, script_file, audio_file, no_asr, bad
+):
+    result = _net_deficit_run(tmp_path, script_file, audio_file, bad)
+    assert result.exit_code == 2
+    assert "net_deficit_min" in result.output
 
 
 # 7

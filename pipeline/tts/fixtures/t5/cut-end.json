@@ -1,0 +1,45 @@
+{
+ "fixture": "t5-cut",
+ "about": "A real DEV cut: audio removed by construction from a faithful Gemini render, then transcribed by Gemini (policy thinking-low). Under the calibrated defaults (verifier v2) the verifier must flag a span over every removed interval.",
+ "script": "Visas were also a flashpoint for Sudan. We mentioned last week that the Sudanese army chief's visa was reportedly restricted. Al Jazeera now has more detail. Reuters, citing Sudanese sources, reported that Washington was withholding Abdel Fattah al-Burhan's visa and would issue it only if he accepted a ninety-day ceasefire proposed by Massad Boulos, the senior US adviser for Arab and African affairs. AFP's diplomatic sources said the same. One called the move a \"clear violation of the UN's agreement with the US.\" Al-Burhan had been scheduled to address the Assembly on Thursday. Sudan's UN ambassador asked Secretary-General Antonio Guterres to intervene. Guterres's spokesman, Stephane Dujarric, said the Secretary-General was \"deeply concerned,\" and that the UN had urged Washington to meet its obligations under the Headquarters Agreement. Sudanese activists called the move political pressure. Journalist Diaa Al-Din Bilal said keeping al-Burhan out of New York would not force him to accept the American position and could make him more popular at home. Several critics pointed out that Netanyahu, who is wanted by the ICC, got a visa. Sudan's Foreign Ministry said any peace initiative must respect Sudan's \"legitimate national institutions\" and must deal with what it called \"negative foreign interference.\" Al-Burhan has rejected ceasefires imposed from outside. He argues that earlier pauses in the fighting helped the Rapid Support Forces.\n\nNow to Latin America. Semafor, citing The Wall Street Journal, reports that American military personnel have joined Ecuador's security forces in raids and arrests across the country against suspected drug traffickers. That puts US troops directly into a fight that Latin American forces have long led on their own. A security expert told the Journal: \"What we are seeing in Ecuador is unlike anything we've seen even during the Cold War.\" The expert added that it could mean American troops getting \"very close to or participating in combat.\"",
+ "transcript": "Visas were also a flashpoint for Sudan. We mentioned last week that the Sudanese army chief's visa was reportedly restricted. Al Jazeera now has more detail. Reuters, citing Sudanese sources, reported that Washington was withholding Abdel Fattah al-Burhan's visa and would issue it only if he accepted a 90-day ceasefire proposed by Massad Boulos, the senior US advisor for Arab and African affairs. AFP's diplomatic sources said the same. One called the move a clear violation of the UN's agreement with the US. Al-Burhan had been scheduled to address the assembly on Thursday. Sudan's UN ambassador asked Secretary-General António Guterres to intervene. Guterres's spokesman, Stéphane Dujarric, said the Secretary-General was deeply concerned and that the UN had urged Washington to meet its obligations under the headquarters agreement. Sudanese activists called the move political pressure. Journalist Diaa al-Deen Bilal said keeping al-Burhan out of New York would not force him to accept the American position and could make him more popular at home. Several critics pointed out that Netanyahu, who is wanted by the ICC, got a visa. Sudan's Foreign Ministry said any peace initiative must respect Sudan's, quote, legitimate national institutions, and must deal with what it called negative foreign interference. Al-Burhan has rejected ceasefires imposed from outside. He argues that earlier pauses in the fighting helped the Rapid Support Forces. Now to Latin America. Semafor, citing The Wall Street Journal, reports that American military personnel have joined Ecuador's security forces in raids and arrests across the country against suspected drug traffickers. That puts US troops directly into a fight that Latin American forces have long led on their own. A security expert told the Journal, \"What we are seeing in Ecuador is unlike anything we've seen, even during the Cold War.\" The expert added that it could mean",
+ "cut": {
+  "cut_id": "fp-2026-09-28--c3--flash--Kore--end-10",
+  "family": "end",
+  "size_bin": 10,
+  "split": "dev",
+  "feed": "fp",
+  "model": "flash",
+  "voice": "Kore",
+  "label_status": "exact",
+  "label": {
+   "nominal_tokens": 10,
+   "lower_tokens": 10,
+   "upper_tokens": 10,
+   "boundary_error": 0
+  },
+  "intervals": [
+   {
+    "script_start": 306,
+    "script_end": 316,
+    "tokens": 10,
+    "removed_text": "American troops getting \"very close to or participating in combat.\""
+   }
+  ]
+ },
+ "provenance": {
+  "source_root": "/persist/my-podcasts/tts-eval/t5",
+  "set": "main",
+  "chunk": "bases/fp-2026-09-28--c3--flash--Kore/chunk.txt",
+  "chunk_sha256": "f38dd40e07a3e7de548f19b0acbc34c75f498d785ece403ba1395d86f341f7cc",
+  "transcript": "cuts/fp-2026-09-28--c3--flash--Kore--end-10/asr/low-0.json",
+  "audio": "cuts/fp-2026-09-28--c3--flash--Kore--end-10/cut.wav",
+  "audio_sha256": "e11fe5d70781831203b8c36751e8ece57dab9d6fc50a1a09b10611c5d09fe5e5",
+  "asr_policy": "gemini-3.8-flash|prompt-v1|temp0|thinking-low",
+  "cuts_file": "cuts.json",
+  "cuts_sha256": "1fa995aa4d6d195d0895005e0904403889e62a45081775e417ac3b5cc23de61f",
+  "verified_file": "cuts-verified.json",
+  "verified_sha256": "fa28d439bbf8349458cea5d41f168be4f532c664373c441b0413cb63fc8784c3",
+  "corpus_sha256": "22df3625862c41de1382ecb5ef85fbd5cb813bc577fd7527b461f48cf2741934"
+ }
+}

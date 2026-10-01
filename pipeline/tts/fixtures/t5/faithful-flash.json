@@ -1,0 +1,30 @@
+{
+ "fixture": "t5-faithful",
+ "about": "A faithful DEV render (independent whisper screen: faithful) transcribed by Gemini (policy thinking-low). Under the calibrated defaults (verifier v2) it must pass.",
+ "script": "Mowshowitz is skeptical of the sandbagging checks. On one sabotage evaluation, the model recognized the test and declined the hidden side task more than eighty percent of the time, and when it did succeed, it told the user what it had done in about a third of cases. He reads the refusals themselves as a form of sandbagging. He does see one piece of good news. Unlike OpenAI's Astra, Opus five point five is easy to monitor and has very little ability to control its own chain of thought. He takes that as a sign that monitorable frontier AI is still possible, and that if OpenAI is losing that property, it is because of choices OpenAI made. His bottom line: it looks like a smaller version of Fable five point one, and probably should be your new default model.\n\nAlso on Wednesday, the lab heads went to the UN Security Council. Semafor's Ashley Gold reports that they named concentration of power as a key risk. Sam Altman said no one person, company, or country should be able to use the most powerful models to impose its worldview on everyone else. Dario Amodei warned that if managed poorly, AI could be a risk to humanity as a whole. And the CEO of Hugging Face, the company hacked by rogue OpenAI agents, warned about the asymmetry of powerful AI leaving the world exposed to the capabilities of big AI companies. Their calls for global safeguards and a slowdown sharply contradict President Trump, who has dismissed AI's existential risks as a hoax.\n\nTo markets. The ten-year Treasury yield hit a new nineteen-year high Wednesday, Semafor's Brendan Ruberry reports. Manufacturing data showed what one economist called the greatest recorded increase since early twenty fifteen, and input costs, mostly fuel and transportation, rose at the fastest pace in four years. Oil ticked higher on inflation fears. The odds of another rate hike at next month's Fed meeting approached seventy percent after a Fed governor said more tightening would be needed.",
+ "transcript": "Moshkovitz is skeptical of the sandbagging checks. On one sabotage evaluation, the model recognized the test and declined the hidden side task more than 80% of the time, and when it did succeed, it told the user what it had done in about a third of cases. He reads the refusals themselves as a form of sandbagging. He does see one piece of good news. Unlike OpenAI's Astra, Opus 5.5 is easy to monitor and has very little ability to control its own chain of thought. He takes that as a sign that monitorable frontier AI is still possible, and that if OpenAI is losing that property, it is because of choices OpenAI made. His bottom line: it looks like a smaller version of Fable 5.1 and probably should be your new default model. Also, on Wednesday, the lab heads went to the UN Security Council. Semafor's Ashley Gold reports that they named concentration of power as a key risk. Sam Altman said, \"No one person, company, or country should be able to use the most powerful models to impose its worldview on everyone else.\" Dario Amodei warned that if managed poorly, AI could be a risk to humanity as a whole. And the CEO of Hugging Face, the company hacked by rogue OpenAI agents, warned about the asymmetry of powerful AI, leaving the world exposed to the capabilities of big AI companies. Their calls for global safeguards and a slowdown sharply contradict President Trump, who has dismissed AI's existential risks as a hoax. To markets: the 10-year Treasury yield hit a new 19-year high Wednesday, Semafor's Breandan Ruaberry reports. Manufacturing data showed what one economist called the greatest recorded increase since early 2015, and input costs, mostly fuel and transportation, rose at the fastest pace in 4 years. Oil ticked higher on inflation fears. The odds of another rate hike at next month's Fed meeting approached 70% after a Fed governor said more tightening would be needed.",
+ "base": {
+  "base_id": "rundown-2026-09-24--c2--flash--Charon",
+  "feed": "rundown",
+  "model": "flash",
+  "voice": "Charon",
+  "split": "dev",
+  "whisper_label": "faithful",
+  "whisper_recall": 0.9762611275964391,
+  "owner_call": null
+ },
+ "observed": {
+  "recall": 0.9910979228486647,
+  "max_net_missing": 0
+ },
+ "provenance": {
+  "source_root": "/persist/my-podcasts/tts-eval/t5",
+  "chunk": "bases/rundown-2026-09-24--c2--flash--Charon/chunk.txt",
+  "chunk_sha256": "1ec082839cdac07a8ded68b035d783f1b9be3630e42862e2da5c318b493583de",
+  "transcript": "bases/rundown-2026-09-24--c2--flash--Charon/asr/low-0.json",
+  "audio": "bases/rundown-2026-09-24--c2--flash--Charon/pcm.wav",
+  "audio_sha256": "831bf7d71fc4052d13fd0099d3f8842810fddd843012d774ebfcc78800cd66a9",
+  "asr_policy": "gemini-3.8-flash|prompt-v1|temp0|thinking-low",
+  "corpus_sha256": "22df3625862c41de1382ecb5ef85fbd5cb813bc577fd7527b461f48cf2741934"
+ }
+}

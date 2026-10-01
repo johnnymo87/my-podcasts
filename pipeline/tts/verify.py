@@ -1,21 +1,27 @@
 """Large-omission detector: align an ASR transcript against the script.
 
 Changing normalization, alignment, or DEFAULT_THRESHOLDS changes verifier
-policy: bump VERIFIER_VERSION. The ASR side (model, prompt, generation config)
-is covered by asr.ASR_POLICY; bump asr.ASR_PROMPT_VERSION on any prompt text
-change. T3 must fold VERIFIER_POLICY (both halves), not just VERIFIER_VERSION,
-into the render cache key.
+policy: bump VERIFIER_VERSION (v2: the thresholds calibrated in T5). The ASR
+side (model, prompt, generation config) is covered by asr.ASR_POLICY; bump
+asr.ASR_PROMPT_VERSION on any prompt text change. T3 must fold VERIFIER_POLICY
+(both halves), not just VERIFIER_VERSION, into the render cache key.
 
-Claimed scope: catches LARGE omissions. It does not detect changed numbers,
-negations, repetitions or added speech. See the design doc, "Verification".
+Claimed scope: caught every labeled contiguous omission of 8 or more script
+tokens in calibration; 6-7 tokens is untested and a real 6-token skip often
+aligns to a net deficit of 5, so it may be missed (see VerifyThresholds for the
+calibration claim and its limits). It does not
+detect changed numbers, negations, repetitions or added speech. See the design
+doc, "Verification".
 
 Alignment: difflib matching blocks over normalized tokens. Blocks of at least
 ``anchor_min`` tokens are anchors; the script-side gaps between consecutive
 anchors (and before the first / after the last) are candidate spans. A span is
 flagged when it is long (>= min_span_words script tokens) and the transcript
-side is much shorter (<= max_span_ratio of it). Recall counts ALL matched
-script tokens, not only anchored ones. Coordinates are indices into the
-normalized token lists, not characters or seconds.
+side is much shorter (<= max_span_ratio of it), OR when its net deficit (script
+tokens minus transcript tokens in the gap, ``net_missing``) reaches
+``net_deficit_min`` (None turns that rule off). Recall
+counts ALL matched script tokens, not only anchored ones. Coordinates are
+indices into the normalized token lists, not characters or seconds.
 """
 
 from __future__ import annotations
@@ -29,19 +35,43 @@ from pipeline.tts.asr import ASR_POLICY, Transcription, TranscriptionUnavailable
 from pipeline.tts.normalize import normalize_tokens
 
 
-VERIFIER_VERSION = "1"
-VERIFIER_POLICY = f"verifier-v{VERIFIER_VERSION}|{ASR_POLICY}"
+VERIFIER_VERSION = "2"
+
+
+def verifier_policy(asr_policy: str = ASR_POLICY) -> str:
+    """Both halves of the policy for a given ASR policy string."""
+    return f"verifier-v{VERIFIER_VERSION}|{asr_policy}"
+
+
+VERIFIER_POLICY = verifier_policy()
 _EXCERPT_TOKENS = 30
 
 
 @dataclass(frozen=True)
 class VerifyThresholds:
-    """Placeholders until T5 calibrates them on real audio-level cuts."""
+    """Calibrated in T5 (``DEFAULT_THRESHOLDS``, verifier v2).
+
+    Chosen on labeled audio-level evidence, not guessed; the evidence, its
+    scope and its limits are in ``docs/plans/2026-09-30-gemini-tts-t5-evidence.md``.
+    In short: on faithful dev renders (policy ``thinking-low``) no span had
+    ``net_missing`` above 2 and recall was never below 0.973, while every
+    labeled cut (8 to 80+ tokens, seven families) left its largest span with
+    ``net_missing`` of at least 8 (single 8-token intervals of multi cuts
+    aligned to 7). ``net_deficit_min=6`` sits between the two;
+    ``recall_floor=0.95`` catches scattered losses that never form one span.
+    The claim is "caught every labeled cut of these sizes and families", never
+    "catches every omission of N tokens"; see the evidence doc for what the
+    evidence does not cover.
+    """
 
     anchor_min: int = 3
     min_span_words: int = 12
     max_span_ratio: float = 0.5
-    recall_floor: float = 0.85
+    recall_floor: float = 0.95
+    # Also flag a span whose net_missing (script tokens minus transcript tokens
+    # in the gap) reaches this. None = off. It catches a cut merged with nearby
+    # substitution noise, where the ratio test misses (the T2 blind spot).
+    net_deficit_min: int | None = 6
 
     def __post_init__(self) -> None:
         if self.anchor_min < 1:
@@ -54,6 +84,10 @@ class VerifyThresholds:
             )
         if not 0.0 <= self.recall_floor <= 1.0:
             raise ValueError(f"recall_floor must be in [0, 1], got {self.recall_floor}")
+        if self.net_deficit_min is not None and self.net_deficit_min < 1:
+            raise ValueError(
+                f"net_deficit_min must be None or >= 1, got {self.net_deficit_min}"
+            )
 
 
 DEFAULT_THRESHOLDS = VerifyThresholds()
@@ -146,6 +180,10 @@ def _align(
                     flagged=(
                         s_words >= th.min_span_words
                         and t_words <= th.max_span_ratio * s_words
+                    )
+                    or (
+                        th.net_deficit_min is not None
+                        and s_words - t_words >= th.net_deficit_min
                     ),
                     excerpt=" ".join(script[prev_a : min(a, prev_a + _EXCERPT_TOKENS)]),
                 )
@@ -278,6 +316,7 @@ class AsrInfo:
     output_tokens: int | None
     thinking_tokens: int | None
     transcript_chars: int
+    policy: str | None = None  # the transcriber's ASR policy; None = unknown
 
 
 @dataclass(frozen=True)
@@ -301,7 +340,11 @@ class Verdict:
 
 
 def _unavailable(
-    reason: str, detail: str, th: VerifyThresholds, asr: AsrInfo | None
+    reason: str,
+    detail: str,
+    th: VerifyThresholds,
+    asr: AsrInfo | None,
+    policy: str = VERIFIER_POLICY,
 ) -> Verdict:
     return Verdict(
         "unavailable",
@@ -311,7 +354,7 @@ def _unavailable(
         asr,
         th,
         VERIFIER_VERSION,
-        VERIFIER_POLICY,
+        policy,
         "chunk",
     )
 
@@ -328,11 +371,20 @@ def verify_audio(
 
     Only ``TranscriptionUnavailable`` becomes "unavailable"; any other
     exception from the transcriber is a bug and propagates.
+
+    The verdict's ``verifier_policy`` names the ASR policy actually used: the
+    transcription's own, else the transcriber's ``policy`` attribute, else the
+    production default ``ASR_POLICY``.
     """
+    declared = getattr(transcriber, "policy", None)
+    fallback_policy = declared if isinstance(declared, str) and declared else ASR_POLICY
     try:
         tr = transcriber(audio, mime_type)
     except TranscriptionUnavailable as exc:
-        return _unavailable(exc.reason, str(exc), thresholds, None)
+        return _unavailable(
+            exc.reason, str(exc), thresholds, None, verifier_policy(fallback_policy)
+        )
+    policy = verifier_policy(tr.policy or fallback_policy)
     info = AsrInfo(
         model=tr.model,
         prompt_version=tr.prompt_version,
@@ -342,10 +394,11 @@ def verify_audio(
         output_tokens=tr.output_tokens,
         thinking_tokens=tr.thinking_tokens,
         transcript_chars=len(tr.text),
+        policy=tr.policy,
     )
     if not normalize_tokens(tr.text):
         return _unavailable(
-            "asr_empty", "transcript has no word tokens", thresholds, info
+            "asr_empty", "transcript has no word tokens", thresholds, info, policy
         )
     a = analyze(script_text, tr.text, thresholds)
     return Verdict(
@@ -356,6 +409,6 @@ def verify_audio(
         info,
         thresholds,
         VERIFIER_VERSION,
-        VERIFIER_POLICY,
+        policy,
         "chunk",
     )

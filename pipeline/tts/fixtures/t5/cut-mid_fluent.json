@@ -1,0 +1,45 @@
+{
+ "fixture": "t5-cut",
+ "about": "A real DEV cut: audio removed by construction from a faithful Gemini render, then transcribed by Gemini (policy thinking-low). Under the calibrated defaults (verifier v2) the verifier must flag a span over every removed interval.",
+ "script": "Mowshowitz is skeptical of the sandbagging checks. On one sabotage evaluation, the model recognized the test and declined the hidden side task more than eighty percent of the time, and when it did succeed, it told the user what it had done in about a third of cases. He reads the refusals themselves as a form of sandbagging. He does see one piece of good news. Unlike OpenAI's Astra, Opus five point five is easy to monitor and has very little ability to control its own chain of thought. He takes that as a sign that monitorable frontier AI is still possible, and that if OpenAI is losing that property, it is because of choices OpenAI made. His bottom line: it looks like a smaller version of Fable five point one, and probably should be your new default model.\n\nAlso on Wednesday, the lab heads went to the UN Security Council. Semafor's Ashley Gold reports that they named concentration of power as a key risk. Sam Altman said no one person, company, or country should be able to use the most powerful models to impose its worldview on everyone else. Dario Amodei warned that if managed poorly, AI could be a risk to humanity as a whole. And the CEO of Hugging Face, the company hacked by rogue OpenAI agents, warned about the asymmetry of powerful AI leaving the world exposed to the capabilities of big AI companies. Their calls for global safeguards and a slowdown sharply contradict President Trump, who has dismissed AI's existential risks as a hoax.\n\nTo markets. The ten-year Treasury yield hit a new nineteen-year high Wednesday, Semafor's Brendan Ruberry reports. Manufacturing data showed what one economist called the greatest recorded increase since early twenty fifteen, and input costs, mostly fuel and transportation, rose at the fastest pace in four years. Oil ticked higher on inflation fears. The odds of another rate hike at next month's Fed meeting approached seventy percent after a Fed governor said more tightening would be needed.",
+ "transcript": "Moszkowicz is skeptical of the sandbagging checks. On one sabotage evaluation, the model recognized the test and declined the hidden side task more than 80% of the time. And when it did succeed, it told the user what it had done in about a third of cases. He reads the refusals themselves as a form of sandbagging. He does see one piece of good news. Unlike OpenAI's Astra, Opus 5.5 is easy to monitor and has very little ability to control its own chain of thought. He takes that as a sign that monitorable frontier AI is still possible and that if OpenAI is losing that property, it is because of choices OpenAI made. His bottom line: It looks like a smaller version of Fable 5.1 and probably should be your new default model. Also, on Wednesday, the lab heads went to the UN Security Council. Semafor's Ashley Gold reports that they named concentration of power as a key risk. Sam Altman said, \"No one person, company, or country should be able to use the most powerful models to impose its world view on everyone else.\" Dario Amodei warned that if managed poorly, AI could be a risk to humanity as a whole. And the CEO of Hugging Face, the company hacked by rogue OpenAI agents, warned about the asymmetry of powerful AI leaving the world exposed to the capabilities of big AI companies. Their calls for global safeguards and a slowdown sharply contradict President Trump, who has dismissed AI's existential risks as a hoax. To markets. The 10-year Treasury yield hit a new 19-year high Wednesday, Semafor's Brendan Ruberry reports. Manufacturing data rose at the fastest pace in four years. Oil ticked higher on inflation fears. The odds of another rate hike at next month's Fed meeting approached 70% after a Fed governor said more tightening would be needed.",
+ "cut": {
+  "cut_id": "rundown-2026-09-24--c2--lite--Charon--mid_fluent-20",
+  "family": "mid_fluent",
+  "size_bin": 20,
+  "split": "dev",
+  "feed": "rundown",
+  "model": "lite",
+  "voice": "Charon",
+  "label_status": "exact",
+  "label": {
+   "nominal_tokens": 20,
+   "lower_tokens": 20,
+   "upper_tokens": 20,
+   "boundary_error": 0
+  },
+  "intervals": [
+   {
+    "script_start": 279,
+    "script_end": 299,
+    "tokens": 20,
+    "removed_text": "showed what one economist called the greatest recorded increase since early twenty fifteen, and input costs, mostly fuel and transportation,"
+   }
+  ]
+ },
+ "provenance": {
+  "source_root": "/persist/my-podcasts/tts-eval/t5",
+  "set": "main",
+  "chunk": "bases/rundown-2026-09-24--c2--lite--Charon/chunk.txt",
+  "chunk_sha256": "1ec082839cdac07a8ded68b035d783f1b9be3630e42862e2da5c318b493583de",
+  "transcript": "cuts/rundown-2026-09-24--c2--lite--Charon--mid_fluent-20/asr/low-0.json",
+  "audio": "cuts/rundown-2026-09-24--c2--lite--Charon--mid_fluent-20/cut.wav",
+  "audio_sha256": "7acb300860dfde78b71f3a39e40a4b5b3b92c7c7ef49bb2a9645fcbb10294fd0",
+  "asr_policy": "gemini-3.8-flash|prompt-v1|temp0|thinking-low",
+  "cuts_file": "cuts.json",
+  "cuts_sha256": "1fa995aa4d6d195d0895005e0904403889e62a45081775e417ac3b5cc23de61f",
+  "verified_file": "cuts-verified.json",
+  "verified_sha256": "fa28d439bbf8349458cea5d41f168be4f532c664373c441b0413cb63fc8784c3",
+  "corpus_sha256": "22df3625862c41de1382ecb5ef85fbd5cb813bc577fd7527b461f48cf2741934"
+ }
+}

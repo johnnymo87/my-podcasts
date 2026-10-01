@@ -1,0 +1,45 @@
+{
+ "fixture": "t5-cut",
+ "about": "A real DEV cut: audio removed by construction from a faithful Gemini render, then transcribed by Gemini (policy thinking-low). Under the calibrated defaults (verifier v2) the verifier must flag a span over every removed interval.",
+ "script": "Good morning. It is Thursday, September twenty-fourth, twenty twenty-six. This is your daily foreign policy briefing. The day after President Trump threatened Iran from the General Assembly podium, Iran's president gave his answer from the same podium, and another ship was hit in the Strait of Hormuz.\n\nAt least one Indian seafarer was killed on Wednesday when a commercial ship was attacked in the strait. Antiwar dot com relays AFP's report, which cites statements from Oman and India. Oman's Maritime Security Center said the Cape Dao, a bulk carrier flying the flag of Antigua and Barbuda, was hit about two and a half nautical miles off the Musandam Governorate, Oman's exclave on the strait. The attack started a fire in the engine room and killed one crew member. Oman's navy helped evacuate twenty-seven crew. India's Foreign Ministry confirmed that one Indian national had died and strongly condemned the attack. It said the targeting of commercial shipping, seafarers and civilian infrastructure in the region must end, and that free navigation must be restored at the earliest.\n\nSeveral Indian mariners have been killed in the region since the war began on February twenty-eighth. Three of them died in a June American bombing of a commercial ship that the US military said was trying to run the blockade of Iranian ports. Iran is suspected in Wednesday's attack but has not claimed it. Antiwar notes that several commercial ships have been hit in the strait this week and that Washington has said nothing about it. In Antiwar's reading, the administration appears to be backing away from its earlier policy of bombing Iranian tankers in response to attacks on shipping.\n\nAt the General Assembly, Iranian President Masoud Pezeshkian began his speech by holding up photographs. You see these children? he said. These children perished under bombs, with weapons used by the United States and Israel. They were innocent. The photos showed children killed when an American strike hit an elementary school in Minab, in southern Iran, on the first day of the war. He also held up pictures of a sports hall in the city of Lamerd that was hit the same day. According to multiple investigations cited by Antiwar, the hall was likely struck by a Precision Strike Missile, a new weapon that scatters small pellets far beyond the blast site. Twenty-one civilians died there, seven of them children.",
+ "transcript": "Good morning. It is Thursday, September 24th, 2026. This is your daily Foreign Policy Briefing. The day after President Trump threatened Iran from the General Assembly podium, Iran's president gave his answer from the same podium and another ship was hit in the Strait of Hormuz. At least 1 Indian seafarer was killed on Wednesday when a commercial ship was attacked in the strait. Antiwar.com relays AFP's report, which cites statements from Oman and India. Oman's Maritime Security Center said the Cape Dau, a bulk carrier flying the flag of Antigua and Barbuda, was hit about 2 and 1/2 nautical miles off the Musandam Governorate, Oman's exclave on the strait. The attack started a fire in the engine room and killed 1 crew member. Oman's navy helped evacuate 27 crew. India's foreign ministry confirmed that 1 Indian national had died and strongly condemned the attack. It said the targeting of commercial shipping, seafarers, and civilian infrastructure in the region must end and that free navigation must be restored at the earliest. Several Indian mariners have been killed in the region since the war began on February 28th. 3 of them died in a June American bombing of a commercial ship that the US military said was trying to run the blockade of Iranian ports. Iran is suspected in Wednesday's attack, but has not claimed it. Antiwar notes that several commercial ships have been hit in the strait this week and that Washington has said nothing about it. In Antiwar's reading, the administration appears to be backing away from its earlier policy of bombing Iranian tankers in response to attacks on shipping. At the General Assembly, Iranian President Masoud Pezeshkian began his speech by holding up photographs. \"You see these children?\" he said. \"These children perished under bombs with weapons used by the United States and Israel. They were innocent.\" The photos showed children killed when an American strike hit an elementary school in Minab, in southern Iran, on the first day of the war. He also held up pictures of a sports hall in the city of Lamerd that was hit the same day. According to multiple investigations cited by Antiwar, the hall was likely struck by a precision strike missile, a new weapon that scatters small pellets far beyond the blast site.",
+ "cut": {
+  "cut_id": "fp-2026-09-24--c0--lite--Charon--sentence-10",
+  "family": "sentence",
+  "size_bin": 10,
+  "split": "dev",
+  "feed": "fp",
+  "model": "lite",
+  "voice": "Charon",
+  "label_status": "exact",
+  "label": {
+   "nominal_tokens": 9,
+   "lower_tokens": 9,
+   "upper_tokens": 9,
+   "boundary_error": 0
+  },
+  "intervals": [
+   {
+    "script_start": 391,
+    "script_end": 400,
+    "tokens": 9,
+    "removed_text": "Twenty-one civilians died there, seven of them children."
+   }
+  ]
+ },
+ "provenance": {
+  "source_root": "/persist/my-podcasts/tts-eval/t5",
+  "set": "main",
+  "chunk": "bases/fp-2026-09-24--c0--lite--Charon/chunk.txt",
+  "chunk_sha256": "45e31be51223970e8955dc764ddda8538b9039304545799b73975e67b6725f2a",
+  "transcript": "cuts/fp-2026-09-24--c0--lite--Charon--sentence-10/asr/low-0.json",
+  "audio": "cuts/fp-2026-09-24--c0--lite--Charon--sentence-10/cut.wav",
+  "audio_sha256": "94355d55ba5bd00a557b108a77a67034421d58fa9c39eaec6c638aad24c42908",
+  "asr_policy": "gemini-3.8-flash|prompt-v1|temp0|thinking-low",
+  "cuts_file": "cuts.json",
+  "cuts_sha256": "1fa995aa4d6d195d0895005e0904403889e62a45081775e417ac3b5cc23de61f",
+  "verified_file": "cuts-verified.json",
+  "verified_sha256": "fa28d439bbf8349458cea5d41f168be4f532c664373c441b0413cb63fc8784c3",
+  "corpus_sha256": "22df3625862c41de1382ecb5ef85fbd5cb813bc577fd7527b461f48cf2741934"
+ }
+}

@@ -1578,3 +1578,11 @@ def test_an_unwritable_input_is_spawn_failed_and_nothing_is_spawned(
     assert (outcome.ok, outcome.reason) == (False, gp.REASON_SPAWN_FAILED)
     assert "disk full" in outcome.detail
     assert list(roots.iterdir()) == []  # the scratch dir was still cleaned up
+
+
+def test_default_transcriber_factory_uses_the_production_thinking_setting():
+    from pipeline.tts import asr
+
+    t = gp._default_make_transcriber(30.0)
+    assert t.thinking == "low" and t.timeout_s == 30.0
+    assert t.policy == asr.ASR_POLICY
