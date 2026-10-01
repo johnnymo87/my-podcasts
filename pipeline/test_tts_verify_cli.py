@@ -461,6 +461,7 @@ def test_threshold_overrides_are_applied_and_echoed(
         "max_span_ratio": 0.25,
         "recall_floor": 0.9,
         "net_deficit_min": 6,  # not overridden: the calibrated default
+        "recall_min_tokens": 300,
     }
 
 
@@ -480,8 +481,9 @@ def test_defaults_echo_the_calibrated_thresholds(
         "max_span_ratio": 0.5,
         "recall_floor": 0.95,
         "net_deficit_min": 6,
+        "recall_min_tokens": 300,
     }
-    assert report_of(result)["verifier_version"] == "2"
+    assert report_of(result)["verifier_version"] == "3"
 
 
 def _net_deficit_run(tmp_path, script_file, audio_file, value):
@@ -926,3 +928,44 @@ def test_token_empty_segment_makes_the_run_unavailable(
     assert report["reasons"] == ["asr_empty"]
     assert "segment 2 of 3" in report["detail"]
     assert len(fake.mimes) == 2  # stopped at the bad segment
+
+
+def test_recall_min_tokens_override_is_echoed_and_changes_the_verdict(
+    tmp_path, audio_file, no_asr
+):
+    # A short sign-off (34 tokens) heard with two substituted words: padded
+    # recall passes it, the v2 rule (--recall-min-tokens 1) calls it an omission.
+    tail = (
+        "Thanks for listening, everyone. This show is produced by Margaret "
+        "Whitfield and edited by Tobias Okonkwo. We will be back tomorrow with "
+        "more news, so please subscribe and tell a friend about it today."
+    )
+    script = tmp_path / "tail.txt"
+    script.write_text(tail)
+    transcript = tmp_path / "tail-heard.txt"
+    transcript.write_text(
+        tail.replace("Whitfield", "Whitfeld").replace("Okonkwo", "Okonko")
+    )
+    base = ["--audio", str(audio_file), "--script", str(script),
+            "--transcript", str(transcript)]  # fmt: skip
+
+    default = run(base)
+    assert default.exit_code == 0, default.output
+    assert report_of(default)["thresholds"]["recall_min_tokens"] == 300
+
+    v2 = run([*base, "--recall-min-tokens", "1"])
+    assert v2.exit_code == 1, v2.output
+    assert report_of(v2)["thresholds"]["recall_min_tokens"] == 1
+
+
+def test_recall_min_tokens_override_rejects_bad_values(
+    tmp_path, script_file, audio_file, no_asr
+):
+    transcript = tmp_path / "t.txt"
+    transcript.write_text(as_asr(SCRIPT))
+    result = run(
+        ["--audio", str(audio_file), "--script", str(script_file),
+         "--transcript", str(transcript), "--recall-min-tokens", "0"]
+    )  # fmt: skip
+    assert result.exit_code == 2
+    assert "recall_min_tokens" in result.output

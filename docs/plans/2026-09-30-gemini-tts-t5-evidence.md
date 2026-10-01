@@ -11,7 +11,12 @@ Raw artifacts (audio, transcripts, labels, ledger, reports):
 | Span rule | `>= 12` script tokens and transcript side `<= 0.5x` | unchanged, **plus** any span with `net_missing >= 6` |
 | Recall floor | 0.85 | **0.95** |
 | ASR thinking | model default (`thinking-default`) | **`thinking_level=LOW`** (`thinking-low`) |
-| `VERIFIER_POLICY` | `verifier-v1|gemini-3.8-flash|prompt-v1|temp0|thinking-default` | `verifier-v2|gemini-3.8-flash|prompt-v1|temp0|thinking-low` |
+| Recall floor on chunks < 300 tokens (v3, 2026-10-01) | same fraction as above | absolute bound: more than 15 unmatched tokens fails (`recall_min_tokens=300`); chunks of 300+ tokens unchanged |
+| `VERIFIER_POLICY` | `verifier-v1|gemini-3.8-flash|prompt-v1|temp0|thinking-default` | `verifier-v2|gemini-3.8-flash|prompt-v1|temp0|thinking-low` (current: `verifier-v3|gemini-3.8-flash|prompt-v1|temp0|thinking-low`) |
+
+The hold-out claim below was made under v2. Verifier v3 (see "Short tail chunks") changes only chunks
+under `recall_min_tokens` (300) tokens and leaves every T5 verdict unchanged (284 stored records, 0
+differences).
 
 **The claim, in the only form the evidence supports:** on a source-disjoint hold-out (6 episodes,
 2 each of Rundown, FP Digest and Levine), the frozen policy caught and localized **all 39 labeled
@@ -120,6 +125,102 @@ repetitive passages. Flash-Lite did not skip this chunk in the corpus.
 
 One run each: feasibility, not tail latency.
 
+## Short tail chunks (verifier v3, bead `my-podcasts-9p3.14`)
+
+**Why v3.** v2's recall floor is a fraction (0.95) that was never calibrated below 300 tokens: T5
+sampled chunks 0 and n//2 only, and the shortest was 306 tokens. On a short chunk a fraction is an
+absolute bound of only a few tokens (two mismatched names fail a 34-token sign-off). The smallest
+absolute bound that does not fire on clean audio is about 14-15 unmatched tokens: the worst clean
+window had 8-13 unmatched at 47-299 tokens, so e.g. `recall_min_tokens=150` (bound >7) or "unmatched
+>= 8 AND recall < 0.95" would fire on clean audio. That bound is v3. What v3 gives up (scattered loss
+of 15 or fewer tokens in a chunk under 300 tokens) is outside the claimed scope: v2 already let
+15-30 scattered tokens through on 300-600-token chunks, and in T5 the recall floor was never the
+only detector of a cut. Verifier v3 therefore pads the floor.
+
+**Scope.** v3 changes any chunk under 300 tokens, not only tails: in the Rundown/FP archive 197 of
+1,456 chunks (about 14%) are under 300 tokens, 156 tails plus 41 non-final chunks of 141-299 tokens.
+
+Raw numbers: `/persist/my-podcasts/tts-eval/tail-recall/` (`notes/EVIDENCE.md`; `tails.json`,
+`texts/`, `renders/`, `ledger.jsonl`, `reports/tails.{json,txt}`, `clips/`). Code: `36e1316`,
+`081ffb5`, `4211cb9`.
+
+**The rule.** Fail when `(padded - unmatched) / padded < recall_floor`, `padded = max(n, recall_min_tokens)`,
+`recall_min_tokens=300`. For n >= 300 it is the same float expression as v2 (`matched / n`); below
+300 it is an absolute bound: more than 15 unmatched tokens fails. `Analysis.recall` stays true recall;
+`recall_min_tokens=1` reproduces v2. Span rules are untouched.
+
+**T5 replay is identical.** 284 stored T5 Gemini ASR records (252 low, 32 default; bases, cuts, Levine
+repro): 0 verdict differences (status, reasons, recall, flagged spans) between v3 and
+`recall_min_tokens=1`. The regenerated reports (`dev-low-v3`, `holdout-low-v3`) are identical to
+`dev-low` / `holdout-low` apart from the thresholds and policy strings. So the hold-out claim above,
+made under v2, still holds under v3.
+
+**Windowed replay** (46 faithful T5 bases, 92 low runs; the whole chunk aligned once, every W-token
+window at stride 1):
+
+| W | windows | v2 fires | v3 fires | max unmatched |
+|---|---|---|---|---|
+| 11 | 38672 | 2667 (6.90%) | 0 | 5 |
+| 21 | 37752 | 1282 (3.40%) | 0 | 6 |
+| 34 | 36556 | 2184 (5.97%) | 0 | 7 |
+| 47 | 35360 | 1104 (3.12%) | 0 | 8 |
+| 70 | 33244 | 974 (2.93%) | 0 | 10 |
+| 100 | 30484 | 414 (1.36%) | 0 | 10 |
+| 150 | 25884 | 495 (1.91%) | 0 | 12 |
+| 200 | 21284 | 201 (0.94%) | 0 | 13 |
+| 250 | 16684 | 53 (0.32%) | 0 | 13 |
+| 299 | 12176 | 0 | 0 | 13 |
+
+Margin: at most 13 unmatched in any clean window of 11-299 tokens, against the v3 bound of 15.
+
+**Real tails, paid.** 18 real tail chunks (the last `chunk_text` chunk, 11-198 tokens: FP, Rundown,
+and Levine's 34-token sign-off), frozen in `tails.json` before any paid call; 78 renders (Flash and
+Flash-Lite, 2 repeats each, Levine sign-off 5 per model, Kore/Charon by index, style `calm, measured
+news anchor`), 156 Gemini ASR runs (`thinking-low`).
+
+- 0 unavailable; **0 v2 fires, 0 v3 fires**; max span `net_missing` 1; at most 4 unmatched tokens.
+- First and last 3 script tokens matched in all 156 runs: no edge clipping.
+- Lowest recall 0.952: FP 2026-07-09 (21 tokens), 1 mismatched token, 6 of its 8 runs. Under v2 a
+  second mismatch fails that chunk, and on a tail under 20 tokens a single mismatch does.
+
+**Whisper cross-check** (independent, OpenAI `whisper-1`, all 78 renders): would fire v2 on 25, v3 on 4.
+The 4 v3 fires are all FP 2026-09-24 renders (both models): a 13-token quote ("we are concerned that
+the coming winter will be more difficult to endure") that whisper dropped after "said,". All 8 Gemini
+runs heard it. Whisper's word timings leave a 3.6-4.8 s gap exactly there, and the audio in that gap
+is speech (RMS 0.80-1.01 of the file's RMS, 64-88% voiced 50 ms frames;
+`notes/fp-0924-gap-energy.txt`; clip for the ear:
+`clips/fp-2026-09-24--flash--Charon--r0--50-61s.mp3`). Whisper's 6 edge misses are spelling
+(That's/That is, Semaphore, Sen.), not clipped audio.
+
+**Honest reading.** The windowed replay over-predicts v2 fires on real tails. A rough Poisson
+estimate from the windowed rates predicts about 4-5 v2 fires over the 156 tail runs; none were
+observed (0 of 156; P(0) about 1%; correlated sample, one-sided 95% bound for independent runs about
+1.9%), likely because tails are formulaic sign-offs and recaps while the windows are mid-episode
+prose. So no production-ASR false alarm on a real tail has been seen. v3 rests on the argument in
+"Why v3" (v2's fraction was never calibrated below 300 tokens, and a clean 1-7% of windows fire it),
+the one-token margin on short tails, and the noisier ASR (whisper) tripping v2 on 25 of 78 faithful
+renders.
+
+**What v3 gives up** (text simulation, k separated deletions, 10 seeds per tail):
+
+- In chunks under 300 tokens, scattered losses totaling 15 tokens or fewer are no longer caught by
+  recall. 2 x 4-token deletions in a 70-100-token tail: v2 40/40, v3 0/40; 3 x 3 in 100-150: v2 40/40,
+  v3 0/40.
+- 16+ scattered tokens are still caught: 4 x 4 and 4 x 5 deletions 100% under both, in every bin.
+- Contiguous omissions are unchanged: the span rules (`net_missing >= 6`, long-and-mostly-gone)
+  still fire on short chunks. A wholly dropped chunk of 6-15 tokens is still flagged (net deficit); a
+  wholly dropped chunk of 5 tokens or fewer is not (v2 flagged it). Pinned by
+  `test_a_wholly_dropped_5_token_chunk_is_not_flagged_by_v3` as a documented limit.
+
+Methodology caveats:
+
+- The windowed replay aligns the whole chunk once, then slides windows, so it cannot see edge
+  effects; the paid tails cover that (first and last 3 tokens matched in 156/156 runs).
+- The deletion simulation assumes a perfect ASR, so it is conservative about what v3 gives up (real
+  ASR noise adds unmatched tokens and makes a catch more likely).
+
+Spend: $1.211 (synth $0.690, Gemini ASR $0.236, whisper $0.286), all calls settled, budget cap $2.00.
+
 ## Open risks for the rollout (T6+)
 
 - **Flash skips on Levine-like text, often.** The detector catches it, so the cost is a re-render
@@ -127,15 +228,20 @@ One run each: feasibility, not tail latency.
 - **Gemini ASR availability:** one 503 in about 320 ASR calls; each is a whole-episode fallback.
 - **5-token-or-smaller contiguous omissions** and small scattered losses below about 5% of a chunk
   are not claimed.
-- **Short tail chunks were not sampled** (chunks 0 and n//2 only). The recall floor is a fraction,
-  so on Levine's ~34-token sign-off chunk two mismatched names fail it; windowed replay of the
-  clean transcripts puts recall below 0.95 in about 6% of 34-token windows and 3% of 70-token
-  windows. Bead `my-podcasts-9p3.14`, before T6.
+- **Short tail chunks: resolved by verifier v3** (bead `my-podcasts-9p3.14`; see "Short tail chunks").
+  Remaining limit: in a chunk under 300 tokens, scattered loss of 15 unmatched tokens or fewer is not
+  caught by recall (contiguous drops still are, by the span rules), and a wholly dropped chunk of 5
+  tokens or fewer passes.
+- **Watch item (v3 margin):** the margin is 2 tokens (worst clean window 13 unmatched vs the bound of 15; real Gemini
+  tails peaked at 4; whisper reached exactly 15 on the names-dense Levine 2026-09-29 headline list).
+  During T6 review, trend unmatched tokens on chunks under 300 (PR #29's per-attempt `matched_tokens`
+  and `max_net_missing`, merged; the fields exist now) and revisit if any faithful chunk exceeds 12.
 - **Currency normalization is asymmetric:** `$15.51` normalizes to dollars-and-cents words, but a
   transcript that drops the `$` reads "fifteen point five one", and Gemini ASR is not consistent
   about `$`. A price list can produce a false omission. Rundown/FP scripts spell numbers out
   (no `$`+digit in 132 recent Rundown scripts); Levine does not. Bead `my-podcasts-9p3.15`, before Levine flips.
-- **Production omission verdicts are not diagnosable yet:** the Gemini phase records only status,
-  reasons and recall, not the flagged span or transcript. Bead `my-podcasts-9p3.14`, before T6.
+- **Production omission verdicts are diagnosable now (resolved, bead `my-podcasts-9p3.13`, PR #29):**
+  each ASR attempt records the flagged spans, what the ASR heard, the transcript of an omission and
+  the rejected audio; see `pipeline/AGENTS.md` "Diagnosing an omission".
 - **Correlated evidence:** 12 source episodes, two voices, 3-minute chunks. Feeds with different
   text shapes (e.g. transcripts, tables) are untested.

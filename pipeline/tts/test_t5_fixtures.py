@@ -2,11 +2,15 @@
 
 Each fixture in ``fixtures/t5/`` is a script, the Gemini transcript of real audio
 under ASR policy ``thinking-low``, and the label that audio was given. These
-tests pin that the calibrated defaults (``DEFAULT_THRESHOLDS``, verifier v2)
-still flag every real cut and every natural omission and still pass faithful
-renders. They are evidence, not mocks: a change to normalization, alignment or
-the thresholds that breaks one of them needs a new look at the calibration
-(and a ``VERIFIER_VERSION`` bump), not a fixture edit.
+tests pin that the calibrated defaults (``DEFAULT_THRESHOLDS``) still flag
+every real cut and every natural omission and still pass faithful renders. They
+are evidence, not mocks: a change to normalization, alignment or the thresholds
+that breaks one of them needs a new look at the calibration (and a
+``VERIFIER_VERSION`` bump), not a fixture edit.
+
+The fixtures were captured as verifier v2 evidence. Verifier v3 differs from v2
+only on chunks shorter than ``recall_min_tokens`` (300) tokens, and every T5
+chunk had 306 or more, so v3 keeps every T5 verdict (pinned below).
 
 The repo is public: full-chunk fixtures use our own generated Rundown/FP
 scripts; the Levine (Bloomberg) fixtures are trimmed windows of at most 150
@@ -17,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -66,10 +71,24 @@ def test_the_fixture_set_is_exactly_what_was_curated():
     ]
 
 
-def test_fixtures_are_small_and_the_calibration_is_verifier_v2():
+def test_fixtures_are_small_and_v3_keeps_every_t5_verdict():
     for p in FIXTURES.glob("*.json"):
         assert p.stat().st_size <= MAX_FIXTURE_BYTES, p.name
-    assert VERIFIER_VERSION == "2"  # these fixtures are evidence for v2
+    assert (
+        VERIFIER_VERSION == "3"
+    )  # captured as v2 evidence; v3 changes no verdict here
+
+
+@pytest.mark.parametrize("name", sorted(p.name for p in FIXTURES.glob("*.json")))
+def test_v3_and_v2_agree_on_every_fixture(name):
+    fx = load(name)
+    v3 = analyze(fx["script"], fx["transcript"], DEFAULT_THRESHOLDS)
+    v2 = analyze(
+        fx["script"],
+        fx["transcript"],
+        replace(DEFAULT_THRESHOLDS, recall_min_tokens=1),
+    )
+    assert (v3.status, v3.reasons) == (v2.status, v2.reasons)
 
 
 @pytest.mark.parametrize("name", [*CUT_FILES, *FAITHFUL_FILES, *LEVINE_FILES])

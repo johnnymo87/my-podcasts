@@ -11,6 +11,7 @@ from pipeline.tts.verify import (
     VERIFIER_POLICY,
     VERIFIER_VERSION,
     VerifyThresholds,
+    _recall_fails,
     analyze,
     project_chunks,
     verify_audio,
@@ -133,6 +134,105 @@ def test_thresholds_validate(kwargs):
         VerifyThresholds(**kwargs)
 
 
+TAIL = (
+    "Thanks for listening, everyone. This show is produced by Margaret Whitfield "
+    "and edited by Tobias Okonkwo. We will be back tomorrow with more news, so "
+    "please subscribe and tell a friend about it today."
+)
+V2 = replace(DEFAULT_THRESHOLDS, recall_min_tokens=1)
+
+
+def _misheard(text: str) -> str:
+    # two non-adjacent substituted words, nothing dropped
+    return text.replace("Whitfield", "Whitfeld").replace("Okonkwo", "Okonko")
+
+
+def test_recall_min_tokens_defaults_to_300_and_is_validated():
+    assert DEFAULT_THRESHOLDS.recall_min_tokens == 300
+    for bad in (0, -1):
+        with pytest.raises(
+            ValueError, match=f"recall_min_tokens must be >= 1, got {bad}"
+        ):
+            VerifyThresholds(recall_min_tokens=bad)
+
+
+def test_long_chunks_keep_the_v2_rule_exactly():
+    for n in range(300, 1201):
+        for m in range(n + 1):
+            assert _recall_fails(m, n, DEFAULT_THRESHOLDS) == (m / n < 0.95), (m, n)
+
+
+def test_recall_min_tokens_1_is_the_v2_rule_for_every_length():
+    for n in range(1, 401):
+        for m in range(n + 1):
+            assert _recall_fails(m, n, V2) == (m / n < 0.95), (m, n)
+
+
+@pytest.mark.parametrize("total", [11, 34, 70, 150, 299])
+def test_short_chunk_bound_is_15_unmatched_tokens(total):
+    # 15 unmatched passes (a wholly missing 11-token chunk is the span rule's job)
+    assert not _recall_fails(total - min(15, total), total, DEFAULT_THRESHOLDS)
+    if total >= 16:
+        assert _recall_fails(total - 16, total, DEFAULT_THRESHOLDS)
+
+
+def test_recall_fails_is_false_for_an_empty_chunk():
+    assert not _recall_fails(0, 0, DEFAULT_THRESHOLDS)
+
+
+def test_short_signoff_with_two_misheard_names_passes():
+    n = len(normalize_tokens(TAIL))
+    assert n == 34
+    heard = _misheard(TAIL)
+    a = analyze(TAIL, heard)
+    assert a.status == "pass" and a.reasons == ("ok",)
+    # recall is still reported truthfully
+    assert a.recall == a.matched_tokens / a.script_tokens
+    assert a.matched_tokens == n - 2 and a.recall < 0.95
+    old = analyze(TAIL, heard, V2)
+    assert old.status == "omission" and old.reasons == ("recall_below_floor",)
+
+
+def test_a_wholly_dropped_5_token_chunk_is_not_flagged_by_v3():
+    # A documented limit, not desired behavior: below 16 tokens the padded
+    # recall rule cannot fire, and 5 tokens is under the span rule's floor.
+    script = "Thanks again, see you soon."
+    assert len(normalize_tokens(script)) == 5
+    a = analyze(script, "unrelated")
+    assert a.status == "pass" and a.reasons == ("ok",)
+    old = analyze(script, "unrelated", V2)
+    assert old.status == "omission" and old.reasons == ("recall_below_floor",)
+
+
+def test_short_chunk_contiguous_drop_is_still_flagged_by_the_span_rule():
+    script = " ".join(SCRIPT.split()[:70])
+    assert len(normalize_tokens(script)) >= 60
+    a = analyze(script, drop_words(script, 30, 8))
+    assert a.status == "omission" and "long_unmatched_span" in a.reasons
+    short = "Alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo."
+    assert len(normalize_tokens(short)) == 11
+    for heard in ("", "unrelated"):
+        b = analyze(short, heard)
+        assert b.status == "omission" and "long_unmatched_span" in b.reasons
+        assert "recall_below_floor" not in b.reasons
+
+
+def test_project_chunks_uses_padded_recall_per_chunk():
+    chunks = [SCRIPT, TAIL]
+    transcript = as_asr(SCRIPT) + " " + _misheard(TAIL)
+    whole, per_chunk = project_chunks(chunks, transcript)
+    assert whole.status == "pass" and whole.reasons == ("ok",)
+    tail = per_chunk[1]
+    assert tail.status == "pass"
+    assert tail.recall == tail.matched_tokens / tail.script_tokens
+    assert tail.matched_tokens == tail.script_tokens - 2
+    whole_v2, per_v2 = project_chunks(chunks, transcript, V2)
+    assert per_v2[1].status == "omission"
+    assert whole_v2.status == "omission"
+    assert whole_v2.reasons == ("chunk_recall_below_floor",)
+    assert per_v2[1].recall == tail.recall
+
+
 def test_project_chunks_localizes_the_omission():
     chunks = [PARAS[0] + "\n\n" + PARAS[1], "\n\n".join(PARAS[2:])]
     transcript = as_asr(chunks[0]) + " " + drop_words(as_asr(chunks[1]), 50, 40)
@@ -189,8 +289,13 @@ def test_chunk_failure_with_passing_whole_uses_chunk_reason():
     small = "Alpha bravo charlie delta echo foxtrot golf hotel india juliet."
     chunks.insert(1, small)
     transcript = " ".join(as_asr(c) for c in chunks if c != small)
+    # recall_min_tokens=1: this pins the chunk-reason plumbing, not the padding
     th = replace(
-        DEFAULT_THRESHOLDS, recall_floor=0.85, min_span_words=50, net_deficit_min=None
+        DEFAULT_THRESHOLDS,
+        recall_floor=0.85,
+        min_span_words=50,
+        net_deficit_min=None,
+        recall_min_tokens=1,
     )
     whole, per_chunk = project_chunks(chunks, transcript, th)
     assert per_chunk[1].status == "omission"
@@ -339,7 +444,7 @@ def test_a_plain_skip_is_flagged_with_or_without_the_net_deficit_rule():
     off = analyze(SCRIPT, skipped, replace(DEFAULT_THRESHOLDS, net_deficit_min=None))
     assert on.status == off.status == "omission"
     assert on.spans == off.spans and on.reasons == off.reasons
-    assert VERIFIER_VERSION == "2"
+    assert VERIFIER_VERSION == "3"
 
 
 def test_calibrated_defaults_are_frozen():
@@ -349,6 +454,7 @@ def test_calibrated_defaults_are_frozen():
         max_span_ratio=0.5,
         net_deficit_min=6,
         recall_floor=0.95,
+        recall_min_tokens=300,
     )
 
 
@@ -396,9 +502,9 @@ def test_production_policy_strings_are_pinned():
 
     assert asr.ASR_POLICY == "gemini-3.8-flash|prompt-v1|temp0|thinking-low"
     assert asr.ASR_POLICY == asr.policy_for()
-    assert VERIFIER_POLICY == f"verifier-v2|{asr.ASR_POLICY}"
+    assert VERIFIER_POLICY == f"verifier-v3|{asr.ASR_POLICY}"
     assert VERIFIER_POLICY == (
-        "verifier-v2|gemini-3.8-flash|prompt-v1|temp0|thinking-low"
+        "verifier-v3|gemini-3.8-flash|prompt-v1|temp0|thinking-low"
     )
 
 
