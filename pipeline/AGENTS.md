@@ -95,6 +95,16 @@ A Gemini primary renders through `pipeline/tts/gemini_phase.py`; **no feed uses 
 - **The episode reaches the child as a file.** The parent writes `input.json` (chunks and the Gemini leaf) into the scratch dir before starting the child, and `Process.start()` carries only a few hundred bytes. (Through the spawn pipe, a child that stopped reading would have blocked the parent inside `start()`, past the deadline.) The child validates the file; unusable input is a `child_error`.
 - **Tests.** `test_gemini_phase.py` (in-process child and runner), `test_gemini_phase_spawn.py` (real spawn: blocked synth/ASR killed at the deadline, early fatal, parent death, `KeyboardInterrupt`; about 30 s), `test_render_gemini.py` (wiring, with canned `PhaseOutcome`s).
 
+### Audition (T4)
+
+`python -m pipeline tts-audition` renders one script through the feed's current OpenAI voice (the baseline) and every requested Gemini model x voice, into local mp3s, so the owner can compare by ear. Logic: `pipeline/tts/audition.py`; the CLI is a thin wrapper.
+
+- **Local only.** No publish option; nothing touches R2, the DB, feeds, the render cache or alerts (`audition.py` imports only `pipeline.tts.*`, pinned by a test). Uploading a set for someone to listen to is a manual step.
+- **A failure is never substituted.** Gemini variants render with no OpenAI fallback, so a Gemini problem is a `FAILED` line (exit 1), not a silent OpenAI file. Files are named `<feed>--<provider>--<model>--<voice>.mp3` from what `render_episode` reports it rendered; a failed variant leaves no mp3.
+- **Outputs** in `--out-dir`: the mp3s, `script.txt` (the exact text rendered, after any `--max-chars` cut), `manifests/` (the normal per-attempt manifests) and `summary.json` (rewritten after every variant; per variant: requested/rendered config, status, error, audio seconds, wall seconds, per-chunk verify verdicts and recall, token totals). `summary.json` has `complete: false` (plus the `planned` variants) until the last variant finishes, so an interrupted run is recognizable. `--out-dir` must not exist: the run creates it with one atomic `mkdir`, and an existing directory (even an empty one) is refused. There is no `--force` and no in-place rerun, so every file in a directory comes from one run, and two concurrent runs into one path cannot both proceed. Exit codes: 0 all ok, 1 a variant FAILED, 2 usage error/refusal, 4 unexpected crash.
+- **Example:** `uv run python -m pipeline tts-audition --feed the-rundown --script script.txt --voices Kore,Puck --models gemini-3.8-flash-lite-tts --max-chars 3000 --out-dir /persist/my-podcasts/tts-eval/t4/run1` (`--no-openai` skips the baseline; `--style ""` renders with no style prompt; default style `calm, measured news anchor`).
+- **Cost.** Needs `GEMINI_API_KEY` (and `OPENAI_API_KEY` for the baseline); a missing one is a usage error before anything renders. Gemini variants also run per-chunk ASR verification, exactly as production would: roughly $1/hour of Flash audio and $0.7/hour of Flash-Lite synthesis, plus ASR.
+
 ## How To Read Job State
 
 - `status='pending'`

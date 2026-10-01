@@ -191,6 +191,19 @@ The inline text above stays; where it disagrees with these, these win.
   `verification=not_run_openai`, `fallback_reason=<reason>`; a replay returns it (with the stored
   `fallback_reason` on `RenderResult`) without running the phase or alerting again.
 
+#### Amendments (T4 implementation, 2026-09-30)
+
+- **`tts-audition` is local-only and cannot be fooled by a fallback.** It renders through the
+  production `render_episode` with `cache_dir=None`, `notify_fallback=False` and no OpenAI fallback
+  on Gemini variants, so a failed Gemini variant is reported FAILED rather than replaced by the voice
+  it is being compared against. Each mp3 is named from `RenderResult.rendered`, not from what was
+  requested. The default style is `calm, measured news anchor` (the style the owner liked; bead `my-podcasts-9p3.6`).
+  `--style ""` means none. `--max-chars` only ever cuts at a paragraph boundary
+  (a script with none that early is refused), and the exact rendered text is saved as `script.txt`.
+  `--out-dir` must not exist: the run creates it with one atomic `mkdir` (there is no `--force`), so
+  files in a directory always come from a single run and concurrent runs into one path are refused.
+  Plan: `docs/plans/2026-09-30-gemini-tts-t4-audition-plan.md`.
+
 ### Completed-render reuse
 
 Replaces joinery's per-chunk cache, which today prevents an R2 upload failure from re-buying audio.
