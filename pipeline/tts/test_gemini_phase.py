@@ -1586,3 +1586,287 @@ def test_default_transcriber_factory_uses_the_production_thinking_setting():
     t = gp._default_make_transcriber(30.0)
     assert t.thinking == "low" and t.timeout_s == 30.0
     assert t.policy == asr.ASR_POLICY
+
+
+# --- diagnosable verdicts: spans, counts and the transcript in the ASR record ---
+
+from pipeline.tts.normalize import normalize_tokens  # noqa: E402
+from pipeline.tts.verify import verify_audio  # noqa: E402
+
+
+_TOKENS = normalize_tokens(TEXT)
+# The ASR keeps the first 8 words, says two other words where the rest of the
+# chunk should be, and so drops len(_TOKENS) - _HEAD tokens in one contiguous
+# gap. (Normalization spells digits out, so 8 words are more than 8 tokens.)
+_HEAD = len(normalize_tokens(" ".join(TEXT.split()[:8])))
+DROPPED = " ".join(TEXT.split()[:8]) + " xray yankee"
+_DROPPED_EXCERPT = " ".join(_TOKENS[_HEAD : _HEAD + 30])
+
+
+def _asr(scratch, k=0) -> dict:
+    return _progress(scratch)["attempts"][k]["asr"]
+
+
+def test_omission_attempt_records_the_flagged_span_and_the_transcript(scratch):
+    _run(Provider([PCM, PCM]), Asr([DROPPED, TEXT]), scratch)
+    asr = _asr(scratch, 0)
+    assert asr["status"] == "omission"
+    assert asr["script_tokens"] == len(_TOKENS)
+    assert asr["transcript_tokens"] == _HEAD + 2
+    assert asr["matched_tokens"] == _HEAD
+    assert asr["max_net_missing"] >= 6
+    flagged = [s for s in asr["spans"] if s["flagged"]]
+    assert len(flagged) == 1
+    span = flagged[0]
+    assert span["excerpt"] == _DROPPED_EXCERPT
+    assert span["heard"] == "xray yankee"
+    assert (span["script_start"], span["script_end"]) == (_HEAD, len(_TOKENS))
+    assert (span["script_words"], span["transcript_words"]) == (len(_TOKENS) - _HEAD, 2)
+    assert span["net_missing"] == asr["max_net_missing"] == len(_TOKENS) - _HEAD - 2
+    assert set(span) == {
+        "script_start",
+        "script_end",
+        "script_words",
+        "transcript_words",
+        "net_missing",
+        "flagged",
+        "excerpt",
+        "heard",
+    }
+    assert asr["transcript"] == DROPPED  # the raw ASR text, verbatim
+
+
+def test_passing_attempt_records_one_span_and_no_transcript(scratch):
+    # One substituted word: a short gap, nowhere near flagged, still recorded.
+    words = TEXT.split()
+    swapped = len(normalize_tokens(words[30]))
+    words[30] = "qq"
+    _run(Provider([PCM]), Asr([" ".join(words)]), scratch)
+    asr = _asr(scratch)
+    assert asr["status"] == "pass"
+    assert asr["transcript"] is None
+    [span] = asr["spans"]
+    assert span["flagged"] is False
+    assert span["heard"] == "qq"
+    assert span["net_missing"] == asr["max_net_missing"] == swapped - 1
+    assert asr["script_tokens"] == len(_TOKENS) and asr["matched_tokens"] > 0
+
+
+def test_clean_pass_has_no_spans_and_a_zero_margin(scratch):
+    _run(Provider([PCM]), Asr([TEXT]), scratch)
+    asr = _asr(scratch)
+    assert asr["spans"] == []
+    assert asr["max_net_missing"] == 0
+    assert asr["transcript"] is None
+
+
+def test_a_pass_records_only_the_span_with_the_largest_net():
+    from dataclasses import replace
+
+    spans = _synthetic_spans(nets=[1, 3, 2], flagged=False)
+    base = verify_audio(b"", "audio/wav", TEXT, transcriber=_fixed_transcriber(TEXT))
+    verdict = replace(base, analysis=replace(base.analysis, spans=spans))
+    assert verdict.status == "pass"
+    [span] = gp._recorded_spans(verdict)
+    assert span["net_missing"] == 3
+    assert gp._asr_record(verdict)["max_net_missing"] == 3
+
+
+def test_recall_floor_only_omission_still_records_three_spans(scratch):
+    # Every 10th word substituted: recall under the floor, but every gap is one
+    # word, so no span is flagged. The best clues are the largest unflagged ones.
+    words = TEXT.split()
+    for i in range(5, len(words), 10):
+        words[i] = f"zz{i}"
+    _run(Provider([PCM, PCM]), Asr([" ".join(words), TEXT]), scratch)
+    asr = _asr(scratch, 0)
+    assert asr["status"] == "omission"
+    assert asr["reasons"] == ["recall_below_floor"]
+    assert not any(s["flagged"] for s in asr["spans"])
+    assert len(asr["spans"]) == gp.MIN_RECORDED_OMISSION_SPANS == 3
+
+
+def test_omission_spans_list_flagged_first_and_are_capped(scratch):
+    # A recorded omission never lists more than MAX_RECORDED_SPANS, flagged first.
+    verdict = verify_audio(
+        b"", "audio/wav", TEXT, transcriber=_fixed_transcriber(DROPPED)
+    )
+    spans = gp._recorded_spans(verdict)
+    assert spans[0]["flagged"] is True
+
+    many = _spans_verdict(flagged=12, unflagged=5)
+    recorded = gp._recorded_spans(many)
+    assert len(recorded) == gp.MAX_RECORDED_SPANS == 8
+    assert all(s["flagged"] for s in recorded)
+    # largest first among the flagged, so the cap drops the least informative
+    assert [s["net_missing"] for s in recorded] == sorted(
+        (s["net_missing"] for s in recorded), reverse=True
+    )
+
+
+def test_two_omissions_name_what_was_dropped_in_the_failure_detail(scratch):
+    failure = _fail(Provider([PCM, PCM]), Asr([DROPPED, DROPPED]), scratch)
+    assert failure.reason == gp.REASON_SECOND_OMISSION
+    assert failure.detail.startswith(
+        "omission (long_unmatched_span,recall_below_floor) recall "
+    )
+    assert f", max net {len(_TOKENS) - _HEAD - 2}: " in failure.detail
+    # the excerpt is trimmed to 12 tokens, and says what the ASR heard instead
+    assert f'script "{" ".join(_TOKENS[_HEAD : _HEAD + 12])}"' in failure.detail
+    assert 'heard "xray yankee"' in failure.detail
+
+
+def test_omission_summary_trims_script_and_heard_to_twelve_tokens():
+    fillers = [f"zz{chr(97 + i)}" for i in range(20)]  # letters: one token each
+    transcript = " ".join(TEXT.split()[:8] + fillers)
+    verdict = verify_audio(
+        b"", "audio/wav", TEXT, transcriber=_fixed_transcriber(transcript)
+    )
+    summary = gp._omission_summary(verdict)
+    script_part = summary.split('script "', 1)[1].split('" heard "', 1)[0]
+    heard_part = summary.split('heard "', 1)[1].rstrip('"')
+    assert len(script_part.split()) == 12
+    assert heard_part == " ".join(fillers[:12])
+
+
+def test_omission_summary_reports_recall_to_three_places():
+    verdict = verify_audio(
+        b"", "audio/wav", TEXT, transcriber=_fixed_transcriber(DROPPED)
+    )
+    recall = f"{verdict.recall:.3f}"
+    assert f") recall {recall}, max net " in gp._omission_summary(verdict)
+
+
+def test_omission_summary_never_raises_and_falls_back_to_the_old_text():
+    class Broken:
+        reasons = ("long_unmatched_span",)
+
+        @property
+        def analysis(self):
+            raise RuntimeError("boom")
+
+        recall = None
+
+    assert gp._omission_summary(Broken()) == "omission (long_unmatched_span)"
+    assert gp._omission_summary(object()) == "omission (flagged)"
+
+
+def _fixed_transcriber(text):
+    def t(audio, mime):
+        return Transcription(text, "fake-asr", "0", "STOP", 0.0, 1, 1, 0)
+
+    return t
+
+
+def _synthetic_spans(*, nets, flagged):
+    from pipeline.tts.verify import Span
+
+    return tuple(
+        Span(10 * i, 10 * i + 1, i, i, 1, 0, net, flagged, "e", "h")
+        for i, net in enumerate(nets)
+    )
+
+
+def _spans_verdict(*, flagged, unflagged):
+    """A real omission verdict whose analysis is swapped for synthetic spans."""
+    from dataclasses import replace
+
+    spans = _synthetic_spans(nets=[100 + i for i in range(flagged)], flagged=True)
+    spans += _synthetic_spans(nets=list(range(unflagged)), flagged=False)
+    base = verify_audio(b"", "audio/wav", TEXT, transcriber=_fixed_transcriber(DROPPED))
+    return replace(base, analysis=replace(base.analysis, spans=spans))
+
+
+def test_asr_record_of_an_unavailable_verdict_has_no_diagnostics():
+    verdict = verify_audio(
+        b"", "audio/wav", TEXT, transcriber=_fixed_transcriber("... --- ...")
+    )
+    assert verdict.status == "unavailable" and verdict.transcript is not None
+    rec = gp._asr_record(verdict)
+    assert rec["status"] == "unavailable"
+    assert rec["spans"] == []
+    assert rec["transcript"] is None  # omission only
+    for key in ("script_tokens", "transcript_tokens", "matched_tokens"):
+        assert rec[key] is None
+    assert rec["max_net_missing"] is None
+
+
+def test_asr_record_of_a_raising_transcriber_has_no_diagnostics():
+    def boom(audio, mime):
+        raise _asr_unavailable()
+
+    rec = gp._asr_record(verify_audio(b"", "audio/wav", TEXT, transcriber=boom))
+    assert rec["status"] == "unavailable"
+    assert rec["spans"] == [] and rec["transcript"] is None
+    assert rec["max_net_missing"] is None and rec["script_tokens"] is None
+
+
+def test_the_transcript_is_capped_with_a_marker():
+    raw = DROPPED + " pad" * 2000  # far over the cap
+    rec = gp._asr_record(
+        verify_audio(b"", "audio/wav", TEXT, transcriber=_fixed_transcriber(raw))
+    )
+    assert rec["status"] == "omission"
+    assert (
+        rec["transcript"] == raw[: gp.MAX_RECORDED_TRANSCRIPT_CHARS] + "...[truncated]"
+    )
+    assert gp.MAX_RECORDED_TRANSCRIPT_CHARS == 6000
+
+
+def test_a_transcript_at_the_cap_is_kept_whole():
+    raw = (DROPPED + " pad" * 2000)[: gp.MAX_RECORDED_TRANSCRIPT_CHARS]
+    rec = gp._asr_record(
+        verify_audio(b"", "audio/wav", TEXT, transcriber=_fixed_transcriber(raw))
+    )
+    assert rec["transcript"] == raw
+
+
+def test_a_diagnostics_bug_degrades_the_record_and_never_raises(monkeypatch, capsys):
+    verdict = verify_audio(
+        b"", "audio/wav", TEXT, transcriber=_fixed_transcriber(DROPPED)
+    )
+
+    def boom(v):
+        raise RuntimeError("diagnostics broke")
+
+    monkeypatch.setattr(gp, "_recorded_spans", boom)
+    rec = gp._asr_record(verdict)
+    # the original fields survive; the new ones are the same-shaped empties
+    assert rec["status"] == "omission" and rec["recall"] == verdict.recall
+    assert rec["spans"] == [] and rec["transcript"] is None
+    assert rec["script_tokens"] is None and rec["max_net_missing"] is None
+    assert "diagnostics broke" in capsys.readouterr().err
+
+
+def test_a_killed_asr_request_leaves_a_same_shaped_started_record(scratch):
+    seen: list[dict] = []
+    asr = Asr([TEXT])
+    real_make = asr.make
+
+    def make(timeout):
+        seen.append(_progress(scratch))
+        return real_make(timeout)
+
+    gp._render_chunk(
+        0,
+        TEXT,
+        LEAF,
+        _far(),
+        scratch,
+        Provider([PCM]),
+        make,
+        threading.Event(),
+        Sleeps(),
+    )
+    started = seen[0]["attempts"][0]["asr"]
+    finished = _asr(scratch)
+    assert started["status"] == "started"
+    assert set(started) == set(finished)
+    assert started["spans"] == [] and started["transcript"] is None
+    for key in (
+        "script_tokens",
+        "transcript_tokens",
+        "matched_tokens",
+        "max_net_missing",
+    ):
+        assert started[key] is None
