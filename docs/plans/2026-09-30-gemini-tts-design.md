@@ -217,11 +217,12 @@ The inline text above stays; where it disagrees with these, these win.
   an omission the capped transcript; the `second_omission` failure detail and the fallback alert
   name the dropped passage; and the rejected audio of every omission attempt (at most 4 per
   render, the failing chunk's first) is kept as a low-bitrate mp3 under
-  `tts-renders/<feed>/omission-audio/` for 60 days. Clips are encoded after the episode audio
-  exists (or has failed) but before the manifest and cache store, so they are bounded: 30 s per
-  encode, 60 s in total, the rest skipped and noted. Nothing here
-  changes what is flagged, so `VERIFIER_VERSION` stays `"2"` and the cache key is unchanged;
-  all of it is best-effort and cannot fail or delay the episode audio.
+  `tts-renders/<feed>/omission-audio/` for 60 days. Nothing here changes what is flagged, so
+  `VERIFIER_VERSION` stays `"2"` and the cache key is unchanged. All of it is best-effort and
+  cannot fail the render. Clip saving runs after the episode mp3 is written (or the render has
+  failed) but before the cache store and manifest, so it can delay render completion by up to its
+  60 s total budget (30 s per encode; in practice about 1 s per clip, the rest skipped and noted),
+  though never the audio itself.
 
 ### Completed-render reuse
 

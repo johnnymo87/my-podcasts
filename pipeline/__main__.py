@@ -878,7 +878,7 @@ def publish_script_command(
                 f"{primary.provider} {primary.model}/{primary.voice})..."
             )
             # A dry run touches no state: no manifest, no completed-render cache.
-            tts.render_episode(
+            result = tts.render_episode(
                 tts_text,
                 config,
                 output_mp3,
@@ -888,6 +888,13 @@ def publish_script_command(
                 cache_dir=None,
                 notify_fallback=False,  # a dry run pages nobody
             )
+            # What actually rendered, so a dry run that fell back to OpenAI is
+            # not indistinguishable from one where Gemini passed.
+            rendered = result.rendered
+            line = f"Rendered: {rendered.provider} {rendered.model}/{rendered.voice}"
+            if result.fallback_reason:
+                line += f" (Gemini fell back: {result.fallback_reason})"
+            click.echo(line)
             size = output_mp3.stat().st_size
             click.echo(f"MP3 generated: {output_mp3} ({size} bytes)")
             click.echo("Dry run complete. No episode published.")
