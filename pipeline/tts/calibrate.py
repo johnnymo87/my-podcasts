@@ -629,6 +629,11 @@ class CutInterval:
     start_bounds: tuple[int, int]
     end_bounds: tuple[int, int]
     snapped: bool = False
+    # RMS of the 10 ms frame at each snapped point over the base's global RMS
+    # (``None`` until ``finalize_cut``). Near 0: a real gap. Near or above 1: no
+    # quiet place was in reach, so the cut may land inside speech.
+    start_energy_ratio: float | None = None
+    end_energy_ratio: float | None = None
 
     def to_dict(self) -> dict:
         return _jsonable(asdict(self))
@@ -991,16 +996,26 @@ def _predictable_why(
     return None
 
 
+def global_mean_energy(pcm: bytes) -> float:
+    """Mean squared sample value of 16-bit mono PCM (0.0 for empty audio)."""
+    n = len(pcm) // 2
+    if n == 0:
+        return 0.0
+    samples = struct.unpack_from(f"<{n}h", pcm)
+    return sum(map(operator.mul, samples, samples)) / n
+
+
 def _snap(
     pcm: bytes, nominal: int, bounds: tuple[int, int], radius: int, half: int
-) -> int:
-    """The sample in ``[nominal-radius, nominal+radius]`` (and within ``bounds``)
-    whose 2*half-sample window has the lowest mean energy; ties go to the point
-    nearest ``nominal``."""
+) -> tuple[int, float | None]:
+    """``(point, mean_energy)``: the sample in ``[nominal-radius, nominal+radius]``
+    (and within ``bounds``, inclusive) whose 2*half-sample window has the lowest
+    mean energy; ties go to the point nearest ``nominal``. The energy is ``None``
+    when no window could be measured."""
     total = len(pcm) // 2
     lo, hi = max(nominal - radius, bounds[0]), min(nominal + radius, bounds[1])
     if lo > hi:
-        return min(max(nominal, bounds[0]), bounds[1])
+        return min(max(nominal, bounds[0]), bounds[1]), None
     seg_lo, seg_hi = max(0, lo - half), min(total, hi + half)
     samples = struct.unpack_from(f"<{seg_hi - seg_lo}h", pcm, 2 * seg_lo)
     prefix = [0]
@@ -1014,35 +1029,62 @@ def _snap(
         key = ((prefix[b - seg_lo] - prefix[a - seg_lo]) / (b - a), abs(c - nominal), c)
         if best is None or key < best:
             best = key
-    return nominal if best is None else best[2]
+    return (nominal, None) if best is None else (best[2], best[0])
 
 
-def finalize_cut(spec: CutSpec, pcm: bytes) -> CutSpec:
+def _ratio(energy: float | None, global_energy: float) -> float | None:
+    if energy is None or global_energy <= 0:
+        return None
+    return (energy / global_energy) ** 0.5
+
+
+def finalize_cut(
+    spec: CutSpec, pcm: bytes, *, base_energy: float | None = None
+) -> CutSpec:
     """Snap every cut point of ``spec`` to the audio in ``pcm`` (the base's PCM).
 
     Each point moves to the lowest-energy 10 ms frame within +/-100 ms of its
-    NOMINAL point, clamped to the range between the nominal midpoints of the
-    adjacent words (``start_bounds``/``end_bounds``), so no cut removes the
-    near half of a kept word or keeps the far half of a removed one. The result
-    records both nominal and snapped points and is the only kind ``apply`` takes.
-    Always snaps from nominal, so it is idempotent. Falls back to the nominal
-    points of an interval if snapping would collide with its neighbour.
+    NOMINAL point, clamped (inclusively) to the range between the nominal
+    midpoints of the adjacent words (``start_bounds``/``end_bounds``). Whisper
+    word timing is itself imprecise, so the clamp is not a guarantee about the
+    words: a snapped point can sit as far as the midpoint of a kept neighbour,
+    i.e. a cut may take up to half of a kept word (or leave up to half of a
+    removed one) by whisper's timing. ``verify_cut_audio`` is the check on that.
+
+    The result records both nominal and snapped points, and the energy of each
+    snapped frame as an RMS ratio against the whole base (``base_energy``, the
+    mean squared sample, is computed when not given), so a cut that could find
+    no quiet frame is visible. Only a snapped spec goes to ``apply``. Always
+    snaps from nominal, so it is idempotent. Falls back to the nominal points of
+    an interval if snapping would collide with its neighbour.
     """
     if len(pcm) != 2 * spec.base_samples:
         raise ValueError(
             f"PCM has {len(pcm) // 2} samples, cut {spec.cut_id} was chosen for "
             f"{spec.base_samples}"
         )
+    if base_energy is None:
+        base_energy = global_mean_energy(pcm)
     radius = round(SNAP_RADIUS_S * spec.sample_rate)
     half = round(SNAP_FRAME_S * spec.sample_rate / 2)
     out: list[CutInterval] = []
     prev_end = 0
     for iv in spec.intervals:
-        a = _snap(pcm, iv.nominal_start, iv.start_bounds, radius, half)
-        b = _snap(pcm, iv.nominal_end, iv.end_bounds, radius, half)
+        a, ea = _snap(pcm, iv.nominal_start, iv.start_bounds, radius, half)
+        b, eb = _snap(pcm, iv.nominal_end, iv.end_bounds, radius, half)
         if not prev_end <= a < b <= spec.base_samples:
             a, b = iv.nominal_start, iv.nominal_end
-        out.append(replace(iv, sample_start=a, sample_end=b, snapped=True))
+            ea = eb = None
+        out.append(
+            replace(
+                iv,
+                sample_start=a,
+                sample_end=b,
+                snapped=True,
+                start_energy_ratio=_ratio(ea, base_energy),
+                end_energy_ratio=_ratio(eb, base_energy),
+            )
+        )
         prev_end = b
     return replace(spec, intervals=tuple(out))
 
@@ -1072,7 +1114,11 @@ def _heard_tokens(heard: Any) -> list[str]:
     """Normalized tokens of a whisper dict/words list, plain text, or token list."""
     if isinstance(heard, str):
         return normalize_tokens(heard)
-    if isinstance(heard, dict) or (heard and isinstance(heard[0], (dict, Word))):
+    if isinstance(heard, dict):
+        if "words" not in heard:  # no word timestamps: fall back to the text
+            return normalize_tokens(str(heard.get("text", "")))
+        return _tokenize_units([w.word for w in parse_words(heard)]).tokens
+    if heard and isinstance(heard[0], (dict, Word)):
         return _tokenize_units([w.word for w in parse_words(heard)]).tokens
     return list(heard)
 
@@ -1557,7 +1603,11 @@ class Outcome:
     reasons: tuple[str, ...]
     recall: float | None
     flagged_spans: int
-    localized: bool  # a flagged span overlaps a removed interval (cuts only)
+    # Cuts only: ``localized`` is true only when EVERY removed interval overlaps
+    # a flagged span (``localized_intervals`` says which did). A multi cut that
+    # finds one of its three removals has been detected, not localized.
+    localized: bool
+    localized_intervals: tuple[bool, ...] = ()
 
 
 def replay(record: EvalRecord, thresholds: VerifyThresholds) -> Outcome:
@@ -1569,12 +1619,13 @@ def replay(record: EvalRecord, thresholds: VerifyThresholds) -> Outcome:
         return Outcome("unavailable", ("asr_empty",), None, 0, False)
     a = analyze(record.script_text, transcript, thresholds)
     flagged = [s for s in a.spans if s.flagged]
-    localized = any(
-        s.script_start < e and s.script_end > st
-        for s in flagged
+    per = tuple(
+        any(s.script_start < e and s.script_end > st for s in flagged)
         for st, e in record.removed
     )
-    return Outcome(a.status, a.reasons, a.recall, len(flagged), localized)
+    return Outcome(
+        a.status, a.reasons, a.recall, len(flagged), bool(per) and all(per), per
+    )
 
 
 def default_grid(
@@ -1620,14 +1671,16 @@ def evaluate(
         {"thresholds": {...},
          "cuts":  {"overall": C, "by_split": {k: C}, "by_family": ..., "by_size_bin":
                    ..., "by_family_size": ..., "by_feed": ..., "by_model": ...,
-                   "by_policy": ..., "missed": [record_id], "unlocalized": [record_id]},
+                   "by_policy": ..., "missed": [record_id], "unlocalized": [record_id],
+                   "partially_localized": [record_id]},
          "bases": {"overall": B, "by_split": {k: B}, ..., "false_alarms": [record_id],
                    "false_alarm_bases": [base_id]}}
 
     where ``C = {n, caught, caught_localized, missed, unavailable}`` (``n ==
     caught + missed + unavailable``; an unavailable record is NEVER counted
-    caught; ``caught_localized`` is the caught cuts whose flagged span overlaps
-    the removed interval, and is the selection metric: a catch by recall alone,
+    caught; ``caught_localized`` is the caught cuts whose flagged spans overlap
+    EVERY removed interval (a multi cut that finds one of three is only
+    ``partially_localized``), and is the selection metric: a catch by recall alone,
     far from the cut, is not evidence the cut was found) and
     ``B = {n, passed, false_alarms, unavailable, bases, bases_with_false_alarm}``
     (``n`` counts ASR repeats; ``bases`` distinct base ids).
@@ -1646,6 +1699,7 @@ def evaluate(
         bases: dict[str, Any] = {"overall": {}}
         missed: list[str] = []
         unlocalized: list[str] = []
+        partial: list[str] = []
         false_alarms: list[str] = []
         fa_bases: set[str] = set()
         seen_bases: dict[str, set[str]] = {}
@@ -1665,6 +1719,8 @@ def evaluate(
                     missed.append(r.record_id)
                 if outcome == "caught" and not o.localized:
                     unlocalized.append(r.record_id)
+                    if any(o.localized_intervals):
+                        partial.append(r.record_id)
                 target = cuts
             else:
                 outcome = {
@@ -1698,6 +1754,7 @@ def evaluate(
         bases["overall"]["bases_with_false_alarm"] = len(fa_bases)
         cuts["missed"] = missed
         cuts["unlocalized"] = unlocalized
+        cuts["partially_localized"] = partial
         bases["false_alarms"] = false_alarms
         bases["false_alarm_bases"] = sorted(fa_bases)
         acceptance = {

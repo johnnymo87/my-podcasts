@@ -876,6 +876,37 @@ def test_replay_matches_verify_analyze_and_localizes():
     )
 
 
+def test_multi_interval_cut_is_localized_only_if_every_interval_is():
+    mid = (len(TOKENS) - 40) // 2
+    gone = _SIM_PLAIN  # one 40-token deletion at ``mid``
+    declared = ((mid, mid + 40), (20, 40))  # ...but the cut said two intervals
+    rec = _rec("m", "cut", gone.text, family="multi", size_bin=24, removed=declared)
+    o = replay(rec, DEFAULT_THRESHOLDS)
+    assert o.status == "omission"
+    assert o.localized_intervals == (True, False)
+    assert o.localized is False  # one interval was never found
+    (res,) = evaluate([rec, _rec("b", "base", " ".join(TOKENS))], [DEFAULT_THRESHOLDS])
+    assert res["cuts"]["overall"]["caught"] == 1
+    assert res["cuts"]["overall"]["caught_localized"] == 0
+    assert res["cuts"]["partially_localized"] == ["m"]
+    assert res["cuts"]["unlocalized"] == ["m"]
+    assert res["acceptance_ok"] is False
+    # both intervals actually removed and found: localized
+    two = simulate(TOKENS, TOKENS, SimSpec("multi", size=12, count=2), rng(1))
+    ok = _rec("m2", "cut", two.text, family="multi", size_bin=24, removed=two.deleted)
+    o2 = replay(ok, replace(DEFAULT_THRESHOLDS, min_span_words=10))
+    assert o2.localized_intervals == (True, True) and o2.localized
+
+
+def test_heard_tokens_falls_back_to_text_for_a_dict_without_words():
+    assert calibrate._heard_tokens({"text": "Hello, there"}) == ["hello", "there"]
+    assert calibrate._heard_tokens({"words": [], "text": "ignored"}) == []
+    assert calibrate._heard_tokens({}) == []
+    assert calibrate._heard_tokens(
+        {"words": [{"word": "a", "start": 0, "end": 1}]}
+    ) == ["a"]
+
+
 def test_evaluate_counts_detection_false_alarms_and_availability_separately():
     off, on = (replace(DEFAULT_THRESHOLDS, net_deficit_min=m) for m in (None, 40))
     r_off, r_on = evaluate(_records(), [off, on])
@@ -1219,6 +1250,31 @@ def test_snap_on_flat_audio_keeps_the_nominal_point_and_is_idempotent():
     assert done.sample_intervals == spec.sample_intervals
     assert all(i.snapped for i in done.intervals)
     assert finalize_cut(done, pcm) == done
+
+
+def test_snap_records_the_energy_of_each_snapped_frame_relative_to_the_base():
+    lab, spec = _mid_cut(0.3)
+    (iv,) = spec.intervals
+    assert iv.start_energy_ratio is None and iv.end_energy_ratio is None  # nominal
+    flat = finalize_cut(spec, loud_pcm(lab.total_samples)).intervals[0]
+    assert flat.start_energy_ratio == pytest.approx(1.0)  # no quieter place existed
+    assert flat.end_energy_ratio == pytest.approx(1.0)
+    n0 = iv.nominal_start
+    silent = [(n0 + 4 * FRAME, n0 + 7 * FRAME)]
+    quiet = finalize_cut(spec, loud_pcm(lab.total_samples, silent)).intervals[0]
+    assert quiet.start_energy_ratio == pytest.approx(0.0, abs=1e-6)  # a true gap
+    assert quiet.end_energy_ratio == pytest.approx(1.0, rel=0.01)
+    # RMS ratio against the base's global RMS: a base that is half silence is
+    # louder-than-average at a speech frame
+    half = loud_pcm(lab.total_samples, [(0, lab.total_samples // 2)])
+    assert calibrate.global_mean_energy(half) == pytest.approx(0.5 * 8000**2, rel=0.01)
+    ratio = finalize_cut(spec, half).intervals[0].end_energy_ratio
+    assert ratio == pytest.approx(2**0.5, rel=0.02)
+    again = CutSpec.from_dict(
+        json.loads(json.dumps(finalize_cut(spec, half).to_dict()))
+    )
+    assert again == finalize_cut(spec, half)
+    assert calibrate.global_mean_energy(b"") == 0.0
 
 
 def test_snap_rejects_the_wrong_pcm_and_survives_json():
