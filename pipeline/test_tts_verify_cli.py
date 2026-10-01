@@ -460,6 +460,7 @@ def test_threshold_overrides_are_applied_and_echoed(
         "min_span_words": 20,
         "max_span_ratio": 0.25,
         "recall_floor": 0.9,
+        "net_deficit_min": None,
     }
 
 
