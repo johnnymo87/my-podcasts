@@ -22,6 +22,10 @@ tokens minus transcript tokens in the gap, ``net_missing``) reaches
 ``net_deficit_min`` (None turns that rule off). Recall
 counts ALL matched script tokens, not only anchored ones. Coordinates are
 indices into the normalized token lists, not characters or seconds.
+
+``Span.heard`` and ``Verdict.transcript`` are diagnostics only: they record what
+the ASR produced so a verdict can be explained afterwards, and nothing in the
+alignment, flagging or recall reads them.
 """
 
 from __future__ import annotations
@@ -117,6 +121,9 @@ class Span:
     net_missing: int
     flagged: bool
     excerpt: str  # the first <=30 normalized script tokens of the span
+    # Diagnostic only: the first <=30 normalized transcript tokens of the gap
+    # (what the ASR said where the script has ``excerpt``); "" if it said nothing.
+    heard: str = ""
 
 
 @dataclass(frozen=True)
@@ -186,6 +193,11 @@ def _align(
                         and s_words - t_words >= th.net_deficit_min
                     ),
                     excerpt=" ".join(script[prev_a : min(a, prev_a + _EXCERPT_TOKENS)]),
+                    heard=" ".join(
+                        transcript[
+                            prev_b : min(prev_b + t_words, prev_b + _EXCERPT_TOKENS)
+                        ]
+                    ),
                 )
             )
         prev_a, prev_b = a + size, b + size
@@ -330,6 +342,9 @@ class Verdict:
     verifier_version: str
     verifier_policy: str  # VERIFIER_POLICY: what T3's cache key must include
     mode: Literal["chunk"]
+    # Diagnostic only: the raw ASR text whenever a transcription came back
+    # (including ``asr_empty``); None when the transcriber raised.
+    transcript: str | None = None
 
     @property
     def recall(self) -> float | None:
@@ -345,6 +360,7 @@ def _unavailable(
     th: VerifyThresholds,
     asr: AsrInfo | None,
     policy: str = VERIFIER_POLICY,
+    transcript: str | None = None,
 ) -> Verdict:
     return Verdict(
         "unavailable",
@@ -356,6 +372,7 @@ def _unavailable(
         VERIFIER_VERSION,
         policy,
         "chunk",
+        transcript,
     )
 
 
@@ -398,7 +415,12 @@ def verify_audio(
     )
     if not normalize_tokens(tr.text):
         return _unavailable(
-            "asr_empty", "transcript has no word tokens", thresholds, info, policy
+            "asr_empty",
+            "transcript has no word tokens",
+            thresholds,
+            info,
+            policy,
+            tr.text,
         )
     a = analyze(script_text, tr.text, thresholds)
     return Verdict(
@@ -411,4 +433,5 @@ def verify_audio(
         VERIFIER_VERSION,
         policy,
         "chunk",
+        tr.text,
     )
