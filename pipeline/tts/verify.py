@@ -1,7 +1,8 @@
 """Large-omission detector: align an ASR transcript against the script.
 
 Changing normalization, alignment, or DEFAULT_THRESHOLDS changes verifier
-policy: bump VERIFIER_VERSION (v2: the thresholds calibrated in T5). The ASR
+policy: bump VERIFIER_VERSION (v2: the thresholds calibrated in T5; v3: the
+recall floor padded to recall_min_tokens, bead my-podcasts-9p3.14). The ASR
 side (model, prompt, generation config) is covered by asr.ASR_POLICY; bump
 asr.ASR_PROMPT_VERSION on any prompt text change. T3 must fold VERIFIER_POLICY
 (both halves), not just VERIFIER_VERSION, into the render cache key.
@@ -43,7 +44,7 @@ from pipeline.tts.asr import ASR_POLICY, Transcription, TranscriptionUnavailable
 from pipeline.tts.normalize import normalize_tokens
 
 
-VERIFIER_VERSION = "2"
+VERIFIER_VERSION = "3"
 
 
 def verifier_policy(asr_policy: str = ASR_POLICY) -> str:
@@ -70,6 +71,12 @@ class VerifyThresholds:
     The claim is "caught every labeled cut of these sizes and families", never
     "catches every omission of N tokens"; see the evidence doc for what the
     evidence does not cover.
+
+    ``recall_min_tokens`` (v3): T5 validated the recall floor only on chunks of
+    306+ tokens. Below 300 tokens the floor is an absolute bound of 15 unmatched
+    tokens, not a proportion two misheard names can break; contiguous drops are
+    still caught by the span rules. Evidence:
+    ``docs/plans/2026-09-30-gemini-tts-t5-evidence.md``.
     """
 
     anchor_min: int = 3

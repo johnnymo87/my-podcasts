@@ -1344,6 +1344,13 @@ def tts_calibrate_command(ctx: click.Context) -> None:
 @click.option("--max-span-ratio", default=None, type=float)
 @click.option("--recall-floor", default=None, type=float)
 @click.option(
+    "--recall-min-tokens",
+    default=None,
+    type=int,
+    help="Measure the recall floor against at least this many tokens (default: "
+    "the calibrated value; 1 reproduces verifier v2).",
+)
+@click.option(
     "--net-deficit-min",
     "net_deficit_min",
     default=None,
@@ -1386,6 +1393,7 @@ def _tts_verify(
     min_span_words: int | None,
     max_span_ratio: float | None,
     recall_floor: float | None,
+    recall_min_tokens: int | None,
     net_deficit_min: str | None,
 ) -> None:
     import dataclasses
@@ -1420,6 +1428,7 @@ def _tts_verify(
         "min_span_words": min_span_words,
         "max_span_ratio": max_span_ratio,
         "recall_floor": recall_floor,
+        "recall_min_tokens": recall_min_tokens,
     }
     if net_deficit_min is not None:
         if net_deficit_min.strip().lower() == "none":

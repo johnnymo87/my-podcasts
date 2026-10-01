@@ -483,7 +483,7 @@ def test_defaults_echo_the_calibrated_thresholds(
         "net_deficit_min": 6,
         "recall_min_tokens": 300,
     }
-    assert report_of(result)["verifier_version"] == "2"
+    assert report_of(result)["verifier_version"] == "3"
 
 
 def _net_deficit_run(tmp_path, script_file, audio_file, value):
@@ -928,3 +928,29 @@ def test_token_empty_segment_makes_the_run_unavailable(
     assert report["reasons"] == ["asr_empty"]
     assert "segment 2 of 3" in report["detail"]
     assert len(fake.mimes) == 2  # stopped at the bad segment
+
+
+def test_recall_min_tokens_override_is_applied_and_echoed(
+    tmp_path, script_file, audio_file, no_asr
+):
+    transcript = tmp_path / "t.txt"
+    transcript.write_text(as_asr(SCRIPT))
+    result = run(
+        ["--audio", str(audio_file), "--script", str(script_file),
+         "--transcript", str(transcript), "--recall-min-tokens", "1"]
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    assert report_of(result)["thresholds"]["recall_min_tokens"] == 1
+
+
+def test_recall_min_tokens_override_rejects_bad_values(
+    tmp_path, script_file, audio_file, no_asr
+):
+    transcript = tmp_path / "t.txt"
+    transcript.write_text(as_asr(SCRIPT))
+    result = run(
+        ["--audio", str(audio_file), "--script", str(script_file),
+         "--transcript", str(transcript), "--recall-min-tokens", "0"]
+    )  # fmt: skip
+    assert result.exit_code == 2
+    assert "recall_min_tokens" in result.output

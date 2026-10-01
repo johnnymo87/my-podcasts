@@ -435,7 +435,7 @@ def test_a_plain_skip_is_flagged_with_or_without_the_net_deficit_rule():
     off = analyze(SCRIPT, skipped, replace(DEFAULT_THRESHOLDS, net_deficit_min=None))
     assert on.status == off.status == "omission"
     assert on.spans == off.spans and on.reasons == off.reasons
-    assert VERIFIER_VERSION == "2"
+    assert VERIFIER_VERSION == "3"
 
 
 def test_calibrated_defaults_are_frozen():
@@ -445,6 +445,7 @@ def test_calibrated_defaults_are_frozen():
         max_span_ratio=0.5,
         net_deficit_min=6,
         recall_floor=0.95,
+        recall_min_tokens=300,
     )
 
 
@@ -492,9 +493,9 @@ def test_production_policy_strings_are_pinned():
 
     assert asr.ASR_POLICY == "gemini-3.8-flash|prompt-v1|temp0|thinking-low"
     assert asr.ASR_POLICY == asr.policy_for()
-    assert VERIFIER_POLICY == f"verifier-v2|{asr.ASR_POLICY}"
+    assert VERIFIER_POLICY == f"verifier-v3|{asr.ASR_POLICY}"
     assert VERIFIER_POLICY == (
-        "verifier-v2|gemini-3.8-flash|prompt-v1|temp0|thinking-low"
+        "verifier-v3|gemini-3.8-flash|prompt-v1|temp0|thinking-low"
     )
 
 
