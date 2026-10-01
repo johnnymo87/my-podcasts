@@ -235,12 +235,13 @@ Spend: $1.211 (synth $0.690, Gemini ASR $0.236, whisper $0.286), all calls settl
 - **Watch item (v3 margin):** the margin is 2 tokens (worst clean window 13 unmatched vs the bound of 15; real Gemini
   tails peaked at 4; whisper reached exactly 15 on the names-dense Levine 2026-09-29 headline list).
   During T6 review, trend unmatched tokens on chunks under 300 (PR #29's per-attempt `matched_tokens`
-  and `max_net_missing`, once merged) and revisit if any faithful chunk exceeds 12.
+  and `max_net_missing`, merged; the fields exist now) and revisit if any faithful chunk exceeds 12.
 - **Currency normalization is asymmetric:** `$15.51` normalizes to dollars-and-cents words, but a
   transcript that drops the `$` reads "fifteen point five one", and Gemini ASR is not consistent
   about `$`. A price list can produce a false omission. Rundown/FP scripts spell numbers out
   (no `$`+digit in 132 recent Rundown scripts); Levine does not. Bead `my-podcasts-9p3.15`, before Levine flips.
-- **Production omission verdicts are not diagnosable yet:** the Gemini phase records only status,
-  reasons and recall, not the flagged span or transcript. Bead `my-podcasts-9p3.14`, before T6.
+- **Production omission verdicts are diagnosable now (resolved, bead `my-podcasts-9p3.13`, PR #29):**
+  each ASR attempt records the flagged spans, what the ASR heard, the transcript of an omission and
+  the rejected audio; see `pipeline/AGENTS.md` "Diagnosing an omission".
 - **Correlated evidence:** 12 source episodes, two voices, 3-minute chunks. Feeds with different
   text shapes (e.g. transcripts, tables) are untested.

@@ -218,7 +218,7 @@ The inline text above stays; where it disagrees with these, these win.
   name the dropped passage; and the rejected audio of every omission attempt (at most 4 per
   render, the failing chunk's first) is kept as a low-bitrate mp3 under
   `tts-renders/<feed>/omission-audio/` for 60 days. Nothing here changes what is flagged, so
-  `VERIFIER_VERSION` stays `"2"` and the cache key is unchanged. All of it is best-effort and
+  `VERIFIER_VERSION` stays `"2"` and the cache key is unchanged (verifier v3, below, later changed the recall rule). All of it is best-effort and
   cannot fail the render. Clip saving runs after the episode mp3 is written (or the render has
   failed) but before the cache store and manifest, so it can delay render completion by up to its
   60 s total budget (30 s per encode; in practice about 1 s per clip, the rest skipped and noted),

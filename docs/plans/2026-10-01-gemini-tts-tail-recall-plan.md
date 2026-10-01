@@ -29,7 +29,7 @@ evidence doc quantifies that by text simulation and says so.
 unless the paid evidence shows edge effects on short clips. A chunker change would need a
 `RENDERER_VERSION` bump and would break the T5 corpus rebuild.
 
-**Interaction with PR #29** (`tts-t6-prereqs`, open): that PR adds `Span.heard` and
+**Interaction with PR #29** (`tts-t6-prereqs`, since merged to main): that PR adds `Span.heard` and
 `Verdict.transcript` to `verify.py`. Whichever PR merges second rebases. The conflict is
 small (different functions), but the rebase must keep both changes.
 
