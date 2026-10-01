@@ -1,0 +1,47 @@
+{
+ "fixture": "t5-levine-natural-omission",
+ "about": "Gemini-TTS skipped a 57-token passage of a Levine chunk (both Gemini ASR and the independent whisper agree). Trimmed window; the verifier must flag the skipped span.",
+ "script": "The list contained candidates for initial public offerings, spanning from China to South Korea and India, according to a copy seen by Bloomberg News and verified by people familiar with the matter. The list — which focused mostly on Asia, along with Europe, the Middle East, and Africa — also included private equity and pension funds backing those companies, and projects that were put on hold. …\n\nThe banker had intended to send a client-facing version of the file, which largely contained general updates on the private equity sector and recent transactions, but mistakenly sent the internal version instead, some of which contained extensive price-sensitive information.\n\nBlock quote ends.\n\nI mean, it’s not a perfect experiment. (Maybe some of the deals on this list were very real, but were canceled because of this leak.) But, like, take that list of 100 companies, construct a control list of 100 similar companies that are not on the list, and see which list produces more equity capital markets deals in the next six months. “Leaks about an imminent share placement can … weigh on the stock as investors brace for additional supply”: Construct a portfolio that is short the public companies on this list and long a basket of similar companies, and see if the listed companies’ stocks underperform. Because they do block trades. Will they do block trades? Well, they might. Morgan Stanley is working with them on doing block trades. Or pitching them. Or monitoring them.",
+ "transcript": "The list contained candidates for initial public offerings spanning from China to South Korea and India, according to a copy seen by Bloomberg News and verified by people familiar with the matter. The list, which focused mostly on Asia, along with Europe, the Middle East and Africa, also included private equity and pension funds backing those companies, and projects that were put on hold. The banker had intended to send a client-facing version of the file, which largely contained general updates on the private equity sector and recent transactions, but mistakenly sent the internal version instead, some of which contained extensive price-sensitive information. Block quote ends. I mean, it's not a perfect experiment. Maybe some of the deals on this list were very real, but were canceled because of this leak. But, like, take that list of 100 companies, construct a control list of 100 similar companies, and see if the listed companies' stocks underperform. Because they do block trades. Will they do block trades? Well, they might. Morgan Stanley is working with them on doing block trades, or pitching them, or monitoring them.",
+ "span": {
+  "script_start": 151,
+  "script_end": 208,
+  "tokens": 57
+ },
+ "window": {
+  "words_before_span": 150,
+  "words_after_span": 37,
+  "chunk_token_start": 235,
+  "chunk_token_end": 480,
+  "span_in_chunk_tokens": [
+   386,
+   443
+  ]
+ },
+ "confirmed_by": {
+  "gemini_asr": "flagged span net_missing 57 in the full chunk",
+  "whisper_suspect_spans_in_chunk_tokens": [
+   [
+    384,
+    441,
+    57
+   ]
+  ]
+ },
+ "provenance": {
+  "source_root": "/persist/my-podcasts/tts-eval/t5",
+  "attempt": "levine-repro/Kore-0",
+  "script_source": "/persist/my-podcasts/tts-eval/t4/set/levine/script.txt",
+  "script_sha256": "561d3a35112bd237df8108104c59dd2d60fa635e201bdbc8565343953c45edcf",
+  "chunk_index": 0,
+  "chunk_sha256": "542f6cd23024cd3a7ede50191411850387f36eb73663138b546c15d3b831a124",
+  "model": "gemini-3.8-flash-tts",
+  "voice": "Kore",
+  "style": "calm, measured news anchor",
+  "transcript": "levine-repro/Kore-0/asr/low-0.json",
+  "audio": "levine-repro/Kore-0/pcm.wav",
+  "audio_sha256": "f474515a06fc4b8c3754572a869c6b9a30344700bf800e69e7eadd80853b5418",
+  "asr_policy": "gemini-3.8-flash|prompt-v1|temp0|thinking-low",
+  "note": "script and transcript are TRIMMED windows (<=150 words either side of the span) of a Bloomberg Money Stuff chunk; the full text is not stored in the repo."
+ }
+}
