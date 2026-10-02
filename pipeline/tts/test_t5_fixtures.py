@@ -74,9 +74,10 @@ def test_the_fixture_set_is_exactly_what_was_curated():
 def test_fixtures_are_small_and_v3_keeps_every_t5_verdict():
     for p in FIXTURES.glob("*.json"):
         assert p.stat().st_size <= MAX_FIXTURE_BYTES, p.name
-    assert (
-        VERIFIER_VERSION == "3"
-    )  # captured as v2 evidence; v3 changes no verdict here
+    # Captured as v2 evidence; v3 and v4 change no verdict here. v4 (currency,
+    # my-podcasts-9p3.15) moved cut-multi's token intervals down by one: its
+    # script spells out "dollars", which v4 drops on both sides.
+    assert VERIFIER_VERSION == "4"
 
 
 @pytest.mark.parametrize("name", sorted(p.name for p in FIXTURES.glob("*.json")))

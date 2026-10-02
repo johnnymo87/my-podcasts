@@ -1,7 +1,7 @@
 # T5 calibration regression fixtures
 
 Real evidence from the T5 omission-detector calibration, pinned by
-`pipeline/tts/test_t5_fixtures.py` under `DEFAULT_THRESHOLDS`. They were captured as verifier v2 evidence; v3 keeps every verdict.
+`pipeline/tts/test_t5_fixtures.py` under `DEFAULT_THRESHOLDS`. They were captured as verifier v2 evidence; v3 and v4 keep every verdict. Token intervals are in the current (v4) tokenization: v4 drops "dollar(s)", which moved `cut-multi.json`'s intervals down by one (remapped from `/persist/my-podcasts/tts-eval/t5-v4/root`).
 Each file holds a script, the Gemini transcript of real audio (ASR policy
 `gemini-3.8-flash|prompt-v1|temp0|thinking-low`) and a `provenance` block
 (source paths under `/persist/my-podcasts/tts-eval/t5`, audio and chunk sha256,

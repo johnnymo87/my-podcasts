@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from pipeline.fp_processor import process_fp_digest_job
-from pipeline.tts import openai_config
+from pipeline.tts import GeminiConfig, OpenAIConfig, RenderConfig
 
 
 # Processors reject scripts too short to be a real episode
@@ -67,7 +67,15 @@ def test_process_fp_digest_job(tmp_path, monkeypatch, fake_tts_render) -> None:
 
     # Rendered with onyx under the FP Digest's feed identity.
     [call] = fake_tts_render
-    assert call["config"] == openai_config(model="tts-1-hd", voice="onyx")
+    # T7: Gemini Alnilam with the pre-Gemini voice (onyx) as fallback.
+    assert call["config"] == RenderConfig(
+        primary=GeminiConfig(
+            model="gemini-3.8-flash-lite-tts",
+            voice="Alnilam",
+            style="calm, measured news anchor",
+        ),
+        fallback=OpenAIConfig(model="tts-1-hd", voice="onyx"),
+    )
     assert call["feed_slug"] == "fp-digest"
     assert call["episode_id"] == "2026-03-06-fp-digest"
     assert call["text"].startswith("This is the Foreign Policy briefing.")

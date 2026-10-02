@@ -10,7 +10,8 @@ source of alignment noise in the 2026-09-28 evaluation.
 
 Supported, in the order applied:
   times            4:30 -> four thirty, 9:05 -> nine oh five, 10:00 -> ten
-  currency         $580, $1,000, $2.45 (dollars and cents), $1.8 billion
+  currency         $580, $1,000, $2.45, $1.8 billion -> the bare number (no
+                   "dollars"; $2.45 reads "two point four five")
   percent          7%, 5.5 %
   ordinals         1st, 30th, 21st
   decades          1990s, 90s
@@ -21,6 +22,18 @@ Supported, in the order applied:
 Anything else numeric is left as digits: visible noise, never a guess. That
 means integers above 999 trillion, and the tail of a version string: "3.5.1"
 reads as "three point five 1" (the leading decimal converts, the ".1" does not).
+
+Currency (verifier v4, my-podcasts-9p3.15): a dollar amount normalizes to the
+same tokens as the bare number, and the words "dollar"/"dollars" are dropped on
+both sides. Gemini ASR writes "$15.51", "15.51" or "15.51 dollars" for the same
+audio, so any reading that kept a currency word on one side only turned every
+price into a 1-4 token deficit (a 4-price list reached net_missing 8, a false
+omission). Our writers spell prices out ("fifteen dollars and fifty-one
+cents"), so "<number> dollars and <1-99> cents" is rewritten to "<number> point
+d d" at the token level: every written form of a dollars-and-cents amount
+converges. The cost is that a dropped "dollars" is never counted as missing
+speech, and a dollar amount whose integer part is not a plain number ("a
+dollar and fifty cents") becomes "a point five zero" on both sides alike.
 
 Also: glued magnitude abbreviations (11bn, 5M, 4k; bn tn mm m b k) convert only
 when attached directly to digits, so "5 mm" is left alone. Diacritics are
@@ -169,22 +182,14 @@ def _magnitude_word(spelled: str | None, abbrev: str | None) -> str | None:
 
 
 def _currency(m: re.Match) -> str:
+    """A dollar amount reads as the bare number (see the module docstring)."""
     sign, int_part, frac = m.group(1), m.group(2), m.group(3)
     magnitude = _magnitude_word(m.group(4), m.group(5))
     prefix = "minus " if sign else ""
+    words = _number(int_part, frac)
     if magnitude:
-        return prefix + _number(int_part, frac) + " " + magnitude + " dollars"
-    dollars = _int(int_part)
-    unit = "dollar" if dollars == 1 else "dollars"
-    if frac and len(frac) == 2:
-        cents = int(frac)
-        words = cardinal(dollars) + " " + unit
-        if cents:
-            words += " and " + cardinal(cents) + (" cent" if cents == 1 else " cents")
-        return prefix + words
-    if frac:
-        return prefix + _number(int_part, frac) + " dollars"
-    return prefix + cardinal(dollars) + " " + unit
+        words += " " + magnitude
+    return prefix + words
 
 
 def _percent(m: re.Match) -> str:
@@ -241,6 +246,53 @@ _PLAIN_RE = re.compile(
 _INITIALISM_RE = re.compile(r"\b(?:[A-Za-z]\.){2,}")
 _INNER_APOSTROPHE_RE = re.compile(r"(?<=\w)'(?=\w)")
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+_DOLLAR_WORDS = frozenset({"dollar", "dollars"})
+_CENT_WORDS = frozenset({"cent", "cents"})
+_ONES_INDEX = {w: i for i, w in enumerate(_ONES)}
+_TENS_INDEX = {w: i for i, w in enumerate(_TENS) if w != "_"}
+
+
+def _cents_at(tokens: list[str], i: int) -> tuple[int, int] | None:
+    """Parse ``<1-99 in words> cent(s)`` at ``tokens[i:]``: (value, tokens used)."""
+    first = tokens[i] if i < len(tokens) else None
+    if first in _TENS_INDEX:
+        value, used = 10 * _TENS_INDEX[first], 1
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+        if nxt in _ONES_INDEX and 0 < _ONES_INDEX[nxt] < 10:
+            value, used = value + _ONES_INDEX[nxt], 2
+    elif first in _ONES_INDEX and _ONES_INDEX[first] > 0:
+        value, used = _ONES_INDEX[first], 1
+    else:
+        return None
+    if i + used < len(tokens) and tokens[i + used] in _CENT_WORDS:
+        return value, used + 1
+    return None
+
+
+def _canonical_currency(tokens: list[str]) -> list[str]:
+    """Drop "dollar(s)"; rewrite "dollars and N cents" as "point d d".
+
+    So the spelled "one hundred seven dollars and thirty five cents" (how our
+    writers phrase prices) reads like "$107.35" and "107.35" (how the ASR writes
+    them, with or without the "$").
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in _DOLLAR_WORDS:
+            if i + 1 < len(tokens) and tokens[i + 1] == "and":
+                cents = _cents_at(tokens, i + 2)
+                if cents is not None:
+                    value, used = cents
+                    out += ["point", _ONES[value // 10], _ONES[value % 10]]
+                    i += 2 + used
+                    continue
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return out
 
 
 def normalize_text(text: str) -> str:
@@ -275,4 +327,4 @@ def normalize_text(text: str) -> str:
 
 
 def normalize_tokens(text: str) -> list[str]:
-    return _TOKEN_RE.findall(normalize_text(text))
+    return _canonical_currency(_TOKEN_RE.findall(normalize_text(text)))

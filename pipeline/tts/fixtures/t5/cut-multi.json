@@ -20,20 +20,20 @@
   },
   "intervals": [
    {
-    "script_start": 83,
-    "script_end": 91,
+    "script_start": 82,
+    "script_end": 90,
     "tokens": 8,
     "removed_text": "app on a laptop. Mowshowitz also calls the"
    },
    {
-    "script_start": 381,
-    "script_end": 389,
+    "script_start": 380,
+    "script_end": 388,
     "tokens": 8,
     "removed_text": "more than forty percent of Namibians are out"
    },
    {
-    "script_start": 419,
-    "script_end": 427,
+    "script_start": 418,
+    "script_end": 426,
     "tokens": 8,
     "removed_text": "for a country of three million people with"
    }

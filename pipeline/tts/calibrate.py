@@ -245,8 +245,10 @@ def _group_len(units: Sequence[str], i: int) -> int:
     is the smallest window whose joined normalization differs from the per-unit
     one (a 3-window counts only when the difference is not just units ``i+1..``),
     extended by one more unit when that unit changes the group's reading rather
-    than merely following it: "$" "1.5" groups with "billion" (one point five
-    billion dollars), "$1.5" "billion" does not swallow the "in" after it.
+    than merely following it, and "$1.5" "billion" does not swallow the "in"
+    after it. (Since verifier v4 a bare "$" normalizes to nothing, so "$" "1.5"
+    "billion" no longer forms a group: "$" maps to no token and "1.5" and
+    "billion" map one to one.)
     """
     n = len(units)
     if i + 2 <= n and _differs(units, i, 2):

@@ -2,7 +2,8 @@
 
 Changing normalization, alignment, or DEFAULT_THRESHOLDS changes verifier
 policy: bump VERIFIER_VERSION (v2: the thresholds calibrated in T5; v3: the
-recall floor padded to recall_min_tokens, bead my-podcasts-9p3.14). The ASR
+recall floor padded to recall_min_tokens, bead my-podcasts-9p3.14; v4: currency
+normalizes to the bare number, bead my-podcasts-9p3.15). The ASR
 side (model, prompt, generation config) is covered by asr.ASR_POLICY; bump
 asr.ASR_PROMPT_VERSION on any prompt text change. T3 must fold VERIFIER_POLICY
 (both halves), not just VERIFIER_VERSION, into the render cache key.
@@ -44,7 +45,7 @@ from pipeline.tts.asr import ASR_POLICY, Transcription, TranscriptionUnavailable
 from pipeline.tts.normalize import normalize_tokens
 
 
-VERIFIER_VERSION = "3"
+VERIFIER_VERSION = "4"
 
 
 def verifier_policy(asr_policy: str = ASR_POLICY) -> str:

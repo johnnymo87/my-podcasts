@@ -118,6 +118,13 @@ at a normal 3–5 attempts, but more when attempts multiply (OpenAI also failing
 up to 51; email redelivery, which has no application-level cap). It self-heals when Gemini
 recovers. A cooldown is a later addition if manifests show it matters.
 
+### Amendment (verifier v4, 2026-10-01)
+
+Currency normalizes to the bare number and "dollar(s)" is dropped; a spelled "N dollars and M
+cents" becomes "N point d d". Every written form of a price converges (`$107.35`, `107.35`,
+`107 dollars and 35 cents`, the writers' spelled form). Bead `my-podcasts-9p3.15`; evidence in
+`docs/plans/2026-10-01-gemini-tts-t7-flip-fp-levine-plan.md`.
+
 ### Amendments (T3 consult, 2026-09-30)
 
 The inline text above stays; where it disagrees with these, these win.
@@ -314,7 +321,9 @@ repetitions or added speech.
 4. **PR 3 — flip The Rundown.** After ~5 episodes, review manifests + alerts: fallback rate,
    retries, skips, real cost including verification. *(Status 2026-10-01: gate decided Flash-Lite
    everywhere; The Rundown flipped to `gemini-3.8-flash-lite-tts`/Kore with `nova` fallback in
-   T6, plan `docs/plans/2026-10-01-gemini-tts-t6-flip-rundown-plan.md`.)*
+   T6, plan `docs/plans/2026-10-01-gemini-tts-t6-flip-rundown-plan.md`. The owner then chose to flip
+   FP Digest (Alnilam) and Levine (Enceladus) at once, without the 5-episode wait; see
+   `docs/plans/2026-10-01-gemini-tts-t7-flip-fp-levine-plan.md`.)*
 5. **PRs 4+ — flip remaining feeds one at a time**, email feeds after both daily feeds. Levine last.
 
 Out of scope (separate beads): `google-genai` 2.25+ upgrade and designed voices; the email path's

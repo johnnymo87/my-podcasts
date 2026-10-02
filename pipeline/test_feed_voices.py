@@ -98,12 +98,10 @@ def _email(tmp_path: Path, route_tag: str | None) -> None:
 
 
 # (route tag, feed slug the email lands in, voice before this PR; the-rundown
-# moved to Gemini in T6 and is pinned separately below)
+# moved to Gemini in T6, fp-digest and levine in T7; each is pinned separately below)
 _EMAIL_GOLDEN = [
-    ("levine", "levine", "ash"),
     ("yglesias", "yglesias", "shimmer"),
     ("silver", "silver", "echo"),
-    ("fp-digest", "fp-digest", "onyx"),
     ("aaronson", "aaronson", "fable"),
     ("chinatalk", "chinatalk", "alloy"),
     ("no-such-route-tag", "general", "ash"),  # unknown tag -> general preset
@@ -125,6 +123,43 @@ def test_email_routed_to_the_rundown_renders_gemini(tmp_path, fake_tts_render) -
     [call] = fake_tts_render
     assert call["config"] == _RUNDOWN_GEMINI
     assert call["feed_slug"] == "the-rundown"
+
+
+@pytest.mark.parametrize(
+    "route_tag,config",
+    [
+        (
+            "levine",
+            RenderConfig(
+                primary=GeminiConfig(
+                    model="gemini-3.8-flash-lite-tts",
+                    voice="Enceladus",
+                    style="calm, measured news anchor",
+                ),
+                fallback=OpenAIConfig(model="tts-1-hd", voice="ash"),
+            ),
+        ),
+        (
+            "fp-digest",
+            RenderConfig(
+                primary=GeminiConfig(
+                    model="gemini-3.8-flash-lite-tts",
+                    voice="Alnilam",
+                    style="calm, measured news anchor",
+                ),
+                fallback=OpenAIConfig(model="tts-1-hd", voice="onyx"),
+            ),
+        ),
+    ],
+)
+def test_email_routed_to_a_t7_feed_renders_gemini(
+    tmp_path, fake_tts_render, route_tag, config
+) -> None:
+    """T7: fp-digest and levine are Gemini on the email path too."""
+    _email(tmp_path, route_tag)
+    [call] = fake_tts_render
+    assert call["config"] == config
+    assert call["feed_slug"] == route_tag
 
 
 def test_email_env_overrides_still_win(tmp_path, fake_tts_render, monkeypatch) -> None:
@@ -302,8 +337,8 @@ def test_publish_script_dry_run_falls_through_to_a_gemini_primary(
 def test_publish_script_dry_run_echo_describes_the_resolved_config(
     tmp_path, fake_tts_render
 ) -> None:
-    res = _publish_cli(tmp_path, "fp-digest")
+    res = _publish_cli(tmp_path, "aaronson")
     assert res.exit_code == 0, res.output
-    assert "Running TTS (dry run, openai tts-1-hd/onyx)..." in res.output
+    assert "Running TTS (dry run, openai tts-1-hd/fable)..." in res.output
     res = _publish_cli(tmp_path, "fp-digest", "--voice", "ash")
     assert "Running TTS (dry run, openai tts-1-hd/ash)..." in res.output

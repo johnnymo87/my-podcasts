@@ -195,10 +195,13 @@ def test_map_words_handles_multiword_numbers():
     wm = map_words_to_script(script, words)
     assert [m.token for m in wm] == script
     by_token = {m.token: m for m in wm}
-    # tokens of the number group carry the whole group's time span, not exact
-    for tok in ("one", "point", "five", "billion", "dollars"):
+    # tokens of the number group carry the group's time span, not exact; since
+    # verifier v4 "$1.5" is just the number, so "billion" is its own word
+    for tok in ("one", "point", "five"):
         m = by_token[tok]
-        assert (m.word_index, m.start, m.end, m.exact) == (2, 0.7, 1.9, False)
+        assert (m.word_index, m.start, m.end, m.exact) == (2, 0.7, 1.4, False)
+    assert script == ["it", "cost", "one", "point", "five", "billion", "in", "total"]
+    assert (by_token["billion"].word_index, by_token["billion"].exact) == (3, True)
     # the words around it map 1:1 and are exact boundary candidates
     assert (by_token["in"].word_index, by_token["in"].exact) == (4, True)
     assert (by_token["total"].word_index, by_token["total"].end) == (5, 2.7)
@@ -1548,7 +1551,7 @@ def test_ordinary_sentence_ends_still_split():
     assert len(st.sentence_starts) == 3
 
 
-def test_a_dollar_sign_word_then_the_number_then_the_magnitude_group_together():
+def test_a_bare_dollar_sign_word_maps_to_no_token():
     script = normalize_tokens("It cost $1.5 billion in total.")
     words = [
         {"word": w, "start": i * 0.5, "end": i * 0.5 + 0.5}
@@ -1556,8 +1559,11 @@ def test_a_dollar_sign_word_then_the_number_then_the_magnitude_group_together():
     ]
     wm = map_words_to_script(script, words)
     by_token = {m.token: m for m in wm}
-    for tok in ("one", "point", "five", "billion", "dollars"):
-        assert by_token[tok].word_index == 2 and not by_token[tok].exact
+    # A bare "$" is no token at all (verifier v4), so the number maps to "1.5".
+    for tok in ("one", "point", "five"):
+        assert by_token[tok].word_index == 3 and not by_token[tok].exact
+    assert (by_token["billion"].word_index, by_token["billion"].exact) == (4, True)
+    assert 2 not in {m.word_index for m in wm}  # the "$" word carries no token
     assert by_token["in"].word_index == 5 and by_token["in"].exact
     assert by_token["total"].word_index == 6 and by_token["total"].exact
     assert all(m.word_index is not None for m in wm)
