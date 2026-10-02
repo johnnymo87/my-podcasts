@@ -6,8 +6,10 @@ Two layers, both under one ``cache_dir``:
   whole text + config.
 * **The OpenAI chunk spool** (``<cache_dir>/chunks/``): the raw PCM of each
   OpenAI chunk, so a render that fails partway does not re-buy the chunks it had
-  already paid for on the next retry. OpenAI leaves only: the Gemini phase runs
-  in a killable child with per-chunk verification and spools nothing.
+  already paid for on the next retry. It holds only chunks of renders that did
+  NOT complete: a render that stores its completed entry discards its spool
+  files (:func:`spool_discard`). OpenAI leaves only: the Gemini phase runs in a
+  killable child with per-chunk verification and spools nothing.
 
 Every function is best-effort and never raises -- a cache problem must never
 discard valid audio (design doc, "Completed-render reuse").
@@ -23,6 +25,7 @@ import os
 import shutil
 import tempfile
 import time
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -35,8 +38,8 @@ log = logging.getLogger(__name__)
 RENDERER_VERSION = "2"
 DEFAULT_CACHE_DIR = Path("/persist/my-podcasts/tts-cache")
 RETENTION_DAYS = 14
-# Hex digests name completed entries, so this cannot collide with one; lookup and
-# prune still treat it specially rather than rely on that.
+# Hex digests name completed entries, so this cannot collide with one; only
+# ``prune`` treats the name specially (it must not age the directory out whole).
 SPOOL_DIRNAME = "chunks"
 
 
@@ -251,6 +254,9 @@ def spool_store(
     """
     try:
         if not pcm or len(pcm) % 2:
+            log.warning(
+                "TTS chunk spool: refusing to spool unusable PCM (%d bytes)", len(pcm)
+            )
             return False
         pcm_path, side_path = _spool_paths(cache_dir, key)
         pcm_path.parent.mkdir(parents=True, exist_ok=True)
@@ -266,3 +272,14 @@ def spool_store(
     except Exception as exc:  # noqa: BLE001
         log.warning("TTS chunk spool store failed (%s); reduced retry protection", exc)
         return False
+
+
+def spool_discard(cache_dir: Path, keys: Iterable[str]) -> None:
+    """Delete the spool files (``.pcm`` and ``.json``) of every key. Never raises."""
+    try:
+        for key in set(keys):
+            for path in _spool_paths(cache_dir, key):
+                with contextlib.suppress(OSError):
+                    path.unlink()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("TTS chunk spool cleanup failed (%s)", exc)

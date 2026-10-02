@@ -38,6 +38,7 @@ from pipeline.tts.cache import (
     chunk_key,
     lookup,
     prune,
+    spool_discard,
     spool_lookup,
     spool_store,
     store,
@@ -201,28 +202,39 @@ def _hit_matches_request(
     )
 
 
-def _spool_get(
-    cache_dir: Path | None, leaf: OpenAIConfig | GeminiConfig, chunk: str
-) -> bytes | None:
+def _spool_get(cache_dir: Path | None, key: str | None) -> bytes | None:
     """This chunk's spooled PCM, or None. A spool problem is a miss, never a failure."""
-    if cache_dir is None:
+    if cache_dir is None or key is None:
         return None
     try:
-        return spool_lookup(cache_dir, chunk_key(leaf, chunk))
+        return spool_lookup(cache_dir, key)
     except Exception:  # noqa: BLE001
         log.warning("TTS chunk spool lookup failed; synthesizing", exc_info=True)
         return None
 
 
 def _spool_put(
-    cache_dir: Path | None, leaf: OpenAIConfig | GeminiConfig, chunk: str, pcm: bytes
+    cache_dir: Path | None,
+    key: str | None,
+    leaf: OpenAIConfig | GeminiConfig,
+    pcm: bytes,
 ) -> None:
-    if cache_dir is None:
+    if cache_dir is None or key is None:
         return
     try:
-        spool_store(cache_dir, chunk_key(leaf, chunk), leaf, pcm)
+        spool_store(cache_dir, key, leaf, pcm)
     except Exception:  # noqa: BLE001 -- never discard bought audio over the spool
         log.warning("TTS chunk spool store failed", exc_info=True)
+
+
+def _spool_clear(cache_dir: Path, chunk_records: list[dict]) -> None:
+    """Drop the spool files of a render whose completed entry is now stored."""
+    try:
+        spool_discard(
+            cache_dir, [r["spool_key"] for r in chunk_records if r.get("spool_key")]
+        )
+    except Exception:  # noqa: BLE001 -- the render already succeeded
+        log.warning("TTS chunk spool cleanup failed", exc_info=True)
 
 
 def _synthesize_all(
@@ -240,7 +252,10 @@ def _synthesize_all(
     With a ``cache_dir``, each chunk's PCM is spooled (``cache.spool_store``) as
     soon as it is bought, and a chunk already in the spool is reused instead of
     synthesized (``rec["spooled"]`` True, ``attempts`` 0). A render that fails
-    partway therefore re-buys only the failed and later chunks on retry. This
+    partway therefore re-buys only the failed and later chunks on retry. Each
+    record names its spool file stem as ``rec["spool_key"]`` (None with no
+    ``cache_dir``); the caller discards those files once the completed render is
+    stored, so the spool holds only chunks of renders that did not complete. This
     covers the OpenAI in-process path only -- an OpenAI primary and the OpenAI
     fallback after a failed Gemini phase. The Gemini phase itself runs in a
     killable child with per-chunk ASR verification and spools nothing, so a
@@ -260,14 +275,15 @@ def _synthesize_all(
                 "errors": [],
                 "audio_seconds": 0.0,
                 "spooled": False,
+                "spool_key": chunk_key(leaf, chunk) if cache_dir is not None else None,
             }
             chunk_records.append(rec)
-            pcm = _spool_get(cache_dir, leaf, chunk)
+            pcm = _spool_get(cache_dir, rec["spool_key"])
             if pcm is not None:
                 rec["spooled"] = True
             else:
                 pcm = _synthesize_chunk(provider, leaf, chunk, rec, len(chunks))
-                _spool_put(cache_dir, leaf, chunk, pcm)
+                _spool_put(cache_dir, rec["spool_key"], leaf, pcm)
             rec["audio_seconds"] = len(pcm) / PCM_BYTES_PER_SECOND
             pcm_parts.append(pcm)
         return pcm_parts
@@ -1041,6 +1057,10 @@ def render_episode(
                 "total_audio_seconds": total_seconds,
             },
         )
+        if record["cache_stored"]:
+            # Only a stored completed entry makes the spool redundant. Kept on a
+            # failed store: the next attempt would otherwise re-buy every chunk.
+            _spool_clear(cache_dir, chunk_records)
     record.update(
         status="rendered",
         rendered_config=asdict(leaf),

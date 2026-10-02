@@ -336,12 +336,13 @@ def test_damaged_spool_entry_is_deleted_and_can_be_rewritten(tmp_path) -> None:
     assert cache.spool_lookup(d, key) == PCM
 
 
-def test_spool_refuses_to_store_unusable_pcm(tmp_path) -> None:
+def test_spool_refuses_to_store_unusable_pcm(tmp_path, caplog) -> None:
     d = tmp_path / "c"
     key = cache.chunk_key(LEAF, "x")
     assert cache.spool_store(d, key, LEAF, b"") is False
     assert cache.spool_store(d, key, LEAF, b"\x00\x00\x00") is False
     assert cache.spool_lookup(d, key) is None
+    assert "refusing to spool" in caplog.text
 
 
 def test_spool_store_failure_returns_false_warns_and_leaves_no_tmp(
@@ -353,10 +354,10 @@ def test_spool_store_failure_returns_false_warns_and_leaves_no_tmp(
     def boom(src, dst):
         raise PermissionError("read-only")
 
-    monkeypatch.setattr(cache.os, "replace", boom)
-    assert cache.spool_store(d, key, LEAF, PCM) is False
+    with monkeypatch.context() as m:
+        m.setattr(cache.os, "replace", boom)
+        assert cache.spool_store(d, key, LEAF, PCM) is False
     assert "spool" in caplog.text
-    monkeypatch.undo()
     assert cache.spool_lookup(d, key) is None
     assert _spool_files(d) == []
 
@@ -414,3 +415,34 @@ def test_completed_lookup_is_not_confused_by_the_spool_dir(tmp_path) -> None:
     d = tmp_path / "c"
     cache.spool_store(d, cache.chunk_key(LEAF, "x"), LEAF, PCM)
     assert cache.lookup(d, "chunks") is None
+
+
+def test_spool_discard_removes_both_files_of_each_key_only(tmp_path) -> None:
+    d = tmp_path / "c"
+    a, b, keep = (cache.chunk_key(LEAF, t) for t in ("a", "b", "keep"))
+    for k in (a, b, keep):
+        cache.spool_store(d, k, LEAF, PCM)
+    cache.spool_discard(d, [a, b, a])  # a repeated key is fine
+    assert _spool_files(d) == [f"{keep}.json", f"{keep}.pcm"]
+
+
+def test_spool_discard_tolerates_missing_files_and_unusable_roots(tmp_path) -> None:
+    d = tmp_path / "c"
+    cache.spool_discard(d, [cache.chunk_key(LEAF, "never-stored")])  # no dir at all
+    cache.spool_discard(d, [])
+    blocker = tmp_path / "file-not-dir"
+    blocker.write_text("x")
+    cache.spool_discard(blocker, ["k"])  # must not raise
+
+
+def test_spool_discard_never_raises_when_unlink_fails(tmp_path, monkeypatch) -> None:
+    d = tmp_path / "c"
+    key = cache.chunk_key(LEAF, "x")
+    cache.spool_store(d, key, LEAF, PCM)
+
+    def boom(self, *a, **k):
+        raise PermissionError("nope")
+
+    with monkeypatch.context() as m:
+        m.setattr(type(d), "unlink", boom)
+        cache.spool_discard(d, [key])

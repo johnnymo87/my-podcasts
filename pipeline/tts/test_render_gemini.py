@@ -1388,6 +1388,15 @@ def test_a_failed_fallback_retry_reuses_spooled_openai_chunks_but_reruns_the_pha
     assert len(env.phase_calls) == 2 and len(env.alerts) == 2
     chunks = env.manifests()[-1]["chunks"]
     assert [c["spooled"] for c in chunks] == [True] + [False] * (N_OPENAI - 1)
+    # The fallback completed and was stored, so the spool is cleared.
+    assert not list((env.tmp / "c" / "chunks").iterdir())
+
+
+def test_a_fallback_render_whose_store_fails_keeps_its_spool(env, monkeypatch):
+    env.outcome = failed_outcome("deadline")
+    monkeypatch.setattr(render, "store", lambda *a, **k: False)
+    env.render()
+    assert len(list((env.tmp / "c" / "chunks").iterdir())) == 2 * N_OPENAI
 
 
 def test_a_gemini_render_spools_nothing(env):
