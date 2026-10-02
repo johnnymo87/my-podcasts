@@ -10,7 +10,7 @@ import pytest
 
 from pipeline.db import StateStore
 from pipeline.processor import process_email_bytes
-from pipeline.tts import openai_config
+from pipeline.tts import GeminiConfig, OpenAIConfig, RenderConfig, openai_config
 
 
 _EMAIL = b"""\
@@ -57,7 +57,16 @@ def test_renders_with_preset_model_and_voice(tmp_path, fake_tts_render) -> None:
     _run(tmp_path)
 
     [call] = fake_tts_render
-    assert call["config"] == openai_config(model="tts-1-hd", voice="ash")
+    # T7 (owner gate my-podcasts-9p3.6): Levine is Gemini Enceladus, with its
+    # pre-Gemini voice (ash) as the whole-episode fallback.
+    assert call["config"] == RenderConfig(
+        primary=GeminiConfig(
+            model="gemini-3.8-flash-lite-tts",
+            voice="Enceladus",
+            style="calm, measured news anchor",
+        ),
+        fallback=OpenAIConfig(model="tts-1-hd", voice="ash"),
+    )
     assert call["feed_slug"] == "levine"
     assert call["episode_id"] == "2026-08-17-Money-Stuff-Goat-Hedge"
 

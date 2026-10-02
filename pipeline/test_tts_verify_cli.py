@@ -483,7 +483,7 @@ def test_defaults_echo_the_calibrated_thresholds(
         "net_deficit_min": 6,
         "recall_min_tokens": 300,
     }
-    assert report_of(result)["verifier_version"] == "3"
+    assert report_of(result)["verifier_version"] == "4"
 
 
 def _net_deficit_run(tmp_path, script_file, audio_file, value):

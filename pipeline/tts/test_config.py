@@ -99,10 +99,8 @@ def test_gemini_style_may_be_empty() -> None:
     "slug,voice",
     [
         ("general", "ash"),
-        ("levine", "ash"),
         ("yglesias", "shimmer"),
         ("silver", "echo"),
-        ("fp-digest", "onyx"),
         ("aaronson", "fable"),
         ("chinatalk", "alloy"),
         ("some-unknown-feed", "nova"),
@@ -128,13 +126,35 @@ def test_golden_the_rundown_is_gemini_with_its_old_voice_as_fallback() -> None:
     assert resolve_render_config("the-rundown") == RUNDOWN_GEMINI
 
 
-def test_golden_only_the_rundown_is_gemini() -> None:
+def test_golden_fp_digest_is_gemini_alnilam_with_onyx_fallback() -> None:
+    assert resolve_render_config("fp-digest") == RenderConfig(
+        primary=GeminiConfig(
+            model="gemini-3.8-flash-lite-tts",
+            voice="Alnilam",
+            style="calm, measured news anchor",
+        ),
+        fallback=OpenAIConfig(model="tts-1-hd", voice="onyx"),
+    )
+
+
+def test_golden_levine_is_gemini_enceladus_with_ash_fallback() -> None:
+    assert resolve_render_config("levine") == RenderConfig(
+        primary=GeminiConfig(
+            model="gemini-3.8-flash-lite-tts",
+            voice="Enceladus",
+            style="calm, measured news anchor",
+        ),
+        fallback=OpenAIConfig(model="tts-1-hd", voice="ash"),
+    )
+
+
+def test_golden_which_feeds_are_gemini() -> None:
     gemini = {
         slug
         for slug, entry in config.FEED_VOICES.items()
         if isinstance(entry.primary, GeminiConfig)
     }
-    assert gemini == {"the-rundown"}
+    assert gemini == {"the-rundown", "fp-digest", "levine"}
 
 
 def test_override_on_the_rundown_forces_openai_from_its_fallback() -> None:

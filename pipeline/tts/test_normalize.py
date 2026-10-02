@@ -70,13 +70,13 @@ def toks(s: str) -> str:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        # Currency: magnitude moves before "dollars"; cents; singular.
-        ("$580", "five hundred eighty dollars"),
-        ("$750 million", "seven hundred fifty million dollars"),
-        ("$1.8 billion", "one point eight billion dollars"),
-        ("$2.45", "two dollars and forty five cents"),
-        ("$1", "one dollar"),
-        ("$1,000", "one thousand dollars"),
+        # Currency reads as the bare number; "dollar(s)" is dropped (v4).
+        ("$580", "five hundred eighty"),
+        ("$750 million", "seven hundred fifty million"),
+        ("$1.8 billion", "one point eight billion"),
+        ("$2.45", "two point four five"),
+        ("$1", "one"),
+        ("$1,000", "one thousand"),
         # Percent, decimals, grouped integers.
         ("7%", "seven percent"),
         ("5.5 %", "five point five percent"),
@@ -132,12 +132,12 @@ def test_out_of_range_integer_stays_digits():
 @pytest.mark.parametrize(
     ("text", "numbers"),
     [
-        ("$20-30 a barrel", ["twenty dollars", "thirty", "a barrel"]),
-        ("$5-10 million", ["five dollars", "ten million"]),
+        ("$20-30 a barrel", ["twenty", "thirty", "a barrel"]),
+        ("$5-10 million", ["five", "ten million"]),
         ("3:30-5 pm", ["three thirty", "five", "pm"]),
         ("1st-10 place", ["first", "ten", "place"]),
-        ("$3.5-4 billion", ["three point five dollars", "four billion"]),
-        ("$20-30", ["twenty dollars", "thirty"]),
+        ("$3.5-4 billion", ["three point five", "four billion"]),
+        ("$20-30", ["twenty", "thirty"]),
     ],
 )
 def test_range_hyphen_is_not_a_minus_sign(text, numbers):
@@ -151,7 +151,7 @@ def test_range_hyphen_is_not_a_minus_sign(text, numbers):
     ("text", "expected"),
     [
         ("fell -3%", "fell minus three percent"),
-        ("-$5", "minus five dollars"),
+        ("-$5", "minus five"),
         ("(-3)", "minus three"),
         ("down -3", "down minus three"),
     ],
@@ -163,19 +163,19 @@ def test_real_minus_signs_survive_padding_fix(text, expected):
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("$11bn", "eleven billion dollars"),
-        ("$11 billion", "eleven billion dollars"),
-        ("$1.8-billion deal", "one point eight billion dollars deal"),
-        ("$1.8 billion", "one point eight billion dollars"),
-        ("$750 million", "seven hundred fifty million dollars"),
-        ("$2tn", "two trillion dollars"),
-        ("$5M", "five million dollars"),
-        ("$3mm", "three million dollars"),
-        ("$9k", "nine thousand dollars"),
+        ("$11bn", "eleven billion"),
+        ("$11 billion", "eleven billion"),
+        ("$1.8-billion deal", "one point eight billion deal"),
+        ("$1.8 billion", "one point eight billion"),
+        ("$750 million", "seven hundred fifty million"),
+        ("$2tn", "two trillion"),
+        ("$5M", "five million"),
+        ("$3mm", "three million"),
+        ("$9k", "nine thousand"),
         ("11bn", "eleven billion"),
         ("1.5B", "one point five billion"),
         ("4k", "four thousand"),
-        ("$20-30", "twenty dollars thirty"),
+        ("$20-30", "twenty thirty"),
     ],
 )
 def test_glued_and_hyphenated_magnitudes(text, expected):
@@ -186,7 +186,7 @@ def test_glued_and_hyphenated_magnitudes(text, expected):
     ("text", "expected"),
     [
         ("5 mm", "five mm"),
-        ("$11 bn", "eleven dollars bn"),
+        ("$11 bn", "eleven bn"),
         ("5 m", "five m"),
     ],
 )
@@ -201,3 +201,43 @@ def test_diacritics_are_folded():
 def test_version_string_is_partly_converted():
     # Documented behavior: only the leading "3.5" is read as a decimal.
     assert toks("3.5.1") == "three point five 1"
+
+
+# --- currency convergence (my-podcasts-9p3.15, verifier v4) -----------------
+# Gemini ASR is inconsistent about "$" on the same audio, so every way a
+# transcript can write a dollar amount must normalize like the script's "$".
+
+
+@pytest.mark.parametrize(
+    ("script", "transcript"),
+    [
+        ("$15.51", "15.51"),
+        ("$15.51", "15.51 dollars"),
+        ("$15.51", "$15.51"),
+        ("$580", "580 dollars"),
+        ("$580", "580"),
+        ("$1", "1 dollar"),
+        ("$1.8 billion", "1.8 billion dollars"),
+        ("$1.8 billion", "1.8 billion"),
+        ("$11bn", "11 billion"),
+        ("costs $2.45 a share", "costs 2.45 a share"),
+        ("$1,000", "one thousand dollars"),
+    ],
+)
+def test_dollar_sign_dropped_by_asr_still_aligns(script, transcript):
+    assert toks(script) == toks(transcript)
+
+
+def test_price_list_without_dollar_signs_has_no_deficit():
+    """The 9p3.15 case: a 4-price list whose transcript drops every "$"."""
+    script = "Prices were $15.51, $22.10, $9.99 and $101.25 on the day."
+    heard = "Prices were 15.51, 22.10, 9.99 and 101.25 on the day."
+    assert normalize_tokens(script) == normalize_tokens(heard)
+
+
+def test_dollar_words_are_dropped_everywhere():
+    assert toks("a dollar store sells Dollars") == "a store sells"
+
+
+def test_cents_are_kept_as_a_word():
+    assert toks("51 cents") == "fifty one cents"

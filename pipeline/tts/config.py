@@ -117,24 +117,28 @@ def _openai(voice: str) -> RenderConfig:
 # The ONE owner of per-feed TTS settings. Feed slugs are literals because
 # pipeline.tts must not import call-site modules (cycle); a test in
 # pipeline/test_feed_voices.py pins that every routable feed slug is a key.
+# The owner's listening-gate decision (my-podcasts-9p3.6, 2026-10-01): Gemini
+# Flash-Lite on the-rundown (T6), fp-digest and levine (T7). Each Gemini feed's
+# fallback is its own pre-Gemini OpenAI voice, so a fallback episode sounds like
+# the old feed. Rollback: git revert the flip (golden tests pin these entries).
+GEMINI_TTS_MODEL = "gemini-3.8-flash-lite-tts"
+GEMINI_STYLE = "calm, measured news anchor"
+
+
+def _gemini(voice: str, fallback_voice: str) -> RenderConfig:
+    return RenderConfig(
+        primary=GeminiConfig(model=GEMINI_TTS_MODEL, voice=voice, style=GEMINI_STYLE),
+        fallback=OpenAIConfig(model=DEFAULT_OPENAI_MODEL, voice=fallback_voice),
+    )
+
+
 FEED_VOICES: dict[str, RenderConfig] = {
     "general": _openai("ash"),
-    "levine": _openai("ash"),
+    "levine": _gemini("Enceladus", fallback_voice="ash"),
     "yglesias": _openai("shimmer"),
     "silver": _openai("echo"),
-    # Owner's listening-gate decision (my-podcasts-9p3.6, 2026-10-01). The
-    # fallback is the feed's previous OpenAI voice, so a fallback episode
-    # sounds exactly like the pre-Gemini feed. Rollback: git revert the T6
-    # commit (golden tests pin this entry), then restart the consumer.
-    "the-rundown": RenderConfig(
-        primary=GeminiConfig(
-            model="gemini-3.8-flash-lite-tts",
-            voice="Kore",
-            style="calm, measured news anchor",
-        ),
-        fallback=OpenAIConfig(model=DEFAULT_OPENAI_MODEL, voice="nova"),
-    ),
-    "fp-digest": _openai("onyx"),
+    "the-rundown": _gemini("Kore", fallback_voice="nova"),
+    "fp-digest": _gemini("Alnilam", fallback_voice="onyx"),
     "aaronson": _openai("fable"),
     "chinatalk": _openai("alloy"),
 }

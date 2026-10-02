@@ -10,7 +10,8 @@ source of alignment noise in the 2026-09-28 evaluation.
 
 Supported, in the order applied:
   times            4:30 -> four thirty, 9:05 -> nine oh five, 10:00 -> ten
-  currency         $580, $1,000, $2.45 (dollars and cents), $1.8 billion
+  currency         $580, $1,000, $2.45, $1.8 billion -> the bare number (no
+                   "dollars"; $2.45 reads "two point four five")
   percent          7%, 5.5 %
   ordinals         1st, 30th, 21st
   decades          1990s, 90s
@@ -21,6 +22,15 @@ Supported, in the order applied:
 Anything else numeric is left as digits: visible noise, never a guess. That
 means integers above 999 trillion, and the tail of a version string: "3.5.1"
 reads as "three point five 1" (the leading decimal converts, the ".1" does not).
+
+Currency (verifier v4, my-podcasts-9p3.15): a dollar amount normalizes to the
+same tokens as the bare number, and the words "dollar"/"dollars" are dropped on
+both sides. Gemini ASR writes "$15.51", "15.51" or "15.51 dollars" for the same
+audio, so any reading that kept a currency word on one side only turned every
+price into a 1-4 token deficit (a 4-price list reached net_missing 8, a false
+omission). The cost is that a spelled-out "fifteen dollars and fifty one cents"
+in a transcript no longer matches "$15.51" (ASR writes digits, so this is rare),
+and a dropped "dollars" is never counted as missing speech.
 
 Also: glued magnitude abbreviations (11bn, 5M, 4k; bn tn mm m b k) convert only
 when attached directly to digits, so "5 mm" is left alone. Diacritics are
@@ -169,22 +179,14 @@ def _magnitude_word(spelled: str | None, abbrev: str | None) -> str | None:
 
 
 def _currency(m: re.Match) -> str:
+    """A dollar amount reads as the bare number (see the module docstring)."""
     sign, int_part, frac = m.group(1), m.group(2), m.group(3)
     magnitude = _magnitude_word(m.group(4), m.group(5))
     prefix = "minus " if sign else ""
+    words = _number(int_part, frac)
     if magnitude:
-        return prefix + _number(int_part, frac) + " " + magnitude + " dollars"
-    dollars = _int(int_part)
-    unit = "dollar" if dollars == 1 else "dollars"
-    if frac and len(frac) == 2:
-        cents = int(frac)
-        words = cardinal(dollars) + " " + unit
-        if cents:
-            words += " and " + cardinal(cents) + (" cent" if cents == 1 else " cents")
-        return prefix + words
-    if frac:
-        return prefix + _number(int_part, frac) + " dollars"
-    return prefix + cardinal(dollars) + " " + unit
+        words += " " + magnitude
+    return prefix + words
 
 
 def _percent(m: re.Match) -> str:
@@ -241,6 +243,7 @@ _PLAIN_RE = re.compile(
 _INITIALISM_RE = re.compile(r"\b(?:[A-Za-z]\.){2,}")
 _INNER_APOSTROPHE_RE = re.compile(r"(?<=\w)'(?=\w)")
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+_DROPPED_TOKENS = frozenset({"dollar", "dollars"})
 
 
 def normalize_text(text: str) -> str:
@@ -275,4 +278,6 @@ def normalize_text(text: str) -> str:
 
 
 def normalize_tokens(text: str) -> list[str]:
-    return _TOKEN_RE.findall(normalize_text(text))
+    return [
+        t for t in _TOKEN_RE.findall(normalize_text(text)) if t not in _DROPPED_TOKENS
+    ]

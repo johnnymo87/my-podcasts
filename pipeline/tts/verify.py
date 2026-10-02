@@ -44,7 +44,7 @@ from pipeline.tts.asr import ASR_POLICY, Transcription, TranscriptionUnavailable
 from pipeline.tts.normalize import normalize_tokens
 
 
-VERIFIER_VERSION = "3"
+VERIFIER_VERSION = "4"
 
 
 def verifier_policy(asr_policy: str = ASR_POLICY) -> str:
