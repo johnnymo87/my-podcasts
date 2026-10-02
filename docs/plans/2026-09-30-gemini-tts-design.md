@@ -118,6 +118,13 @@ at a normal 3–5 attempts, but more when attempts multiply (OpenAI also failing
 up to 51; email redelivery, which has no application-level cap). It self-heals when Gemini
 recovers. A cooldown is a later addition if manifests show it matters.
 
+### Amendment (verifier v4, 2026-10-01)
+
+Currency normalizes to the bare number and "dollar(s)" is dropped; a spelled "N dollars and M
+cents" becomes "N point d d". Every written form of a price converges (`$107.35`, `107.35`,
+`107 dollars and 35 cents`, the writers' spelled form). Bead `my-podcasts-9p3.15`; evidence in
+`docs/plans/2026-10-01-gemini-tts-t7-flip-fp-levine-plan.md`.
+
 ### Amendments (T3 consult, 2026-09-30)
 
 The inline text above stays; where it disagrees with these, these win.

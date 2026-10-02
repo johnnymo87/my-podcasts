@@ -236,7 +236,9 @@ Spend: $1.211 (synth $0.690, Gemini ASR $0.236, whisper $0.286), all calls settl
   tails peaked at 4; whisper reached exactly 15 on the names-dense Levine 2026-09-29 headline list).
   During T6 review, trend unmatched tokens on chunks under 300 (PR #29's per-attempt `matched_tokens`
   and `max_net_missing`, merged; the fields exist now) and revisit if any faithful chunk exceeds 12.
-- **Currency normalization is asymmetric:** `$15.51` normalizes to dollars-and-cents words, but a
+- **Currency normalization was asymmetric (resolved, bead `my-podcasts-9p3.15`, verifier v4;
+  T5 replayed under v4 with remapped labels: unchanged, see
+  `docs/plans/2026-10-01-gemini-tts-t7-flip-fp-levine-plan.md`):** `$15.51` normalized to dollars-and-cents words, but a
   transcript that drops the `$` reads "fifteen point five one", and Gemini ASR is not consistent
   about `$`. A price list can produce a false omission. Rundown/FP scripts spell numbers out
   (no `$`+digit in 132 recent Rundown scripts); Levine does not. Bead `my-podcasts-9p3.15`, before Levine flips.

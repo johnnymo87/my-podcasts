@@ -241,3 +241,48 @@ def test_dollar_words_are_dropped_everywhere():
 
 def test_cents_are_kept_as_a_word():
     assert toks("51 cents") == "fifty one cents"
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        "$107.35",
+        "107.35",
+        "107.35 dollars",
+        "107 dollars and 35 cents",
+        "one hundred seven dollars and thirty-five cents",
+    ],
+)
+def test_every_way_to_write_dollars_and_cents_converges(form):
+    """Writers spell prices out, ASR writes digits with or without "$"."""
+    assert toks(f"It closed at {form} today") == toks("It closed at $107.35 today")
+
+
+@pytest.mark.parametrize(
+    ("spelled", "digits"),
+    [
+        ("two dollars and ninety cents", "$2.90"),
+        ("one dollar and one cent", "$1.01"),
+        ("three dollars and five cents", "$3.05"),
+        ("a dollar and fifty cents", "a $1.50"),
+    ],
+)
+def test_spelled_cents_become_two_decimal_digits(spelled, digits):
+    if spelled.startswith("a dollar"):
+        # "a" is not a number word; only the cents part is rewritten.
+        assert toks(spelled) == "a point five zero"
+        return
+    assert toks(spelled) == toks(digits)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "fifty cents",
+        "dollars and cents",
+        "ten dollars and a hundred cents",
+        "five dollars and change",
+    ],
+)
+def test_cents_without_a_full_dollars_and_cents_shape_are_left_alone(text):
+    assert "point" not in toks(text).split()

@@ -19,9 +19,6 @@ R2_ACCOUNT_ID="$(sudo cat /run/secrets/r2_account_id)" R2_ACCESS_KEY_ID="$(sudo 
 
 ## Common failures
 
-- `LookupError: Resource punkt_tab not found`
-  - only seen on pre-`pipeline.tts` deploys: NLTK is no longer used by the pipeline once the renderer is deployed (the workstation unit cleanup is bead `my-podcasts-9p3.9`)
-  - on an old deploy, confirm `NLTK_DATA=/persist/my-podcasts/nltk_data` for service and restart `my-podcasts-consumer`
 - queue backlog grows while service is up
   - inspect logs: `journalctl -u my-podcasts-consumer -n 200 --no-pager`
   - verify `CLOUDFLARE_QUEUE_ID` and token scopes

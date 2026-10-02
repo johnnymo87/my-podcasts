@@ -98,7 +98,7 @@ def _email(tmp_path: Path, route_tag: str | None) -> None:
 
 
 # (route tag, feed slug the email lands in, voice before this PR; the-rundown
-# moved to Gemini in T6 and is pinned separately below)
+# moved to Gemini in T6, fp-digest and levine in T7; each is pinned separately below)
 _EMAIL_GOLDEN = [
     ("yglesias", "yglesias", "shimmer"),
     ("silver", "silver", "echo"),

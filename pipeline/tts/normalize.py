@@ -28,9 +28,12 @@ same tokens as the bare number, and the words "dollar"/"dollars" are dropped on
 both sides. Gemini ASR writes "$15.51", "15.51" or "15.51 dollars" for the same
 audio, so any reading that kept a currency word on one side only turned every
 price into a 1-4 token deficit (a 4-price list reached net_missing 8, a false
-omission). The cost is that a spelled-out "fifteen dollars and fifty one cents"
-in a transcript no longer matches "$15.51" (ASR writes digits, so this is rare),
-and a dropped "dollars" is never counted as missing speech.
+omission). Our writers spell prices out ("fifteen dollars and fifty-one
+cents"), so "<number> dollars and <1-99> cents" is rewritten to "<number> point
+d d" at the token level: every written form of a dollars-and-cents amount
+converges. The cost is that a dropped "dollars" is never counted as missing
+speech, and a dollar amount whose integer part is not a plain number ("a
+dollar and fifty cents") becomes "a point five zero" on both sides alike.
 
 Also: glued magnitude abbreviations (11bn, 5M, 4k; bn tn mm m b k) convert only
 when attached directly to digits, so "5 mm" is left alone. Diacritics are
@@ -243,7 +246,53 @@ _PLAIN_RE = re.compile(
 _INITIALISM_RE = re.compile(r"\b(?:[A-Za-z]\.){2,}")
 _INNER_APOSTROPHE_RE = re.compile(r"(?<=\w)'(?=\w)")
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
-_DROPPED_TOKENS = frozenset({"dollar", "dollars"})
+_DOLLAR_WORDS = frozenset({"dollar", "dollars"})
+_CENT_WORDS = frozenset({"cent", "cents"})
+_ONES_INDEX = {w: i for i, w in enumerate(_ONES)}
+_TENS_INDEX = {w: i for i, w in enumerate(_TENS) if w != "_"}
+
+
+def _cents_at(tokens: list[str], i: int) -> tuple[int, int] | None:
+    """Parse ``<1-99 in words> cent(s)`` at ``tokens[i:]``: (value, tokens used)."""
+    first = tokens[i] if i < len(tokens) else None
+    if first in _TENS_INDEX:
+        value, used = 10 * _TENS_INDEX[first], 1
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+        if nxt in _ONES_INDEX and 0 < _ONES_INDEX[nxt] < 10:
+            value, used = value + _ONES_INDEX[nxt], 2
+    elif first in _ONES_INDEX and _ONES_INDEX[first] > 0:
+        value, used = _ONES_INDEX[first], 1
+    else:
+        return None
+    if i + used < len(tokens) and tokens[i + used] in _CENT_WORDS:
+        return value, used + 1
+    return None
+
+
+def _canonical_currency(tokens: list[str]) -> list[str]:
+    """Drop "dollar(s)"; rewrite "dollars and N cents" as "point d d".
+
+    So the spelled "one hundred seven dollars and thirty five cents" (how our
+    writers phrase prices) reads like "$107.35" and "107.35" (how the ASR writes
+    them, with or without the "$").
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in _DOLLAR_WORDS:
+            if i + 1 < len(tokens) and tokens[i + 1] == "and":
+                cents = _cents_at(tokens, i + 2)
+                if cents is not None:
+                    value, used = cents
+                    out += ["point", _ONES[value // 10], _ONES[value % 10]]
+                    i += 2 + used
+                    continue
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return out
 
 
 def normalize_text(text: str) -> str:
@@ -278,6 +327,4 @@ def normalize_text(text: str) -> str:
 
 
 def normalize_tokens(text: str) -> list[str]:
-    return [
-        t for t in _TOKEN_RE.findall(normalize_text(text)) if t not in _DROPPED_TOKENS
-    ]
+    return _canonical_currency(_TOKEN_RE.findall(normalize_text(text)))
