@@ -22,7 +22,7 @@
    - Writes the finished briefing script to `<work_dir>/script.txt`
    - Session is deleted on completion or failure
 
-5. **TTS + publish** (`pipeline/things_happen_processor.py`): Reads script from `/tmp/things-happen-<job_id>.txt`, renders via `pipeline.tts.render_episode` (OpenAI model: tts-1-hd, voice: nova), uploads MP3 to `episodes/things-happen/<date>-things-happen.mp3`, inserts episode, regenerates feeds.
+5. **TTS + publish** (`pipeline/things_happen_processor.py`): Reads the script from `<work_dir>/script.txt` (the consumer passes it in), renders via `pipeline.tts.render_episode` with the-rundown's `FEED_VOICES` entry (Gemini `gemini-3.8-flash-lite-tts`/Kore, verified per chunk, whole-episode fallback to OpenAI `tts-1-hd`/nova with a Telegram alert; see `pipeline/AGENTS.md` "TTS Renderer"), uploads MP3 to `episodes/the-rundown/<date>-the-rundown.mp3`, inserts episode, regenerates feeds.
 
 ## Key modules
 

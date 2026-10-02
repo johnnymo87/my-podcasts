@@ -97,12 +97,12 @@ def _email(tmp_path: Path, route_tag: str | None) -> None:
         store.close()
 
 
-# (route tag, feed slug the email lands in, voice before this PR)
+# (route tag, feed slug the email lands in, voice before this PR; the-rundown
+# moved to Gemini in T6 and is pinned separately below)
 _EMAIL_GOLDEN = [
     ("levine", "levine", "ash"),
     ("yglesias", "yglesias", "shimmer"),
     ("silver", "silver", "echo"),
-    ("the-rundown", "the-rundown", "nova"),
     ("fp-digest", "fp-digest", "onyx"),
     ("aaronson", "aaronson", "fable"),
     ("chinatalk", "chinatalk", "alloy"),
@@ -117,6 +117,14 @@ def test_email_path_golden(tmp_path, fake_tts_render, route_tag, slug, voice) ->
     [call] = fake_tts_render
     assert call["config"] == openai_config(model="tts-1-hd", voice=voice)
     assert call["feed_slug"] == slug
+
+
+def test_email_routed_to_the_rundown_renders_gemini(tmp_path, fake_tts_render) -> None:
+    """T6: the-rundown is Gemini on every path, the email route included."""
+    _email(tmp_path, "the-rundown")
+    [call] = fake_tts_render
+    assert call["config"] == _RUNDOWN_GEMINI
+    assert call["feed_slug"] == "the-rundown"
 
 
 def test_email_env_overrides_still_win(tmp_path, fake_tts_render, monkeypatch) -> None:
@@ -230,6 +238,36 @@ def test_publish_script_dry_run_explicit_voice_still_forces_openai(
     assert res.exit_code == 0, res.output
     [call] = fake_tts_render
     assert call["config"] == openai_config(model="tts-1-hd", voice="nova")
+
+
+# T6 production config, re-literaled (never derived from FEED_VOICES).
+_RUNDOWN_GEMINI = RenderConfig(
+    primary=GeminiConfig(
+        model="gemini-3.8-flash-lite-tts",
+        voice="Kore",
+        style="calm, measured news anchor",
+    ),
+    fallback=OpenAIConfig(model="tts-1-hd", voice="nova"),
+)
+
+
+def test_publish_script_default_on_the_rundown_is_gemini(
+    tmp_path, fake_tts_render
+) -> None:
+    """The consumer-down recovery publishes what the consumer would: Gemini."""
+    _publish(tmp_path, "the-rundown")
+    [call] = fake_tts_render
+    assert call["config"] == _RUNDOWN_GEMINI
+
+
+def test_publish_script_dry_run_default_on_the_rundown_is_gemini(
+    tmp_path, fake_tts_render
+) -> None:
+    res = _publish_cli(tmp_path, "the-rundown")
+    assert res.exit_code == 0, res.output
+    [call] = fake_tts_render
+    assert call["config"] == _RUNDOWN_GEMINI
+    assert "gemini gemini-3.8-flash-lite-tts/Kore" in res.output
 
 
 _GEMINI_CFG = RenderConfig(

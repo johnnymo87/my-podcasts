@@ -102,7 +102,6 @@ def test_gemini_style_may_be_empty() -> None:
         ("levine", "ash"),
         ("yglesias", "shimmer"),
         ("silver", "echo"),
-        ("the-rundown", "nova"),
         ("fp-digest", "onyx"),
         ("aaronson", "fable"),
         ("chinatalk", "alloy"),
@@ -111,6 +110,40 @@ def test_gemini_style_may_be_empty() -> None:
 )
 def test_golden_feed_voices(slug: str, voice: str) -> None:
     assert resolve_render_config(slug) == openai_config(model="tts-1-hd", voice=voice)
+
+
+# The owner's listening-gate decision (my-podcasts-9p3.6). Re-literaled, never
+# derived from FEED_VOICES: this is the regression net for production audio.
+RUNDOWN_GEMINI = RenderConfig(
+    primary=GeminiConfig(
+        model="gemini-3.8-flash-lite-tts",
+        voice="Kore",
+        style="calm, measured news anchor",
+    ),
+    fallback=OpenAIConfig(model="tts-1-hd", voice="nova"),
+)
+
+
+def test_golden_the_rundown_is_gemini_with_its_old_voice_as_fallback() -> None:
+    assert resolve_render_config("the-rundown") == RUNDOWN_GEMINI
+
+
+def test_golden_only_the_rundown_is_gemini() -> None:
+    gemini = {
+        slug
+        for slug, entry in config.FEED_VOICES.items()
+        if isinstance(entry.primary, GeminiConfig)
+    }
+    assert gemini == {"the-rundown"}
+
+
+def test_override_on_the_rundown_forces_openai_from_its_fallback() -> None:
+    assert resolve_render_config("the-rundown", voice_override="onyx") == (
+        openai_config(model="tts-1-hd", voice="onyx")
+    )
+    assert resolve_render_config("the-rundown", model_override="tts-1") == (
+        openai_config(model="tts-1", voice="nova")
+    )
 
 
 def test_voice_override_forces_openai() -> None:

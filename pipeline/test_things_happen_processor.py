@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from pipeline.things_happen_processor import process_things_happen_job
-from pipeline.tts import openai_config
+from pipeline.tts import GeminiConfig, OpenAIConfig, RenderConfig
 
 
 # Processors reject scripts too short to be a real episode
@@ -112,9 +112,18 @@ def test_process_things_happen_job_end_to_end(
     upload_key = upload_args[0][1]
     assert upload_key.startswith("episodes/the-rundown/")
 
-    # Rendered with nova under the Rundown's feed identity.
+    # Rendered with the owner's Gemini pick (T6), nova as the whole-episode
+    # fallback, under the Rundown's feed identity. Hard-coded on purpose: this
+    # is the production config, not whatever FEED_VOICES happens to say.
     [call] = fake_tts_render
-    assert call["config"] == openai_config(model="tts-1-hd", voice="nova")
+    assert call["config"] == RenderConfig(
+        primary=GeminiConfig(
+            model="gemini-3.8-flash-lite-tts",
+            voice="Kore",
+            style="calm, measured news anchor",
+        ),
+        fallback=OpenAIConfig(model="tts-1-hd", voice="nova"),
+    )
     assert call["feed_slug"] == "the-rundown"
     assert call["episode_id"] == "2026-02-26-the-rundown"
     assert call["text"].startswith("Here is the briefing script for today.")
