@@ -1364,3 +1364,52 @@ def test_no_clips_means_no_omission_audio_files_key(env):
     env.outcome = ok_outcome
     env.render()
     assert "omission_audio_files" not in env.manifests()[0]["gemini_phase"]
+
+
+# --- OpenAI chunk spool (my-podcasts-9p3.10) -----------------------------------
+
+
+def test_a_failed_fallback_retry_reuses_spooled_openai_chunks_but_reruns_the_phase(env):
+    env.outcome = failed_outcome("deadline")
+    # The fallback's SECOND chunk fails for good.
+    env.openai.script = [None, TTSProviderError("401 bad key", retryable=False)]
+    with pytest.raises(render.TTSRenderError):
+        env.render()
+    first_calls = list(env.openai.calls)
+    assert len(first_calls) == 2 and N_OPENAI >= 3
+
+    env.openai.calls.clear()
+    result = env.render()  # the job retry
+    # Only the failed and later chunks are re-bought ...
+    assert env.openai.calls == chunker.chunk_text(TEXT, ceiling=4096)[1:]
+    assert result.provider == "openai" and result.fallback_reason == "deadline"
+    assert len(env.encoded) == 1
+    # ... but the Gemini phase (and its alert) still runs again: only OpenAI is spooled.
+    assert len(env.phase_calls) == 2 and len(env.alerts) == 2
+    chunks = env.manifests()[-1]["chunks"]
+    assert [c["spooled"] for c in chunks] == [True] + [False] * (N_OPENAI - 1)
+    # The fallback completed and was stored, so the spool is cleared.
+    assert not list((env.tmp / "c" / "chunks").iterdir())
+
+
+def test_a_fallback_render_whose_store_fails_keeps_its_spool(env, monkeypatch):
+    env.outcome = failed_outcome("deadline")
+    monkeypatch.setattr(render, "store", lambda *a, **k: False)
+    env.render()
+    assert len(list((env.tmp / "c" / "chunks").iterdir())) == 2 * N_OPENAI
+
+
+def test_a_gemini_render_spools_nothing(env):
+    env.outcome = ok_outcome
+    env.render()
+    assert not (env.tmp / "c" / "chunks").exists()
+    assert all(
+        "spooled" not in c or c["spooled"] is False
+        for c in env.manifests()[0]["chunks"]
+    )
+
+
+def test_a_fallback_render_without_a_cache_dir_spools_nothing(env):
+    env.outcome = failed_outcome("deadline")
+    env.render(cache_dir=None)
+    assert not (env.tmp / "c").exists()

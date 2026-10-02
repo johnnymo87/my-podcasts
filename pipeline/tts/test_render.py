@@ -55,6 +55,23 @@ def harness(monkeypatch, tmp_path):
     return provider, encoded, tmp_path
 
 
+def _completed_entries(tmp) -> list:
+    """Completed-render entries in the cache dir (not the chunk spool, not tmp dirs)."""
+    root = tmp / "c"
+    if not root.exists():
+        return []
+    return [
+        p
+        for p in root.iterdir()
+        if not p.name.startswith(".") and p.name != cache.SPOOL_DIRNAME
+    ]
+
+
+def _spool_files(tmp) -> list[str]:
+    root = tmp / "c" / cache.SPOOL_DIRNAME
+    return sorted(p.name for p in root.iterdir()) if root.exists() else []
+
+
 def _run(tmp_path, **kw):
     kw.setdefault("manifest_dir", tmp_path / "m")
     kw.setdefault("cache_dir", tmp_path / "c")
@@ -142,9 +159,7 @@ def test_failed_render_is_not_cached(harness) -> None:
     provider.script = [TTSProviderError("401", retryable=False)]
     with pytest.raises(render.TTSRenderError):
         _run(tmp)
-    assert not (tmp / "c").exists() or not any(
-        p for p in (tmp / "c").iterdir() if not p.name.startswith(".")
-    )
+    assert _completed_entries(tmp) == []
 
 
 def test_manifest_and_cache_can_be_disabled(harness) -> None:
@@ -233,9 +248,7 @@ def test_encoder_failure_propagates_and_is_not_cached(harness, monkeypatch) -> N
         _run(tmp)
     [manifest] = (tmp / "m" / "fp-digest").glob("*.json")
     assert json.loads(manifest.read_text())["status"] == "failed"
-    assert not (tmp / "c").exists() or not any(
-        p for p in (tmp / "c").iterdir() if not p.name.startswith(".")
-    )
+    assert _completed_entries(tmp) == []
 
 
 def test_failed_manifest_keeps_chunk_history(harness) -> None:
@@ -278,7 +291,7 @@ def test_provider_for_builds_openai_provider() -> None:
 
 
 def _only_entry(tmp):
-    [entry] = [p for p in (tmp / "c").iterdir() if not p.name.startswith(".")]
+    [entry] = _completed_entries(tmp)
     return entry
 
 
@@ -420,8 +433,10 @@ def test_cache_hit_copy_failure_is_atomic_and_falls_back(harness, monkeypatch) -
     monkeypatch.setattr(render.shutil, "copyfile", partial_then_fail)
     # Re-render path must not be poisoned by the failed copy.
     result = _run(tmp)
+    # The first render completed, so its spool was cleared: this is a real
+    # re-render (new provider purchases), not a replay, and not PARTIAL.
     assert not result.cached and len(provider.calls) > first_calls
-    assert out.read_bytes().startswith(b"ID3")  # re-rendered, not PARTIAL
+    assert out.read_bytes().startswith(b"ID3")
     assert sorted(p.name for p in tmp.iterdir() if p.name.startswith("out.mp3")) == [
         "out.mp3"
     ]
@@ -513,3 +528,247 @@ def test_default_dirs_are_isolated_from_persist_by_fixture(harness) -> None:
 
     assert not str(manifest.DEFAULT_MANIFEST_DIR).startswith("/persist")
     assert not str(cache.DEFAULT_CACHE_DIR).startswith("/persist")
+
+
+# --- per-chunk PCM spool (my-podcasts-9p3.10) --------------------------------
+
+TEXT3 = "\n\n".join(
+    f"Paragraph {i}. " + "Sentence number one here. " * 100 for i in range(3)
+)
+
+
+class CountingProvider(FakeProvider):
+    """Each synthesize call returns audio no other call returns, so a reused
+    chunk is distinguishable from a re-bought one."""
+
+    def synthesize(self, text, config):
+        super().synthesize(text, config)
+        return bytes([len(self.calls), 0]) * 24_000
+
+
+def _run3(tmp_path, cfg=CFG, **kw):
+    kw.setdefault("manifest_dir", tmp_path / "m")
+    kw.setdefault("cache_dir", tmp_path / "c")
+    return render.render_episode(
+        TEXT3, cfg, tmp_path / "out.mp3", feed_slug="fp-digest", episode_id="e", **kw
+    )
+
+
+@pytest.fixture
+def spool_env(monkeypatch, tmp_path):
+    provider = CountingProvider()
+    encoded: list[bytes] = []
+    monkeypatch.setattr(render, "_provider_for", lambda config: provider)
+    monkeypatch.setattr(render, "_sleep", lambda s: None)
+
+    def fake_encode(pcm, out):
+        encoded.append(pcm)
+        out.write_bytes(b"ID3" + pcm[:10])
+
+    monkeypatch.setattr(render, "encode_mp3", fake_encode)
+    return provider, encoded, tmp_path
+
+
+def _chunk_texts():
+    from pipeline.tts.chunker import chunk_text
+
+    chunks = chunk_text(TEXT3, ceiling=4096)
+    assert len(chunks) == 3
+    return chunks
+
+
+def test_retry_after_partial_failure_resynthesizes_only_failed_and_later_chunks(
+    spool_env,
+) -> None:
+    provider, encoded, tmp = spool_env
+    chunks = _chunk_texts()
+    provider.script = [None, TTSProviderError("400", retryable=False)]  # chunk 2 fails
+    with pytest.raises(render.TTSRenderError, match=r"chunk 2/3"):
+        _run3(tmp)
+    assert provider.calls == chunks[:2]
+    [failed] = (tmp / "m" / "fp-digest").glob("*.json")
+    failed_chunks = json.loads(failed.read_text())["chunks"]
+    assert [c["spooled"] for c in failed_chunks] == [False, False]
+
+    provider.calls.clear()
+    result = _run3(tmp)
+    assert provider.calls == chunks[1:]  # chunk 1 came from the spool
+    # Chunk 1's audio is the FIRST run's call-1 audio, not a fresh purchase.
+    pcm = [bytes([n, 0]) * 24_000 for n in (1, 1, 2)]
+    assert encoded == [pcm[0] + pcm[1] + pcm[2]]
+    data = json.loads(result.manifest_path.read_text())
+    assert [c["spooled"] for c in data["chunks"]] == [True, False, False]
+    assert [c["attempts"] for c in data["chunks"]] == [0, 1, 1]
+    assert data["total_audio_seconds"] == pytest.approx(3.0)
+
+
+def _partial_run(tmp, provider, *, fail_at: int = 2, **kw) -> None:
+    """A render that buys chunks ``0..fail_at-1`` then dies on chunk ``fail_at``."""
+    provider.script = [None] * fail_at + [TTSProviderError("400", retryable=False)]
+    with pytest.raises(render.TTSRenderError):
+        _run3(tmp, **kw)
+    provider.script = []
+    provider.calls.clear()
+
+
+def test_successful_render_leaves_no_spool_files(spool_env) -> None:
+    _, _, tmp = spool_env
+    _run3(tmp)
+    assert _spool_files(tmp) == []
+    assert len(_completed_entries(tmp)) == 1
+
+
+def test_failed_render_keeps_its_spool_files(spool_env) -> None:
+    provider, _, tmp = spool_env
+    provider.script = [None, TTSProviderError("400", retryable=False)]
+    with pytest.raises(render.TTSRenderError):
+        _run3(tmp)
+    assert len(_spool_files(tmp)) == 2  # chunk 1 only: .pcm + .json
+
+
+def test_render_whose_completed_store_fails_keeps_its_spool_files(
+    spool_env, monkeypatch
+) -> None:
+    provider, _, tmp = spool_env
+    monkeypatch.setattr(render, "store", lambda *a, **k: False)
+    result = _run3(tmp)
+    assert result.chunks == 3 and _completed_entries(tmp) == []
+    assert len(_spool_files(tmp)) == 6  # 3 chunks x (.pcm + .json)
+    # ... and that is what makes the next attempt cheap.
+    provider.calls.clear()
+    _run3(tmp)
+    assert provider.calls == []
+
+
+def test_retry_that_succeeds_consumes_and_clears_the_spool(spool_env) -> None:
+    provider, _, tmp = spool_env
+    _partial_run(tmp, provider, fail_at=2)
+    assert len(_spool_files(tmp)) == 4
+    result = _run3(tmp)
+    assert not result.cached
+    assert _spool_files(tmp) == []
+    assert len(_completed_entries(tmp)) == 1
+
+
+def test_spool_cleanup_failure_never_fails_the_render(spool_env, monkeypatch) -> None:
+    provider, _, tmp = spool_env
+
+    def boom(*a, **k):
+        raise RuntimeError("cleanup exploded")
+
+    monkeypatch.setattr(render, "spool_discard", boom)
+    result = _run3(tmp)
+    assert result.chunks == 3 and len(_completed_entries(tmp)) == 1
+
+
+def test_manifest_chunk_records_name_their_spool_key(spool_env) -> None:
+    provider, _, tmp = spool_env
+    chunks = _chunk_texts()
+    provider.script = [None, TTSProviderError("400", retryable=False)]
+    with pytest.raises(render.TTSRenderError):
+        _run3(tmp)
+    [failed] = (tmp / "m" / "fp-digest").glob("*.json")
+    recs = json.loads(failed.read_text())["chunks"]
+    # The failing chunk is named too, so its (absent) files can be looked for.
+    assert [r["spool_key"] for r in recs] == [
+        cache.chunk_key(CFG.primary, c) for c in chunks[:2]
+    ]
+    key0 = recs[0]["spool_key"]
+    assert (tmp / "c" / "chunks" / f"{key0}.pcm").is_file()
+    assert (tmp / "c" / "chunks" / f"{key0}.json").is_file()
+
+
+def test_spool_key_is_none_without_a_cache_dir(spool_env) -> None:
+    _, _, tmp = spool_env
+    result = _run3(tmp, cache_dir=None)
+    data = json.loads(result.manifest_path.read_text())
+    assert [c["spool_key"] for c in data["chunks"]] == [None] * 3
+
+
+def test_a_render_that_fails_at_encode_keeps_every_chunk_for_the_retry(
+    spool_env, monkeypatch
+) -> None:
+    provider, encoded, tmp = spool_env
+    real_encode = render.encode_mp3
+
+    def boom(pcm, out):
+        raise RuntimeError("ffmpeg exited 1")
+
+    monkeypatch.setattr(render, "encode_mp3", boom)
+    with pytest.raises(RuntimeError, match="ffmpeg"):
+        _run3(tmp)
+    assert len(_spool_files(tmp)) == 6
+    monkeypatch.setattr(render, "encode_mp3", real_encode)
+    provider.calls.clear()
+    result = _run3(tmp)
+    assert not result.cached and provider.calls == []  # fully spooled: no purchases
+    assert _spool_files(tmp) == []
+
+
+def test_same_text_with_a_different_voice_or_model_is_a_miss(spool_env) -> None:
+    provider, _, tmp = spool_env
+    _partial_run(tmp, provider, fail_at=2)
+    _run3(tmp, cfg=openai_config(model="tts-1-hd", voice="ash"))
+    assert len(provider.calls) == 3
+    provider.calls.clear()
+    _run3(tmp, cfg=openai_config(model="tts-1", voice="onyx"))
+    assert len(provider.calls) == 3
+    # Neither render touched the first config's leftovers.
+    assert len(_spool_files(tmp)) == 4
+
+
+@pytest.mark.parametrize("damage", ["truncate", "sidecar", "delete_sidecar"])
+def test_damaged_spool_entry_is_a_miss_and_is_resynthesized(spool_env, damage) -> None:
+    provider, _, tmp = spool_env
+    chunks = _chunk_texts()
+    _partial_run(tmp, provider, fail_at=2)  # spool holds chunks 1 and 2
+    key = cache.chunk_key(CFG.primary, chunks[1])
+    pcm_path = tmp / "c" / "chunks" / f"{key}.pcm"
+    side_path = tmp / "c" / "chunks" / f"{key}.json"
+    if damage == "truncate":
+        pcm_path.write_bytes(pcm_path.read_bytes()[:-2])
+    elif damage == "sidecar":
+        side_path.write_text("{garbage")
+    else:
+        side_path.unlink()
+    _run3(tmp)
+    assert provider.calls == chunks[1:]  # chunk 1 reused, damaged chunk 2 re-bought
+
+
+def test_spool_write_failure_never_fails_the_render(spool_env, monkeypatch, caplog):
+    provider, encoded, tmp = spool_env
+
+    def boom(path, data):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(cache, "_write_atomic", boom)
+    result = _run3(tmp)
+    assert (tmp / "out.mp3").exists() and len(encoded) == 1
+    assert len(provider.calls) == 3 and result.chunks == 3
+    assert "spool store failed" in caplog.text
+
+
+def test_spool_read_failure_never_fails_the_render(spool_env, monkeypatch):
+    provider, _, tmp = spool_env
+
+    def boom(*a, **k):
+        raise RuntimeError("unreadable")
+
+    monkeypatch.setattr(render, "spool_lookup", boom)
+    result = _run3(tmp)
+    assert result.chunks == 3 and len(provider.calls) == 3
+
+
+def test_no_cache_dir_means_no_spool_is_touched(spool_env, monkeypatch) -> None:
+    provider, _, tmp = spool_env
+
+    def forbidden(*a, **k):
+        raise AssertionError("spool touched with cache_dir=None")
+
+    monkeypatch.setattr(render, "spool_lookup", forbidden)
+    monkeypatch.setattr(render, "spool_store", forbidden)
+    result = _run3(tmp, cache_dir=None)
+    assert result.chunks == 3
+    data = json.loads(result.manifest_path.read_text())
+    assert [c["spooled"] for c in data["chunks"]] == [False] * 3
+    assert not (tmp / "c").exists()
