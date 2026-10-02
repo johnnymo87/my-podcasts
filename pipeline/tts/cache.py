@@ -1,6 +1,14 @@
-"""Completed-render reuse: a retry after an upload/DB failure costs nothing.
+"""Render reuse: a retry after an upload/DB failure costs nothing.
 
-Replaces tts-joinery's per-chunk cache. Only completed renders are stored.
+Two layers, both under one ``cache_dir``:
+
+* **Completed renders** (``<cache_dir>/<key>/``): the finished mp3, keyed by the
+  whole text + config.
+* **The OpenAI chunk spool** (``<cache_dir>/chunks/``): the raw PCM of each
+  OpenAI chunk, so a render that fails partway does not re-buy the chunks it had
+  already paid for on the next retry. OpenAI leaves only: the Gemini phase runs
+  in a killable child with per-chunk verification and spools nothing.
+
 Every function is best-effort and never raises -- a cache problem must never
 discard valid audio (design doc, "Completed-render reuse").
 """
@@ -27,6 +35,9 @@ log = logging.getLogger(__name__)
 RENDERER_VERSION = "2"
 DEFAULT_CACHE_DIR = Path("/persist/my-podcasts/tts-cache")
 RETENTION_DAYS = 14
+# Hex digests name completed entries, so this cannot collide with one; lookup and
+# prune still treat it specially rather than rely on that.
+SPOOL_DIRNAME = "chunks"
 
 
 @dataclass(frozen=True)
@@ -143,8 +154,115 @@ def prune(
     try:
         cutoff = (now if now is not None else time.time()) - max_age_days * 86400
         for entry in cache_dir.iterdir():
+            if entry.name == SPOOL_DIRNAME:
+                continue  # pruned file by file below, never as one old entry
             with contextlib.suppress(OSError):  # one raced entry must not end the pass
                 if entry.is_dir() and entry.stat().st_mtime < cutoff:
                     shutil.rmtree(entry, ignore_errors=True)
+        _prune_spool(cache_dir, cutoff)
     except Exception:  # noqa: BLE001
         return
+
+
+def _prune_spool(cache_dir: Path, cutoff: float) -> None:
+    """Delete spool files (stale ``.tmp-`` leftovers too) older than ``cutoff``."""
+    try:
+        files = list((cache_dir / SPOOL_DIRNAME).iterdir())
+    except OSError:
+        return
+    for f in files:
+        with contextlib.suppress(OSError):  # one raced file must not end the pass
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+
+
+# --- per-chunk OpenAI PCM spool ----------------------------------------------
+
+
+def chunk_key(leaf: OpenAIConfig | GeminiConfig, chunk: str) -> str:
+    """Identity of one chunk's PCM: what was said, by whom, under which renderer."""
+    payload = json.dumps(
+        {
+            "kind": "openai-chunk",
+            "renderer_version": RENDERER_VERSION,
+            "leaf": asdict(leaf),
+            "text": chunk,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _spool_paths(cache_dir: Path, key: str) -> tuple[Path, Path]:
+    base = cache_dir / SPOOL_DIRNAME
+    return base / f"{key}.pcm", base / f"{key}.json"
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".tmp-", suffix=path.suffix)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+
+def spool_lookup(cache_dir: Path, key: str) -> bytes | None:
+    """The spooled PCM for ``key``, or ``None`` (a miss) for anything but an entry
+    whose sidecar agrees with its PCM. A damaged entry is deleted. Never raises."""
+    try:
+        pcm_path, side_path = _spool_paths(cache_dir, key)
+        if not pcm_path.exists() and not side_path.exists():
+            return None
+        try:
+            side = json.loads(side_path.read_text(encoding="utf-8"))
+            pcm = pcm_path.read_bytes()
+            valid = (
+                isinstance(side, dict)
+                and len(pcm) > 0
+                and len(pcm) % 2 == 0
+                and side.get("bytes") == len(pcm)
+                and side.get("sha256") == hashlib.sha256(pcm).hexdigest()
+            )
+        except (OSError, ValueError):
+            valid = False
+        if valid:
+            return pcm
+        log.warning("TTS chunk spool entry %s is damaged; discarding it", key)
+        for p in (pcm_path, side_path):
+            with contextlib.suppress(OSError):
+                p.unlink()
+        return None
+    except Exception:  # noqa: BLE001 -- a spool miss is always safe
+        return None
+
+
+def spool_store(
+    cache_dir: Path, key: str, leaf: OpenAIConfig | GeminiConfig, pcm: bytes
+) -> bool:
+    """Spool ``pcm`` for ``key``; True if stored. Never raises.
+
+    The sidecar is written last, so a crash between the two leaves an entry that
+    :func:`spool_lookup` rejects.
+    """
+    try:
+        if not pcm or len(pcm) % 2:
+            return False
+        pcm_path, side_path = _spool_paths(cache_dir, key)
+        pcm_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_atomic(pcm_path, pcm)
+        sidecar = {
+            "bytes": len(pcm),
+            "sha256": hashlib.sha256(pcm).hexdigest(),
+            "created": time.time(),
+            "leaf": asdict(leaf),
+        }
+        _write_atomic(side_path, json.dumps(sidecar, sort_keys=True).encode("utf-8"))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("TTS chunk spool store failed (%s); reduced retry protection", exc)
+        return False

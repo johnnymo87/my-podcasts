@@ -35,8 +35,11 @@ from pipeline.tts import manifest as _manifest_mod
 from pipeline.tts.cache import (
     RENDERER_VERSION,
     cache_key,
+    chunk_key,
     lookup,
     prune,
+    spool_lookup,
+    spool_store,
     store,
 )
 from pipeline.tts.chunker import chunk_text
@@ -198,16 +201,50 @@ def _hit_matches_request(
     )
 
 
+def _spool_get(
+    cache_dir: Path | None, leaf: OpenAIConfig | GeminiConfig, chunk: str
+) -> bytes | None:
+    """This chunk's spooled PCM, or None. A spool problem is a miss, never a failure."""
+    if cache_dir is None:
+        return None
+    try:
+        return spool_lookup(cache_dir, chunk_key(leaf, chunk))
+    except Exception:  # noqa: BLE001
+        log.warning("TTS chunk spool lookup failed; synthesizing", exc_info=True)
+        return None
+
+
+def _spool_put(
+    cache_dir: Path | None, leaf: OpenAIConfig | GeminiConfig, chunk: str, pcm: bytes
+) -> None:
+    if cache_dir is None:
+        return
+    try:
+        spool_store(cache_dir, chunk_key(leaf, chunk), leaf, pcm)
+    except Exception:  # noqa: BLE001 -- never discard bought audio over the spool
+        log.warning("TTS chunk spool store failed", exc_info=True)
+
+
 def _synthesize_all(
     leaf: OpenAIConfig | GeminiConfig,
     text: str,
     chunk_records: list[dict],
     record: dict,
+    cache_dir: Path | None = None,
 ) -> list[bytes]:
     """Chunk ``text`` for ``leaf``'s provider and synthesize every chunk in-process.
 
     Appends one record per chunk to ``chunk_records`` as it goes (so a failure
     keeps its history) and sets ``record["chunk_count"]``.
+
+    With a ``cache_dir``, each chunk's PCM is spooled (``cache.spool_store``) as
+    soon as it is bought, and a chunk already in the spool is reused instead of
+    synthesized (``rec["spooled"]`` True, ``attempts`` 0). A render that fails
+    partway therefore re-buys only the failed and later chunks on retry. This
+    covers the OpenAI in-process path only -- an OpenAI primary and the OpenAI
+    fallback after a failed Gemini phase. The Gemini phase itself runs in a
+    killable child with per-chunk ASR verification and spools nothing, so a
+    retry still re-runs it. ``cache_dir=None`` (dry runs, audition) never spools.
     """
     provider = None
     try:
@@ -222,9 +259,15 @@ def _synthesize_all(
                 "attempts": 0,
                 "errors": [],
                 "audio_seconds": 0.0,
+                "spooled": False,
             }
             chunk_records.append(rec)
-            pcm = _synthesize_chunk(provider, leaf, chunk, rec, len(chunks))
+            pcm = _spool_get(cache_dir, leaf, chunk)
+            if pcm is not None:
+                rec["spooled"] = True
+            else:
+                pcm = _synthesize_chunk(provider, leaf, chunk, rec, len(chunks))
+                _spool_put(cache_dir, leaf, chunk, pcm)
             rec["audio_seconds"] = len(pcm) / PCM_BYTES_PER_SECOND
             pcm_parts.append(pcm)
         return pcm_parts
@@ -695,6 +738,7 @@ def _render_gemini_primary(
     record: dict,
     chunk_records: list[dict],
     omission_dir: Path | None = None,
+    cache_dir: Path | None = None,
 ) -> tuple[OpenAIConfig | GeminiConfig, str, str | None]:
     """Render with a Gemini primary; returns ``(leaf, verification, fallback_reason)``.
 
@@ -760,7 +804,9 @@ def _render_gemini_primary(
         record["fallback_reason"] = reason
         error: Exception | None = None
         try:
-            pcm_parts = _synthesize_all(fallback, text, chunk_records, record)
+            pcm_parts = _synthesize_all(
+                fallback, text, chunk_records, record, cache_dir
+            )
             encode_mp3(b"".join(pcm_parts), out_mp3)
         except Exception as exc:  # noqa: BLE001 -- alerted, then re-raised below
             error = exc
@@ -964,9 +1010,10 @@ def render_episode(
                 record=record,
                 chunk_records=chunk_records,
                 omission_dir=omission_dir,
+                cache_dir=cache_dir,
             )
         else:
-            pcm_parts = _synthesize_all(leaf, text, chunk_records, record)
+            pcm_parts = _synthesize_all(leaf, text, chunk_records, record, cache_dir)
             encode_mp3(b"".join(pcm_parts), out_mp3)
     except BaseException as exc:
         # BaseException: a KeyboardInterrupt/SystemExit must still leave the

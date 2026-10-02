@@ -252,3 +252,165 @@ def test_store_replaces_entry_with_invalid_provenance(tmp_path) -> None:
     assert cache.store(d, "k", _mp3(tmp_path, b"new"), _result())
     hit = cache.lookup(d, "k")
     assert hit is not None and hit.audio.read_bytes() == b"new"
+
+
+# --- per-chunk OpenAI PCM spool ----------------------------------------------
+
+LEAF = OpenAIConfig("tts-1-hd", "nova")
+PCM = b"\x01\x00" * 100
+
+
+def _spool_files(d):
+    return sorted(p.name for p in (d / "chunks").iterdir())
+
+
+def test_chunk_key_is_stable_and_sensitive(monkeypatch) -> None:
+    k = cache.chunk_key(LEAF, "hello")
+    assert k == cache.chunk_key(LEAF, "hello")
+    assert len(k) == 64 and int(k, 16) >= 0
+    assert k != cache.chunk_key(LEAF, "hello!")
+    assert k != cache.chunk_key(OpenAIConfig("tts-1-hd", "ash"), "hello")
+    assert k != cache.chunk_key(OpenAIConfig("tts-1", "nova"), "hello")
+    monkeypatch.setattr(cache, "RENDERER_VERSION", "999")
+    assert k != cache.chunk_key(LEAF, "hello")
+
+
+def test_spool_round_trips_under_chunks_dir(tmp_path) -> None:
+    d = tmp_path / "c"
+    key = cache.chunk_key(LEAF, "hello")
+    assert cache.spool_lookup(d, key) is None
+    assert cache.spool_store(d, key, LEAF, PCM) is True
+    assert cache.spool_lookup(d, key) == PCM
+    assert _spool_files(d) == [f"{key}.json", f"{key}.pcm"]
+    side = json.loads((d / "chunks" / f"{key}.json").read_text())
+    assert side["bytes"] == len(PCM)
+    assert side["leaf"] == dataclasses.asdict(LEAF)
+    assert "sha256" in side and "created" in side
+
+
+def test_spool_misses_on_every_kind_of_damage(tmp_path) -> None:
+    d = tmp_path / "c"
+
+    def fresh(name):
+        key = cache.chunk_key(LEAF, name)
+        assert cache.spool_store(d, key, LEAF, PCM)
+        return key, d / "chunks" / f"{key}.pcm", d / "chunks" / f"{key}.json"
+
+    key, pcm, _ = fresh("truncated")
+    pcm.write_bytes(PCM[:-2])
+    assert cache.spool_lookup(d, key) is None
+
+    key, pcm, _ = fresh("flipped")
+    pcm.write_bytes(b"\x02" + PCM[1:])  # same length, different content
+    assert cache.spool_lookup(d, key) is None
+
+    key, pcm, _ = fresh("odd")
+    pcm.write_bytes(PCM + b"\x00")
+    assert cache.spool_lookup(d, key) is None
+
+    key, pcm, _ = fresh("badsidecar")
+    (d / "chunks" / f"{key}.json").write_text("{not json")
+    assert cache.spool_lookup(d, key) is None
+
+    key, pcm, side = fresh("nosidecar")
+    side.unlink()
+    assert cache.spool_lookup(d, key) is None
+
+    key, pcm, side = fresh("nopcm")
+    pcm.unlink()
+    assert cache.spool_lookup(d, key) is None
+
+    key, pcm, _ = fresh("empty")
+    pcm.write_bytes(b"")
+    assert cache.spool_lookup(d, key) is None
+
+
+def test_damaged_spool_entry_is_deleted_and_can_be_rewritten(tmp_path) -> None:
+    d = tmp_path / "c"
+    key = cache.chunk_key(LEAF, "x")
+    cache.spool_store(d, key, LEAF, PCM)
+    (d / "chunks" / f"{key}.pcm").write_bytes(PCM[:-2])
+    assert cache.spool_lookup(d, key) is None
+    assert _spool_files(d) == []
+    assert cache.spool_store(d, key, LEAF, PCM)
+    assert cache.spool_lookup(d, key) == PCM
+
+
+def test_spool_refuses_to_store_unusable_pcm(tmp_path) -> None:
+    d = tmp_path / "c"
+    key = cache.chunk_key(LEAF, "x")
+    assert cache.spool_store(d, key, LEAF, b"") is False
+    assert cache.spool_store(d, key, LEAF, b"\x00\x00\x00") is False
+    assert cache.spool_lookup(d, key) is None
+
+
+def test_spool_store_failure_returns_false_warns_and_leaves_no_tmp(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    d = tmp_path / "c"
+    key = cache.chunk_key(LEAF, "x")
+
+    def boom(src, dst):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(cache.os, "replace", boom)
+    assert cache.spool_store(d, key, LEAF, PCM) is False
+    assert "spool" in caplog.text
+    monkeypatch.undo()
+    assert cache.spool_lookup(d, key) is None
+    assert _spool_files(d) == []
+
+
+def test_spool_never_raises_on_unusable_root(tmp_path) -> None:
+    blocker = tmp_path / "file-not-dir"
+    blocker.write_text("x")
+    key = cache.chunk_key(LEAF, "x")
+    assert cache.spool_store(blocker, key, LEAF, PCM) is False
+    assert cache.spool_lookup(blocker, key) is None
+
+
+def test_prune_never_removes_the_chunks_dir_wholesale(tmp_path) -> None:
+    d = tmp_path / "c"
+    old = cache.chunk_key(LEAF, "old")
+    new = cache.chunk_key(LEAF, "new")
+    cache.spool_store(d, old, LEAF, PCM)
+    cache.spool_store(d, new, LEAF, PCM)
+    # the directory itself is ancient (its mtime alone must not condemn it)
+    old_time = time.time() - 20 * 86400
+    for suffix in ("pcm", "json"):
+        os.utime(d / "chunks" / f"{old}.{suffix}", (old_time, old_time))
+    os.utime(d / "chunks", (old_time, old_time))
+    cache.prune(d, max_age_days=14)
+    assert (d / "chunks").is_dir()
+    assert cache.spool_lookup(d, old) is None
+    assert not (d / "chunks" / f"{old}.pcm").exists()
+    assert not (d / "chunks" / f"{old}.json").exists()
+    assert cache.spool_lookup(d, new) == PCM
+
+
+def test_prune_removes_stale_spool_tmp_files(tmp_path) -> None:
+    d = tmp_path / "c"
+    (d / "chunks").mkdir(parents=True)
+    stale = d / "chunks" / ".tmp-abc.pcm"
+    stale.write_bytes(b"x")
+    old_time = time.time() - 20 * 86400
+    os.utime(stale, (old_time, old_time))
+    cache.prune(d, max_age_days=14)
+    assert not stale.exists()
+
+
+def test_prune_still_removes_old_completed_entries_next_to_a_spool(tmp_path) -> None:
+    d = tmp_path / "c"
+    cache.store(d, "old", _mp3(tmp_path), {})
+    cache.spool_store(d, cache.chunk_key(LEAF, "x"), LEAF, PCM)
+    old_time = time.time() - 20 * 86400
+    os.utime(d / "old", (old_time, old_time))
+    cache.prune(d, max_age_days=14)
+    assert not (d / "old").exists()
+    assert len(_spool_files(d)) == 2
+
+
+def test_completed_lookup_is_not_confused_by_the_spool_dir(tmp_path) -> None:
+    d = tmp_path / "c"
+    cache.spool_store(d, cache.chunk_key(LEAF, "x"), LEAF, PCM)
+    assert cache.lookup(d, "chunks") is None
