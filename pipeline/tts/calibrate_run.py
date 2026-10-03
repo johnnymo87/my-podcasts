@@ -2739,6 +2739,8 @@ def step_deadline(
 def est_render_from_tokens(tokens: dict, chars: int, model: str) -> tuple[float, bool]:
     """Spend of a ``render_episode`` from its manifest's token totals; any
     unknown total (or no manifest) is the whole render's worst case."""
+    # Blocked ASR prompts are priced as billed (their input counts); billing of a
+    # blocked prompt is unconfirmed, so this is conservative (9p3.18).
     needed = ("synth_audio", "asr_input", "asr_output")
     if not tokens or any(tokens.get(k) is None for k in needed):
         return est_deadline_worst(chars, model), True
