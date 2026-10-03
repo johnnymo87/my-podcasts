@@ -446,6 +446,35 @@ def test_verify_uses_outcome_when_asr_never_ran_and_last_attempt(tmp_path):
     ]
 
 
+def test_summary_reads_the_last_attempt_when_it_is_an_asr_only_recheck(tmp_path):
+    chunks = [
+        {
+            "index": 0,
+            "attempts": [
+                {
+                    "n": 1,
+                    "outcome": "asr_blocked",
+                    "synth": {"status": "ok"},
+                    "asr": {"status": "unavailable", "recall": None},
+                },
+                {
+                    "n": 2,
+                    "outcome": "verified",
+                    "synth": None,
+                    "recheck_of": 1,
+                    "asr": {"status": "pass", "recall": 0.98},
+                },
+            ],
+        }
+    ]
+    summary, _ = audition_run(
+        tmp_path, [gemini_variant()], FakeRender(phase=gemini_phase(chunks))
+    )
+    assert summary["variants"][0]["verify"] == [
+        {"index": 0, "attempts": 2, "verdict": "pass", "recall": 0.98}
+    ]
+
+
 @pytest.mark.parametrize(
     "phase",
     [

@@ -28,7 +28,9 @@ Files, all in the parent-created scratch directory and all written atomically
 ``progress-NNNN.json``
     ``{"schema": 1, "index": i, "attempts": [attempt, ...]}``, rewritten before
     each stage starts so a kill leaves the record of what was in flight. An
-    attempt is one TTS call::
+    attempt is one budgeted *try* (``n`` counts tries, 1-based): a TTS call with
+    its first ASR check, or an ASR-only re-check of the audio a blocked check
+    refused (see "Re-checks" below). A TTS-call attempt::
 
         {"n": 1,
          "synth": {"status": "started"|"ok"|"error", "kind": None|"content"|
@@ -40,8 +42,23 @@ Files, all in the parent-created scratch directory and all written atomically
                         "elapsed_s": None|float, "input_tokens": None|int,
                         "output_tokens": None|int, "thinking_tokens": None|int},
          "outcome": None|"transient_error"|"fatal"|"omission"|
-                    "asr_unavailable"|"verified",
+                    "asr_unavailable"|"asr_blocked"|"verified",
          "omission_audio": <omission-NNNN-N.pcm>}  # only on a kept omission
+
+    ``asr_blocked`` is a verdict of ``unavailable`` with reasons exactly
+    ``["asr_blocked"]``: the ASR request came back with no candidates and a real
+    ``prompt_feedback.block_reason``. The blocked audio is retained in memory and
+    re-asked (2026-10-03: the same bytes were blocked twice then passed twice).
+
+    Re-checks. A re-check attempt has no TTS call::
+
+        {"n": 2, "synth": None, "asr": {...as above...},
+         "outcome": None|"omission"|"asr_unavailable"|"asr_blocked"|"verified",
+         "recheck_of": 1}   # n of the synth attempt that produced the audio
+
+    ``n`` is the try count, so the omission clip a re-check keeps is named by the
+    re-check's own ``n``. Readers must treat ``synth`` as optional (render's token
+    totals skip a stage that never ran).
 
     A span is ``{"script_start", "script_end", "script_words",
     "transcript_words", "net_missing", "flagged", "excerpt", "heard"}``:
@@ -94,7 +111,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pipeline.tts.asr import GeminiTranscriber, pcm_to_wav
+from pipeline.tts.asr import ASR_BLOCKED, GeminiTranscriber, pcm_to_wav
 from pipeline.tts.config import GeminiConfig, leaf_from_dict
 from pipeline.tts.providers import GeminiProvider, TTSProviderError
 from pipeline.tts.verify import verify_audio
@@ -109,8 +126,13 @@ if TYPE_CHECKING:
 GEMINI_BUDGET_SECONDS = 360.0
 REAP_TIMEOUT_SECONDS = 5.0  # parent: join() after kill()
 REQUEST_TIMEOUT_CAP_SECONDS = 90.0  # per synth / per ASR request
-MAX_TTS_CALLS = 3  # one counter: transient retries AND the omission re-render
-BACKOFF_SECONDS = (2.0, 8.0)  # before TTS call 2, before TTS call 3
+# One counter of *tries* per chunk: a try is a TTS call (with its first ASR check)
+# or an ASR-only re-check of a blocked check's audio. It covers transient retries,
+# the single omission re-render and blocked-ASR re-checks, so a chunk makes at most
+# 3 TTS calls, 3 ASR calls and 5 external requests (synth/omission -> synth/block
+# -> re-check/pass). The name predates re-checks.
+MAX_TTS_CALLS = 3
+BACKOFF_SECONDS = (2.0, 8.0)  # indexed by tries used: before try 2, before try 3
 MAX_WORKERS = 4
 ERROR_DETAIL_CHARS = 2000  # cap on a child_error traceback in result.json
 WATCHDOG_POLL_SECONDS = 0.25
@@ -271,6 +293,18 @@ def _new_attempt(n: int) -> dict[str, Any]:
     }
 
 
+def _new_recheck(n: int, recheck_of: int) -> dict[str, Any]:
+    """A try that only re-asks ASR about the PCM synth attempt ``recheck_of`` made
+    (its first check was blocked): no TTS call, so ``synth`` is None."""
+    return {
+        "n": n,
+        "synth": None,
+        "asr": None,
+        "outcome": None,
+        "recheck_of": recheck_of,
+    }
+
+
 def _no_diagnostics() -> dict[str, Any]:
     """The diagnostic keys of an ASR record that has nothing to say (an
     unavailable verdict, a request still in flight, or a diagnostics failure):
@@ -416,8 +450,14 @@ def _render_chunk(
 ) -> dict[str, Any]:
     """Synthesize and verify one chunk; write its PCM; return its result record.
 
-    One counter of ``MAX_TTS_CALLS`` covers transient retries and the single
-    omission re-render, so a chunk makes at most 3 TTS calls and 2 ASR calls.
+    One counter of ``MAX_TTS_CALLS`` *tries* covers transient retries, the single
+    omission re-render and ASR-only re-checks of a blocked check (the verdict
+    reasons are exactly ``("asr_blocked",)``; the PCM is kept and re-sent, no TTS
+    call), so a chunk makes at most 3 TTS calls, 3 ASR calls and 5 external
+    requests. The backoff before a re-check is indexed by tries used (2 s, then
+    8 s), with the same deadline and abort precedence as a transient synth retry;
+    an omission re-render keeps no backoff. A counter used up on a block is
+    ``asr_unavailable``; any other unavailable reason fails at once.
     Raises ``_ChunkFailure`` (and sets ``abort``, so siblings stop) when the
     chunk cannot be produced, or ``_ChunkAborted`` when a sibling already failed.
 
@@ -469,23 +509,33 @@ def _render_chunk_inner(
         if remaining() <= 0:
             raise _ChunkFailure(REASON_DEADLINE, "the phase budget ran out")
 
-    tts_calls = 0
+    tries = 0  # budgeted tries: TTS calls (with their first ASR) + ASR-only re-checks
     omissions = 0
     backoff_due = False
     last_problem = "no attempt made"
+    last_try_blocked = False  # explicit, so the terminal reason never parses text
+    held_pcm: bytes | None = None  # a blocked chunk's audio, awaiting an ASR re-check
+    held_n = 0  # the synth attempt that produced held_pcm
 
     while True:
         # First, so a sibling's failure is never overtaken by a consequence of
         # the same failure (a spurious "deadline" or "exhausted" of our own).
         if abort.is_set():
             raise _ChunkAborted()
-        if tts_calls >= MAX_TTS_CALLS:
+        # Before the backoff index below: with every try used there is no delay.
+        if tries >= MAX_TTS_CALLS:
+            if last_try_blocked:
+                raise _ChunkFailure(
+                    REASON_ASR_UNAVAILABLE,
+                    f"{MAX_TTS_CALLS} tries used up, the last ASR check blocked; "
+                    f"last: {last_problem}",
+                )
             raise _ChunkFailure(
                 REASON_EXHAUSTED,
                 f"{MAX_TTS_CALLS} TTS calls used up; last: {last_problem}",
             )
         if backoff_due:
-            delay = BACKOFF_SECONDS[tts_calls - 1]
+            delay = BACKOFF_SECONDS[tries - 1]
             if remaining() < delay:
                 raise _ChunkFailure(
                     REASON_DEADLINE,
@@ -497,37 +547,46 @@ def _render_chunk_inner(
             backoff_due = False
         checkpoint()
 
-        tts_calls += 1
-        attempt = _new_attempt(tts_calls)
-        attempts.append(attempt)
-        save()  # "started", before the request
-        synth = attempt["synth"]
-        try:
-            result = provider.synthesize_detailed(
-                chunk, leaf, timeout=min(remaining(), REQUEST_TIMEOUT_CAP_SECONDS)
-            )
-        except TTSProviderError as exc:
-            synth.update(status="error", kind=exc.kind, error=str(exc))
-            last_problem = str(exc)
-            if exc.kind == "fatal":
-                attempt["outcome"] = "fatal"
+        tries += 1
+        if held_pcm is None:
+            attempt = _new_attempt(tries)
+            attempts.append(attempt)
+            save()  # "started", before the request
+            synth = attempt["synth"]
+            try:
+                result = provider.synthesize_detailed(
+                    chunk, leaf, timeout=min(remaining(), REQUEST_TIMEOUT_CAP_SECONDS)
+                )
+            except TTSProviderError as exc:
+                synth.update(status="error", kind=exc.kind, error=str(exc))
+                last_problem = str(exc)
+                last_try_blocked = False
+                if exc.kind == "fatal":
+                    attempt["outcome"] = "fatal"
+                    save()
+                    raise _ChunkFailure(REASON_FATAL, str(exc)) from exc
+                attempt["outcome"] = "transient_error"
                 save()
-                raise _ChunkFailure(REASON_FATAL, str(exc)) from exc
-            attempt["outcome"] = "transient_error"
+                backoff_due = True
+                continue
+            pcm = result.pcm
+            synth_n = tries
+            synth.update(
+                status="ok",
+                elapsed_s=result.elapsed_s,
+                finish_reason=result.finish_reason,
+                prompt_tokens=result.prompt_tokens,
+                audio_tokens=result.audio_tokens,
+                pcm_bytes=len(pcm),
+            )
             save()
-            backoff_due = True
-            continue
-        pcm = result.pcm
-        synth.update(
-            status="ok",
-            elapsed_s=result.elapsed_s,
-            finish_reason=result.finish_reason,
-            prompt_tokens=result.prompt_tokens,
-            audio_tokens=result.audio_tokens,
-            pcm_bytes=len(pcm),
-        )
-        save()
-        checkpoint()
+            checkpoint()
+        else:
+            # An ASR-only re-check of the audio a blocked request refused: no
+            # synth call, and the retained PCM is re-sent byte for byte.
+            pcm, synth_n, held_pcm = held_pcm, held_n, None
+            attempt = _new_recheck(tries, synth_n)
+            attempts.append(attempt)
 
         attempt["asr"] = {
             "status": "started",
@@ -566,17 +625,26 @@ def _render_chunk_inner(
                 "sha256": hashlib.sha256(pcm).hexdigest(),
             }
         if verdict.status == "unavailable":
-            attempt["outcome"] = "asr_unavailable"
+            problem = f"{','.join(verdict.reasons)}: {verdict.detail}"
+            # Exact match on the reason, never on text. Only a block is retried.
+            if tuple(verdict.reasons) != (ASR_BLOCKED,):
+                attempt["outcome"] = "asr_unavailable"
+                save()
+                raise _ChunkFailure(REASON_ASR_UNAVAILABLE, problem)
+            # Blocked: keep the audio and ask again (the counter decides, above).
+            attempt["outcome"] = "asr_blocked"
             save()
-            raise _ChunkFailure(
-                REASON_ASR_UNAVAILABLE,
-                f"{','.join(verdict.reasons)}: {verdict.detail}",
-            )
+            last_problem = problem
+            last_try_blocked = True
+            held_pcm, held_n = pcm, synth_n
+            backoff_due = True
+            continue
         # omission: the audio is discarded; re-render once if the counter allows
         attempt["outcome"] = "omission"
         # Best effort and before the save() that records the outcome, so a name
         # in the progress file always has a whole file behind it (the write is
-        # atomic). Never changes the chunk's outcome.
+        # atomic). Never changes the chunk's outcome. Named by this attempt's own
+        # n: for a re-check that is the re-check's, not the synth's.
         name = omission_name(i, attempt["n"])
         try:
             _atomic_write(scratch / name, pcm)
@@ -586,6 +654,8 @@ def _render_chunk_inner(
         save()
         omissions += 1
         last_problem = _omission_summary(verdict)
+        last_try_blocked = False
+        held_pcm = None  # the next try is a fresh synth: never re-check stale audio
         if omissions >= 2:
             raise _ChunkFailure(REASON_SECOND_OMISSION, last_problem)
 

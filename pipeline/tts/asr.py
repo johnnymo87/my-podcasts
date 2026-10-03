@@ -94,6 +94,10 @@ def _generation_config(thinking: str = DEFAULT_THINKING) -> types.GenerateConten
     return types.GenerateContentConfig(temperature=ASR_TEMPERATURE)
 
 
+# The one reason the Gemini phase retries; matched by equality, never by text.
+ASR_BLOCKED = "asr_blocked"
+
+
 def _is_real_block(block: object) -> bool:
     """A ``block_reason`` that names an actual block: not None, not UNSPECIFIED."""
     if block is None:
@@ -223,7 +227,7 @@ class GeminiTranscriber:
             if _is_real_block(block):
                 detail += f" (block_reason={getattr(block, 'name', block)})"
                 # Structural, not textual: the phase retries exactly this reason.
-                raise TranscriptionUnavailable("asr_blocked", detail)
+                raise TranscriptionUnavailable(ASR_BLOCKED, detail)
             raise TranscriptionUnavailable("asr_empty", detail)
         finish = resp.candidates[0].finish_reason
         finish_name = finish.name if finish is not None else "NONE"
