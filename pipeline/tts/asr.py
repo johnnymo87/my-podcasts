@@ -94,11 +94,23 @@ def _generation_config(thinking: str = DEFAULT_THINKING) -> types.GenerateConten
     return types.GenerateContentConfig(temperature=ASR_TEMPERATURE)
 
 
+def _is_real_block(block: object) -> bool:
+    """A ``block_reason`` that names an actual block: not None, not UNSPECIFIED."""
+    if block is None:
+        return False
+    return block != types.BlockedReason.BLOCKED_REASON_UNSPECIFIED
+
+
 class TranscriptionUnavailable(Exception):
     """Explicit evidence the transcript cannot be trusted: never a pass.
 
     ``reason`` is one of ``asr_error``, ``asr_timeout``, ``asr_empty``,
-    ``asr_incomplete`` (finish reason other than STOP, or none).
+    ``asr_incomplete`` (finish reason other than STOP, or none) or
+    ``asr_blocked`` (no candidates AND a real ``prompt_feedback.block_reason``:
+    the API refused this audio). ``asr_blocked`` is the only reason the Gemini
+    phase retries (the block is transient: the same audio bytes were blocked
+    twice and then passed twice in the 2026-10-03 re-test); a response with no
+    candidates and no real block reason stays ``asr_empty``.
     """
 
     def __init__(self, reason: str, message: str) -> None:
@@ -208,8 +220,10 @@ class GeminiTranscriber:
             feedback = getattr(resp, "prompt_feedback", None)
             block = getattr(feedback, "block_reason", None)
             detail = "no candidates"
-            if block is not None:
+            if _is_real_block(block):
                 detail += f" (block_reason={getattr(block, 'name', block)})"
+                # Structural, not textual: the phase retries exactly this reason.
+                raise TranscriptionUnavailable("asr_blocked", detail)
             raise TranscriptionUnavailable("asr_empty", detail)
         finish = resp.candidates[0].finish_reason
         finish_name = finish.name if finish is not None else "NONE"

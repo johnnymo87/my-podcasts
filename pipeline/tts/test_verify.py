@@ -344,6 +344,18 @@ def test_verify_audio_unavailable_is_never_a_pass():
     assert v.recall is None and v.analysis is None and v.asr is None
 
 
+def test_verify_audio_passes_asr_blocked_through_as_the_reason():
+    t, _ = fake_transcriber(
+        exc=TranscriptionUnavailable(
+            "asr_blocked", "no candidates (block_reason=OTHER)"
+        )
+    )
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.status == "unavailable"
+    assert v.reasons == ("asr_blocked",)
+    assert "block_reason=OTHER" in v.detail
+
+
 def test_verify_audio_punctuation_only_transcript_is_unavailable():
     t, _ = fake_transcriber("... [music] ...")  # normalizes to "music" — still content
     v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)

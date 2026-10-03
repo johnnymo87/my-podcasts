@@ -292,16 +292,61 @@ def test_thinking_tokens_are_recorded():
         assert t(b"x", "audio/wav").thinking_tokens is None
 
 
-def test_no_candidates_message_includes_block_reason():
+def _blocked(reason):
     resp = response(candidates=False)
     resp.prompt_feedback = types.GenerateContentResponsePromptFeedback(
-        block_reason=types.BlockedReason.PROHIBITED_CONTENT
+        block_reason=reason
     )
+    return resp
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        types.BlockedReason.OTHER,
+        types.BlockedReason.SAFETY,
+        types.BlockedReason.PROHIBITED_CONTENT,
+        types.BlockedReason.BLOCKLIST,
+    ],
+)
+def test_no_candidates_with_a_block_reason_is_asr_blocked(reason):
+    t, _, p = transcriber_with(_blocked(reason))
+    with p, pytest.raises(TranscriptionUnavailable) as exc_info:
+        t(b"x", "audio/wav")
+    assert exc_info.value.reason == "asr_blocked"
+    assert f"block_reason={reason.name}" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "feedback",
+    [
+        None,
+        types.GenerateContentResponsePromptFeedback(),
+        types.GenerateContentResponsePromptFeedback(
+            block_reason=types.BlockedReason.BLOCKED_REASON_UNSPECIFIED
+        ),
+    ],
+)
+def test_no_candidates_without_a_real_block_reason_stays_asr_empty(feedback):
+    resp = response(candidates=False)
+    resp.prompt_feedback = feedback
     t, _, p = transcriber_with(resp)
     with p, pytest.raises(TranscriptionUnavailable) as exc_info:
         t(b"x", "audio/wav")
     assert exc_info.value.reason == "asr_empty"
-    assert "PROHIBITED_CONTENT" in str(exc_info.value)
+
+
+def test_a_block_reason_with_candidates_present_is_not_asr_blocked():
+    # Only "no candidates" is a block: a candidate with a bad finish reason is
+    # still asr_incomplete, whatever the feedback says.
+    resp = response(finish="SAFETY")
+    resp.prompt_feedback = types.GenerateContentResponsePromptFeedback(
+        block_reason=types.BlockedReason.OTHER
+    )
+    t, _, p = transcriber_with(resp)
+    with p, pytest.raises(TranscriptionUnavailable) as exc_info:
+        t(b"x", "audio/wav")
+    assert exc_info.value.reason == "asr_incomplete"
 
 
 def test_sdk_makes_exactly_one_attempt_on_503(monkeypatch):
