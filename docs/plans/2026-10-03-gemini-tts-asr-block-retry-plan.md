@@ -31,8 +31,8 @@ in all of T5 and on the 2026-10-02 Rundown/FP chunks.
    (2 s, then 8 s), the deadline (`remaining() < delay` -> `deadline`, no sleep) and
    sibling-abort precedence exactly as for transient synth errors. A fresh
    transcriber is built (and closed) per verification with the timeout recomputed.
-   Retained PCM is cleared whenever a new synth is scheduled (omission, transient
-   error), so stale audio can never be re-checked.
+   The retained PCM is set only by a block and consumed by the very next try (always
+   a re-check), so a new synth never sees it and stale audio can never be re-checked.
 3. **Terminal reasons.** Counter used up and the last try was a block ->
    `asr_unavailable` (not `exhausted`), tracked by an explicit variable, not by
    parsing `last_problem`. Any other unavailable reason -> `asr_unavailable` at once,

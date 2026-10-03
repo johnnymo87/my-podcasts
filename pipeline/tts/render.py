@@ -332,7 +332,10 @@ def _phase_totals(phase_chunk_records: list) -> tuple[dict, float | None]:
     sum that silently omits a cost is worse than no sum. The generated-seconds
     figure is ``None`` in the same cases a chunk's attempts cannot be read at
     all. An attempt that never reached ASR contributes nothing to the ASR totals
-    (nothing was requested). The one absence that is NOT unknown: a *completed*
+    (nothing was requested), and an attempt with no synth stage (``synth`` is
+    None: an ASR-only re-check of a blocked check) contributes nothing to the
+    synth totals or the generated seconds (its audio was counted by the synth
+    attempt it re-checks). The one absence that is NOT unknown: a *completed*
     call with no thinking count means the model reported none, which totals as 0
     (the raw per-attempt value stays as reported, in ``gemini_phase.chunks``).
 

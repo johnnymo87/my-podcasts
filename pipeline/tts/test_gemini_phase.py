@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from pipeline.tts import asr as asr_module
 from pipeline.tts import gemini_phase as gp
 from pipeline.tts._phase_testing import (
     factories,
@@ -23,7 +24,12 @@ from pipeline.tts._phase_testing import (
     fake_pcm,
     make_chunks,
 )
-from pipeline.tts.asr import Transcription, TranscriptionUnavailable
+from pipeline.tts.asr import (
+    ASR_BLOCKED,
+    GeminiTranscriber,
+    Transcription,
+    TranscriptionUnavailable,
+)
 from pipeline.tts.config import GeminiConfig
 from pipeline.tts.providers import Synthesis, TTSProviderError
 
@@ -42,7 +48,7 @@ def _asr_unavailable() -> TranscriptionUnavailable:
 
 
 def _blocked() -> TranscriptionUnavailable:
-    return TranscriptionUnavailable("asr_blocked", "no candidates (block_reason=OTHER)")
+    return TranscriptionUnavailable(ASR_BLOCKED, "no candidates (block_reason=OTHER)")
 
 
 class Provider:
@@ -732,6 +738,70 @@ def test_the_recheck_transcriber_timeout_is_recomputed(scratch):
     asr = Asr([_blocked(), TEXT])
     _run(Provider([PCM]), asr, scratch, deadline=time.monotonic() + 30.0)
     assert all(29.0 < t <= 30.0 for t in asr.timeouts) and len(asr.timeouts) == 2
+
+
+def test_a_real_blocked_response_is_rechecked_through_the_real_transcriber(
+    scratch, monkeypatch
+):
+    """No candidates + a real block_reason, as the SDK returns it, through the real
+    GeminiTranscriber and verify_audio: re-checked once on the same bytes, then
+    verified. Only the SDK client is faked."""
+    from google.genai import types
+
+    blocked = types.GenerateContentResponse(
+        candidates=[],
+        prompt_feedback=types.GenerateContentResponsePromptFeedback(
+            block_reason=types.BlockedReason.OTHER
+        ),
+    )
+    good = types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                finish_reason=types.FinishReason.STOP,
+                content=types.Content(parts=[types.Part(text=TEXT)]),
+            )
+        ],
+        usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=100, candidates_token_count=5
+        ),
+    )
+    sent: list[bytes] = []
+    replies = [blocked, good]
+
+    class Models:
+        def generate_content(self, *, model, contents, config):
+            sent.append(contents[0].inline_data.data)
+            return replies.pop(0)
+
+    class Client:
+        models = Models()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(asr_module, "_make_genai_client", lambda timeout_s: Client())
+    sleeps = Sleeps()
+    rec = gp._render_chunk(
+        0,
+        TEXT,
+        LEAF,
+        _far(),
+        scratch,
+        Provider([PCM]),
+        lambda timeout: GeminiTranscriber(timeout_s=timeout),
+        threading.Event(),
+        sleeps,
+    )
+    assert rec["file"] == "chunk-0000.pcm"
+    assert (scratch / "chunk-0000.pcm").read_bytes() == PCM
+    assert len(sent) == 2 and sent[0] == sent[1]  # the same audio bytes, twice
+    assert sleeps.seconds == [2.0]
+    first, second = _attempts(scratch)
+    assert first["outcome"] == "asr_blocked"
+    assert first["asr"]["reasons"] == [ASR_BLOCKED]
+    assert "block_reason=OTHER" in first["asr"]["detail"]
+    assert second["synth"] is None and second["recheck_of"] == 1
+    assert second["outcome"] == "verified"
 
 
 # --- atomic writes -------------------------------------------------------------

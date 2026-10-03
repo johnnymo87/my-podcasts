@@ -211,7 +211,10 @@ def progress_name(i: int) -> str:
 
 
 def omission_name(i: int, n: int) -> str:
-    """Chunk ``i``'s rejected audio from TTS attempt ``n`` (raw PCM, like a chunk)."""
+    """Chunk ``i``'s rejected audio from attempt (try) ``n`` (raw PCM, like a chunk).
+
+    ``n`` counts tries, so for an ASR-only re-check it is the re-check's own number.
+    """
     return f"omission-{i:04d}-{n}.pcm"
 
 
@@ -514,8 +517,10 @@ def _render_chunk_inner(
     backoff_due = False
     last_problem = "no attempt made"
     last_try_blocked = False  # explicit, so the terminal reason never parses text
-    held_pcm: bytes | None = None  # a blocked chunk's audio, awaiting an ASR re-check
-    held_n = 0  # the synth attempt that produced held_pcm
+    # A blocked check's (audio, n of the synth attempt that made it). Set only by a
+    # block, and consumed by the very next try, which is therefore always a
+    # re-check: any other outcome leaves it None, so a new synth never sees it.
+    held: tuple[bytes, int] | None = None
 
     while True:
         # First, so a sibling's failure is never overtaken by a consequence of
@@ -532,7 +537,7 @@ def _render_chunk_inner(
                 )
             raise _ChunkFailure(
                 REASON_EXHAUSTED,
-                f"{MAX_TTS_CALLS} TTS calls used up; last: {last_problem}",
+                f"{MAX_TTS_CALLS} tries used up; last: {last_problem}",
             )
         if backoff_due:
             delay = BACKOFF_SECONDS[tries - 1]
@@ -548,7 +553,7 @@ def _render_chunk_inner(
         checkpoint()
 
         tries += 1
-        if held_pcm is None:
+        if held is None:
             attempt = _new_attempt(tries)
             attempts.append(attempt)
             save()  # "started", before the request
@@ -584,7 +589,7 @@ def _render_chunk_inner(
         else:
             # An ASR-only re-check of the audio a blocked request refused: no
             # synth call, and the retained PCM is re-sent byte for byte.
-            pcm, synth_n, held_pcm = held_pcm, held_n, None
+            (pcm, synth_n), held = held, None
             attempt = _new_recheck(tries, synth_n)
             attempts.append(attempt)
 
@@ -636,7 +641,7 @@ def _render_chunk_inner(
             save()
             last_problem = problem
             last_try_blocked = True
-            held_pcm, held_n = pcm, synth_n
+            held = (pcm, synth_n)
             backoff_due = True
             continue
         # omission: the audio is discarded; re-render once if the counter allows
@@ -655,7 +660,6 @@ def _render_chunk_inner(
         omissions += 1
         last_problem = _omission_summary(verdict)
         last_try_blocked = False
-        held_pcm = None  # the next try is a fresh synth: never re-check stale audio
         if omissions >= 2:
             raise _ChunkFailure(REASON_SECOND_OMISSION, last_problem)
 
@@ -956,7 +960,7 @@ class PhaseOutcome:
     failed_chunk: int | None = None
     child_pid: int | None = None
     child_started_s: float | None = None
-    # (chunk index, attempt n, PCM) for each omission attempt whose rejected audio
+    # (chunk index, attempt/try n, PCM) for each omission attempt whose rejected audio
     # was kept: at most MAX_OMISSION_CLIPS, in (chunk, n) order, collected whether
     # or not the phase succeeded. Diagnostic only; may be empty for any reason.
     omission_audio: tuple[tuple[int, int, bytes], ...] = ()

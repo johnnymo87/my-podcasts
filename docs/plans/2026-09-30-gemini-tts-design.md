@@ -261,7 +261,8 @@ The inline text above stays; where it disagrees with these, these win.
   precedence; the omission re-render still has none. The 360 s phase budget and the parent's kill
   are unchanged. A counter used up on a block is `asr_unavailable`, not `exhausted`; the closed
   `FALLBACK_REASONS` set is unchanged. The omission counter stays independent (a second omission is
-  `second_omission`), and retained PCM is dropped whenever a new synth is scheduled.
+  `second_omission`). The retained PCM is set only by a block and consumed by the very next try
+  (always a re-check), so a new synth can never see it.
 - **Records.** A re-check is its own attempt, `{"n", "synth": null, "asr", "outcome",
   "recheck_of"}`, `outcome` `"asr_blocked"` for any blocked attempt; "attempt" in the manifest now
   means a try. Token totals stay honest: a blocked call raises before usage is read, so a phase that
