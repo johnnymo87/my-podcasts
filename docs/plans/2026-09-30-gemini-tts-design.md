@@ -266,8 +266,14 @@ The inline text above stays; where it disagrees with these, these win.
   (always a re-check), so a new synth can never see it.
 - **Records.** A re-check is its own attempt, `{"n", "synth": null, "asr", "outcome",
   "recheck_of"}`, `outcome` `"asr_blocked"` for any blocked attempt; "attempt" in the manifest now
-  means a try. Token totals stay honest: a blocked call raises before usage is read, so a phase that
-  saw one reports the affected `tokens` as `null`. Plumbing usage through the exception is deferred.
+  means a try. Token totals stay honest. *Amended 2026-10-03 (`my-podcasts-9p3.18`):* a blocked call used to
+  raise before its usage was read, so a phase that saw one reported its ASR `tokens` as `null`.
+  `TranscriptionUnavailable` now carries the response's usage (`usage`, set whenever a response came
+  back: blocked, `asr_empty`, `asr_incomplete`; `None` for `asr_error`/`asr_timeout`), `verify_audio`
+  keeps it in the unavailable verdict's `asr`, and the totals stay known. A blocked response reports
+  prompt tokens and no candidates count (probe: 1777 / total 1777), so output is derived as
+  `total - prompt - thoughts` when both are present. No version bumps; billing of a blocked prompt
+  is still unconfirmed.
 - **No version bumps.** `VERIFIER_VERSION`, `ASR_POLICY`/`VERIFIER_POLICY` and `RENDERER_VERSION`
   stay: they pin *what passes and what is an omission* and the audio a given key produces, and a
   re-asked check changes neither (a passing chunk passed the same verifier on the same bytes; an
