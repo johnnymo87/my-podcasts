@@ -26,6 +26,7 @@ from pipeline.tts._phase_testing import (
 )
 from pipeline.tts.asr import (
     ASR_BLOCKED,
+    AsrUsage,
     GeminiTranscriber,
     Transcription,
     TranscriptionUnavailable,
@@ -474,6 +475,58 @@ def test_block_then_recheck_pass_reuses_the_same_audio_with_one_synth(scratch):
     assert second["n"] == 2 and second["synth"] is None
     assert second["recheck_of"] == 1
     assert second["outcome"] == "verified" and second["asr"]["status"] == "pass"
+
+
+def _blocked_with_usage(inp=1777, out=0, think=None, elapsed=2.5):
+    # What GeminiTranscriber raises for a blocked response (9p3.18): the probe's
+    # 1777 prompt tokens, no candidates count.
+    return TranscriptionUnavailable(
+        ASR_BLOCKED,
+        "no candidates (block_reason=OTHER)",
+        AsrUsage(elapsed, inp, out, think),
+    )
+
+
+def test_a_blocked_attempt_records_its_usage_and_the_phase_totals_stay_known(scratch):
+    from pipeline.tts import render
+
+    asr = Asr([_blocked_with_usage(), TEXT])
+    _run(Provider([PCM]), asr, scratch)
+    first, second = _attempts(scratch)
+    assert first["outcome"] == "asr_blocked" and first["asr"]["status"] == "unavailable"
+    assert first["asr"]["elapsed_s"] == 2.5
+    assert first["asr"]["input_tokens"] == 1777
+    assert first["asr"]["output_tokens"] == 0
+    assert first["asr"]["thinking_tokens"] is None
+    assert second["outcome"] == "verified"
+    tokens, _ = render._phase_totals([_progress(scratch)])
+    # blocked (1777 / 0 / none reported = 0) + re-check (33 / 44 / 5)
+    assert tokens["asr_input"] == 1777 + 33
+    assert tokens["asr_output"] == 0 + 44
+    assert tokens["asr_thinking"] == 0 + 5
+    assert tokens["synth_prompt"] == 11 and tokens["synth_audio"] == 22
+
+
+def test_a_blocked_attempt_whose_usage_is_unknown_makes_totals_null(scratch):
+    from pipeline.tts import render
+
+    asr = Asr([_blocked(), TEXT])  # no usage on the exception
+    _run(Provider([PCM]), asr, scratch)
+    tokens, _ = render._phase_totals([_progress(scratch)])
+    assert tokens["asr_input"] is None and tokens["asr_output"] is None
+    assert tokens["synth_prompt"] == 11
+
+
+def test_an_asr_timeout_attempt_still_makes_asr_totals_null(scratch):
+    from pipeline.tts import render
+
+    asr = Asr([TranscriptionUnavailable("asr_timeout", "slow")])
+    _fail(Provider([PCM]), asr, scratch)
+    (attempt,) = _attempts(scratch)
+    assert attempt["asr"]["elapsed_s"] is None
+    assert attempt["asr"]["input_tokens"] is None
+    tokens, _ = render._phase_totals([_progress(scratch)])
+    assert tokens["asr_input"] is None and tokens["asr_thinking"] is None
 
 
 def test_a_synth_attempt_has_no_recheck_of(scratch):
