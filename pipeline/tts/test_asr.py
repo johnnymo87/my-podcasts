@@ -300,21 +300,48 @@ def _blocked(reason):
     return resp
 
 
-@pytest.mark.parametrize(
-    "reason",
-    [
-        types.BlockedReason.OTHER,
-        types.BlockedReason.SAFETY,
-        types.BlockedReason.PROHIBITED_CONTENT,
-        types.BlockedReason.BLOCKLIST,
-    ],
-)
-def test_no_candidates_with_a_block_reason_is_asr_blocked(reason):
-    t, _, p = transcriber_with(_blocked(reason))
+def test_no_candidates_with_block_reason_other_is_asr_blocked():
+    t, _, p = transcriber_with(_blocked(types.BlockedReason.OTHER))
     with p, pytest.raises(TranscriptionUnavailable) as exc_info:
         t(b"x", "audio/wav")
     assert exc_info.value.reason == "asr_blocked"
-    assert f"block_reason={reason.name}" in str(exc_info.value)
+    assert "block_reason=OTHER" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("raw", ["OTHER", "BlockedReason.OTHER", "other"])
+def test_a_string_block_reason_is_compared_by_name(raw):
+    resp = response(candidates=False)
+    resp.prompt_feedback = SimpleNamespace(block_reason=raw)
+    t, _, p = transcriber_with(resp)
+    with p, pytest.raises(TranscriptionUnavailable) as exc_info:
+        t(b"x", "audio/wav")
+    assert exc_info.value.reason == "asr_blocked"
+
+
+def test_the_retryable_block_reasons_are_only_other():
+    assert asr.RETRYABLE_BLOCK_REASONS == frozenset({types.BlockedReason.OTHER})
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        types.BlockedReason.SAFETY,
+        types.BlockedReason.PROHIBITED_CONTENT,
+        types.BlockedReason.BLOCKLIST,
+        types.BlockedReason.IMAGE_SAFETY,
+        types.BlockedReason.MODEL_ARMOR,
+        types.BlockedReason.JAILBREAK,
+        "SOME_FUTURE_CATEGORY",
+    ],
+)
+def test_no_candidates_with_any_other_block_reason_is_asr_empty(reason):
+    resp = response(candidates=False)
+    resp.prompt_feedback = SimpleNamespace(block_reason=reason)
+    t, _, p = transcriber_with(resp)
+    with p, pytest.raises(TranscriptionUnavailable) as exc_info:
+        t(b"x", "audio/wav")
+    assert exc_info.value.reason == "asr_empty"
+    assert f"block_reason={getattr(reason, 'name', reason)}" in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
@@ -327,7 +354,7 @@ def test_no_candidates_with_a_block_reason_is_asr_blocked(reason):
         ),
     ],
 )
-def test_no_candidates_without_a_real_block_reason_stays_asr_empty(feedback):
+def test_no_candidates_without_a_block_reason_stays_asr_empty(feedback):
     resp = response(candidates=False)
     resp.prompt_feedback = feedback
     t, _, p = transcriber_with(resp)

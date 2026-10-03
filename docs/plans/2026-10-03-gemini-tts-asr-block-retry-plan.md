@@ -15,15 +15,18 @@ in all of T5 and on the 2026-10-02 Rundown/FP chunks.
 
 ## Design (owner-approved 2026-10-03; oracle-astra consulted)
 
-1. **Structural classification (`pipeline/tts/asr.py`).** No candidates **and** a real
-   `prompt_feedback.block_reason` (anything but `None` / `BLOCKED_REASON_UNSPECIFIED`)
+1. **Structural classification (`pipeline/tts/asr.py`).** No candidates **and**
+   `prompt_feedback.block_reason == OTHER` (the allowlist `RETRYABLE_BLOCK_REASONS`)
    raises `TranscriptionUnavailable("asr_blocked", "no candidates (block_reason=X)")`.
-   No candidates without a block reason stays `asr_empty`. Every other reason
+   No candidates with any other block reason (or none) stays `asr_empty`, the reason named in the detail. Every other reason
    (`asr_error`, `asr_timeout`, `asr_incomplete`, `asr_empty`) is unchanged.
    `verify_audio` passes the reason through as the verdict's `reasons[0]`; the
    phase matches `verdict.reasons == ("asr_blocked",)` exactly, never text.
-   All block reasons are retried, not only `OTHER`: a retry is one cheap ASR call on
-   audio that already exists, and a stubborn block still ends in the same fallback.
+   Only `OTHER` is retried (review amendment, 2026-10-03): the evidence shows `OTHER`
+   is transient and nothing shows SAFETY / PROHIBITED_CONTENT / BLOCKLIST or a future
+   category clearing on a retry, so those are not implicitly opted in; they fail the
+   phase at once as before. The set is a named constant, widened only on new evidence.
+   (The first draft retried every real reason on the grounds that a retry is cheap.)
 2. **Retry in the phase only (`pipeline/tts/gemini_phase.py`).** The per-chunk
    counter (`MAX_TTS_CALLS = 3`) now counts **tries**: a try is a TTS call (with its
    first ASR) **or an ASR-only re-check of the retained PCM**. A blocked verdict keeps

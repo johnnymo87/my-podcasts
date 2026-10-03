@@ -249,8 +249,9 @@ The inline text above stays; where it disagrees with these, these win.
   passed twice. No block in all of T5 or on the 2026-10-02 Rundown/FP chunks.
 - **Change.** "ASR is not retried" (T3b: any `unavailable` verdict fails the chunk at once) no
   longer holds for one reason. `GeminiTranscriber` raises `asr_blocked` when a response has no
-  candidates **and** a real `block_reason` (not `None`/`BLOCKED_REASON_UNSPECIFIED`); no candidates
-  without one stays `asr_empty`. The phase matches a verdict whose reasons are exactly
+  candidates **and** `block_reason=OTHER` (an allowlist, `RETRYABLE_BLOCK_REASONS`: only `OTHER` was
+  shown transient, so SAFETY, PROHIBITED_CONTENT, BLOCKLIST and future categories are not opted in);
+  no candidates with any other reason, or none, stays `asr_empty` with the reason in the detail. The phase matches a verdict whose reasons are exactly
   `("asr_blocked",)` and re-asks ASR about the **same retained PCM**, with no new TTS call. Every
   other reason (`asr_error`, `asr_timeout`, `asr_empty`, `asr_incomplete`) still fails at once.
 - **The bound changed, and replaces "at most 3 TTS calls and 2 ASR calls" (T3 consult amendment).**
