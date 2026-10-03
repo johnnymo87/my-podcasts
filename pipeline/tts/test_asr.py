@@ -292,16 +292,88 @@ def test_thinking_tokens_are_recorded():
         assert t(b"x", "audio/wav").thinking_tokens is None
 
 
-def test_no_candidates_message_includes_block_reason():
+def _blocked(reason):
     resp = response(candidates=False)
     resp.prompt_feedback = types.GenerateContentResponsePromptFeedback(
-        block_reason=types.BlockedReason.PROHIBITED_CONTENT
+        block_reason=reason
     )
+    return resp
+
+
+def test_no_candidates_with_block_reason_other_is_asr_blocked():
+    t, _, p = transcriber_with(_blocked(types.BlockedReason.OTHER))
+    with p, pytest.raises(TranscriptionUnavailable) as exc_info:
+        t(b"x", "audio/wav")
+    assert exc_info.value.reason == "asr_blocked"
+    assert "block_reason=OTHER" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("raw", ["OTHER", "BlockedReason.OTHER", "other"])
+def test_a_string_block_reason_is_compared_by_name(raw):
+    resp = response(candidates=False)
+    resp.prompt_feedback = SimpleNamespace(block_reason=raw)
+    t, _, p = transcriber_with(resp)
+    with p, pytest.raises(TranscriptionUnavailable) as exc_info:
+        t(b"x", "audio/wav")
+    assert exc_info.value.reason == "asr_blocked"
+
+
+def test_the_retryable_block_reasons_are_only_other():
+    assert asr.RETRYABLE_BLOCK_REASONS == frozenset({types.BlockedReason.OTHER})
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        types.BlockedReason.SAFETY,
+        types.BlockedReason.PROHIBITED_CONTENT,
+        types.BlockedReason.BLOCKLIST,
+        types.BlockedReason.IMAGE_SAFETY,
+        types.BlockedReason.MODEL_ARMOR,
+        types.BlockedReason.JAILBREAK,
+        "SOME_FUTURE_CATEGORY",
+    ],
+)
+def test_no_candidates_with_any_other_block_reason_is_asr_empty(reason):
+    resp = response(candidates=False)
+    resp.prompt_feedback = SimpleNamespace(block_reason=reason)
     t, _, p = transcriber_with(resp)
     with p, pytest.raises(TranscriptionUnavailable) as exc_info:
         t(b"x", "audio/wav")
     assert exc_info.value.reason == "asr_empty"
-    assert "PROHIBITED_CONTENT" in str(exc_info.value)
+    assert f"block_reason={getattr(reason, 'name', reason)}" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "feedback",
+    [
+        None,
+        types.GenerateContentResponsePromptFeedback(),
+        types.GenerateContentResponsePromptFeedback(
+            block_reason=types.BlockedReason.BLOCKED_REASON_UNSPECIFIED
+        ),
+    ],
+)
+def test_no_candidates_without_a_block_reason_stays_asr_empty(feedback):
+    resp = response(candidates=False)
+    resp.prompt_feedback = feedback
+    t, _, p = transcriber_with(resp)
+    with p, pytest.raises(TranscriptionUnavailable) as exc_info:
+        t(b"x", "audio/wav")
+    assert exc_info.value.reason == "asr_empty"
+
+
+def test_a_block_reason_with_candidates_present_is_not_asr_blocked():
+    # Only "no candidates" is a block: a candidate with a bad finish reason is
+    # still asr_incomplete, whatever the feedback says.
+    resp = response(finish="SAFETY")
+    resp.prompt_feedback = types.GenerateContentResponsePromptFeedback(
+        block_reason=types.BlockedReason.OTHER
+    )
+    t, _, p = transcriber_with(resp)
+    with p, pytest.raises(TranscriptionUnavailable) as exc_info:
+        t(b"x", "audio/wav")
+    assert exc_info.value.reason == "asr_incomplete"
 
 
 def test_sdk_makes_exactly_one_attempt_on_503(monkeypatch):

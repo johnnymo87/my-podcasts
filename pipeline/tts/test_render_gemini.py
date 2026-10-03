@@ -507,6 +507,74 @@ def test_an_empty_transcript_unavailable_call_did_complete(env):
     assert env.manifests()[0]["gemini_phase"]["tokens"]["asr_thinking"] == 0
 
 
+def blocked_attempt():
+    """A synth attempt whose first ASR request was blocked (9p3.17): no usage came
+    back, so its ASR tokens are unknown."""
+    a = attempt(asr_in=None, asr_out=None, asr_think=None, outcome="asr_blocked")
+    a["asr"].update(status="unavailable", reasons=["asr_blocked"], elapsed_s=None)
+    return a
+
+
+def recheck_attempt(*, n=2, asr_in=33, asr_out=44, asr_think=5):
+    """An ASR-only re-check of the audio synth attempt 1 made: ``synth`` is None."""
+    a = attempt(asr_in=asr_in, asr_out=asr_out, asr_think=asr_think)
+    a.update(n=n, synth=None, recheck_of=1)
+    return a
+
+
+def test_phase_totals_count_a_recheck_asr_but_not_a_second_synth():
+    records = [{"index": 0, "attempts": [blocked_attempt(), recheck_attempt()]}]
+    totals, generated = render._phase_totals(records)
+    # The blocked request's usage is unknown, so the ASR totals are (honestly) None.
+    assert totals["asr_input"] is None and totals["asr_thinking"] is None
+    # The one synth call is counted once, not once per try.
+    assert (totals["synth_prompt"], totals["synth_audio"]) == (11, 22)
+    assert generated == 1.0  # one second of audio, not two
+
+
+def test_phase_totals_sum_a_recheck_whose_predecessor_reported_usage():
+    # Not a shape the phase writes today (a block carries no usage), but the
+    # arithmetic must not depend on that: a None synth contributes nothing.
+    first = attempt(asr_in=10, asr_out=1, asr_think=0, outcome="asr_blocked")
+    records = [{"index": 0, "attempts": [first, recheck_attempt()]}]
+    totals, generated = render._phase_totals(records)
+    assert totals == {
+        "synth_prompt": 11,
+        "synth_audio": 22,
+        "asr_input": 43,
+        "asr_output": 45,
+        "asr_thinking": 5,
+    }
+    assert generated == 1.0
+
+
+def test_phase_totals_accept_a_recheck_alone():
+    totals, generated = render._phase_totals(
+        [{"index": 0, "attempts": [recheck_attempt()]}]
+    )
+    assert totals["synth_prompt"] == 0 and totals["asr_input"] == 33
+    assert generated == 0.0
+
+
+def test_a_phase_with_a_recheck_attempt_writes_a_manifest_and_ships(env):
+    def outcome(chunks):
+        out = ok_outcome(chunks)
+        out.chunk_records[0]["attempts"] = [blocked_attempt(), recheck_attempt()]
+        return out
+
+    env.outcome = outcome
+    result = env.render()
+    assert result.provider == "gemini" and env.alerts == []
+    [m] = env.manifests()
+    phase = m["gemini_phase"]
+    assert "telemetry_error" not in phase
+    assert phase["tokens"]["synth_prompt"] == 11 + 11 * (N_GEMINI - 1)
+    assert phase["tokens"]["asr_input"] is None  # the blocked request's usage
+    assert phase["chunks"][0]["attempts"][1]["synth"] is None
+    assert m["chunks"][0]["attempts"] == 2  # tries, not TTS calls
+    assert m["chunks"][0]["errors"] == []
+
+
 def test_a_chunk_with_no_progress_makes_every_total_unknown(env):
     def outcome(chunks):
         out = failed_outcome("child_no_result", chunks=2)

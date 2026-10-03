@@ -132,7 +132,8 @@ The inline text above stays; where it disagrees with these, these win.
 - **Dropped rule:** "infra-transient exhausting retries on 2 distinct chunks" no longer exists as
   a separate trigger. Any chunk that exhausts its retries already triggers whole-episode fallback.
 - **One counter per chunk.** Transient retries and the single omission re-render share one 3-call
-  counter: at most 3 TTS calls and 2 ASR calls per chunk.
+  counter: at most 3 TTS calls and 2 ASR calls per chunk. (Superseded 2026-10-03: the counter now
+  counts tries and a blocked ASR check is re-asked; see "blocked ASR re-check" below.)
 - **429 is fatal only with confirmed daily/billing `QuotaFailure` detail.** `RESOURCE_EXHAUSTED`
   alone is transient.
 - **The bound** is the 6-minute Gemini budget plus one poll interval (0.2 s) plus ONE bounded reap
@@ -237,6 +238,44 @@ The inline text above stays; where it disagrees with these, these win.
   `my-podcasts-9p3.14`), so a chunk under 300 tokens can no longer false-alarm on a few misheard names (at most 15 unmatched tokens). No T5
   verdict changed (284 stored records, 0 differences). Evidence:
   `docs/plans/2026-09-30-gemini-tts-t5-evidence.md` ("Short tail chunks").
+
+#### Amendments (blocked ASR re-check, 2026-10-03)
+
+- **Evidence.** The first production Gemini Levine (2026-10-02, one chunk) fell back to `ash` with
+  `asr_unavailable`: synthesis was fine, the verification request returned no candidates and
+  `prompt_feedback.block_reason=OTHER`. A re-test on 2026-10-03 (about $0.10, artifacts
+  `/persist/my-podcasts/tts-eval/asr-block/`) found the block **transient and content-sensitive**: on
+  that text 4 of 13 ASR calls were blocked, and the *same audio bytes* were blocked twice and then
+  passed twice. No block in all of T5 or on the 2026-10-02 Rundown/FP chunks.
+- **Change.** "ASR is not retried" (T3b: any `unavailable` verdict fails the chunk at once) no
+  longer holds for one reason. `GeminiTranscriber` raises `asr_blocked` when a response has no
+  candidates **and** `block_reason=OTHER` (an allowlist, `RETRYABLE_BLOCK_REASONS`: only `OTHER` was
+  shown transient, so SAFETY, PROHIBITED_CONTENT, BLOCKLIST and future categories are not opted in);
+  no candidates with any other reason, or none, stays `asr_empty` with the reason in the detail. The phase matches a verdict whose reasons are exactly
+  `("asr_blocked",)` and re-asks ASR about the **same retained PCM**, with no new TTS call. Every
+  other reason (`asr_error`, `asr_timeout`, `asr_empty`, `asr_incomplete`) still fails at once.
+- **The bound changed, and replaces "at most 3 TTS calls and 2 ASR calls" (T3 consult amendment).**
+  The per-chunk counter (`MAX_TTS_CALLS = 3`) now counts **tries**: a TTS call with its first ASR
+  check, or an ASR-only re-check. So per chunk: tries <= 3, TTS calls <= 3, ASR calls <= 3,
+  external requests <= 5 (synth/omission -> synth/block -> re-check/pass). The backoff before a
+  re-check is indexed by tries used (2 s, then 8 s) with the transient-retry deadline and abort
+  precedence; the omission re-render still has none. The 360 s phase budget and the parent's kill
+  are unchanged. A counter used up on a block is `asr_unavailable`, not `exhausted`; the closed
+  `FALLBACK_REASONS` set is unchanged. The omission counter stays independent (a second omission is
+  `second_omission`). The retained PCM is set only by a block and consumed by the very next try
+  (always a re-check), so a new synth can never see it.
+- **Records.** A re-check is its own attempt, `{"n", "synth": null, "asr", "outcome",
+  "recheck_of"}`, `outcome` `"asr_blocked"` for any blocked attempt; "attempt" in the manifest now
+  means a try. Token totals stay honest: a blocked call raises before usage is read, so a phase that
+  saw one reports the affected `tokens` as `null`. Plumbing usage through the exception is deferred.
+- **No version bumps.** `VERIFIER_VERSION`, `ASR_POLICY`/`VERIFIER_POLICY` and `RENDERER_VERSION`
+  stay: they pin *what passes and what is an omission* and the audio a given key produces, and a
+  re-asked check changes neither (a passing chunk passed the same verifier on the same bytes; an
+  omission is still an omission). Only how often an unavailable verdict is re-asked changed, so
+  existing cache keys stay valid and a previously cached fallback replays as designed. `tts-verify`
+  and calibration (`tts-calibrate`) are measurement tools and do **not** retry; they pass any
+  reason through (exit 3 = unavailable). Plan:
+  `docs/plans/2026-10-03-gemini-tts-asr-block-retry-plan.md` (bead `my-podcasts-9p3.17`).
 
 ### Completed-render reuse
 

@@ -94,11 +94,45 @@ def _generation_config(thinking: str = DEFAULT_THINKING) -> types.GenerateConten
     return types.GenerateContentConfig(temperature=ASR_TEMPERATURE)
 
 
+# The one reason the Gemini phase retries; matched by equality, never by text.
+ASR_BLOCKED = "asr_blocked"
+
+
+# The block reasons the phase may retry: an allowlist, not "any real reason". The
+# 2026-10-03 re-test showed only ``OTHER`` is transient (the same audio blocked
+# twice, then passed twice); SAFETY, PROHIBITED_CONTENT, BLOCKLIST and any
+# category the API adds later are content verdicts nobody has shown to clear on a
+# retry, so they stay ``asr_empty`` and fail the phase at once.
+RETRYABLE_BLOCK_REASONS = frozenset({types.BlockedReason.OTHER})
+_RETRYABLE_BLOCK_NAMES = frozenset(r.name for r in RETRYABLE_BLOCK_REASONS)
+
+
+def _block_name(block: object) -> str | None:
+    """The block reason's enum name whether the SDK handed us the enum or a string
+    (``"OTHER"``, or an enum's ``"BlockedReason.OTHER"`` rendering); None if absent."""
+    if block is None:
+        return None
+    name = getattr(block, "name", None)
+    if not isinstance(name, str):
+        name = str(block).rsplit(".", 1)[-1]
+    return name.strip().upper() or None
+
+
+def _is_retryable_block(block: object) -> bool:
+    return _block_name(block) in _RETRYABLE_BLOCK_NAMES
+
+
 class TranscriptionUnavailable(Exception):
     """Explicit evidence the transcript cannot be trusted: never a pass.
 
     ``reason`` is one of ``asr_error``, ``asr_timeout``, ``asr_empty``,
-    ``asr_incomplete`` (finish reason other than STOP, or none).
+    ``asr_incomplete`` (finish reason other than STOP, or none) or
+    ``asr_blocked`` (no candidates AND ``prompt_feedback.block_reason`` is in
+    ``RETRYABLE_BLOCK_REASONS``, today only ``OTHER``). ``asr_blocked`` is the
+    only reason the Gemini phase retries (the same audio bytes were blocked twice
+    and then passed twice in the 2026-10-03 re-test); a response with no
+    candidates and any other block reason (SAFETY, PROHIBITED_CONTENT, ...), or
+    none, stays ``asr_empty``, with the reason named in the detail.
     """
 
     def __init__(self, reason: str, message: str) -> None:
@@ -210,6 +244,9 @@ class GeminiTranscriber:
             detail = "no candidates"
             if block is not None:
                 detail += f" (block_reason={getattr(block, 'name', block)})"
+            if _is_retryable_block(block):
+                # Structural, not textual: the phase retries exactly this reason.
+                raise TranscriptionUnavailable(ASR_BLOCKED, detail)
             raise TranscriptionUnavailable("asr_empty", detail)
         finish = resp.candidates[0].finish_reason
         finish_name = finish.name if finish is not None else "NONE"

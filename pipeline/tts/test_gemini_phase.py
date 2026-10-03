@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from pipeline.tts import asr as asr_module
 from pipeline.tts import gemini_phase as gp
 from pipeline.tts._phase_testing import (
     factories,
@@ -23,7 +24,12 @@ from pipeline.tts._phase_testing import (
     fake_pcm,
     make_chunks,
 )
-from pipeline.tts.asr import Transcription, TranscriptionUnavailable
+from pipeline.tts.asr import (
+    ASR_BLOCKED,
+    GeminiTranscriber,
+    Transcription,
+    TranscriptionUnavailable,
+)
 from pipeline.tts.config import GeminiConfig
 from pipeline.tts.providers import Synthesis, TTSProviderError
 
@@ -39,6 +45,10 @@ def _err(kind: str) -> TTSProviderError:
 
 def _asr_unavailable() -> TranscriptionUnavailable:
     return TranscriptionUnavailable("asr_error", "fake outage")
+
+
+def _blocked() -> TranscriptionUnavailable:
+    return TranscriptionUnavailable(ASR_BLOCKED, "no candidates (block_reason=OTHER)")
 
 
 class Provider:
@@ -72,6 +82,7 @@ class Asr:
         self._script = list(script)
         self.timeouts: list[float] = []
         self.calls = 0
+        self.audio: list[bytes] = []  # what each request was sent
 
     def make(self, timeout_s):
         self.timeouts.append(timeout_s)
@@ -79,6 +90,7 @@ class Asr:
 
     def _transcribe(self, audio, mime):
         self.calls += 1
+        self.audio.append(audio)
         item = self._script.pop(0)
         if isinstance(item, BaseException):
             raise item
@@ -433,6 +445,363 @@ def test_asr_unavailable_attempt_is_recorded(scratch):
     assert attempt["asr"]["status"] == "unavailable"
     assert attempt["asr"]["input_tokens"] is None
     assert attempt["outcome"] == "asr_unavailable"
+
+
+# --- a blocked ASR check is re-asked on the same audio (9p3.17) -------------------
+
+PCM_SECOND = fake_pcm(7)  # a second synth's audio, told apart from PCM
+
+
+def _attempts(scratch) -> list[dict]:
+    return _progress(scratch)["attempts"]
+
+
+def test_block_then_recheck_pass_reuses_the_same_audio_with_one_synth(scratch):
+    provider = Provider([PCM, PCM_SECOND])
+    asr = Asr([_blocked(), TEXT])
+    rec, sleeps, abort = _run(provider, asr, scratch)
+    assert (len(provider.calls), asr.calls) == (1, 2)
+    assert asr.audio[0] == asr.audio[1] == gp.pcm_to_wav(PCM)  # byte-identical
+    assert sleeps.seconds == [2.0]
+    assert not abort.is_set()
+    assert (scratch / "chunk-0000.pcm").read_bytes() == PCM
+    assert rec["sha256"] == hashlib.sha256(PCM).hexdigest()
+    first, second = _attempts(scratch)
+    assert first["n"] == 1 and first["outcome"] == "asr_blocked"
+    assert first["synth"]["status"] == "ok"
+    assert first["asr"]["status"] == "unavailable"
+    assert first["asr"]["reasons"] == ["asr_blocked"]
+    assert second["n"] == 2 and second["synth"] is None
+    assert second["recheck_of"] == 1
+    assert second["outcome"] == "verified" and second["asr"]["status"] == "pass"
+
+
+def test_a_synth_attempt_has_no_recheck_of(scratch):
+    _run(Provider([PCM]), Asr([TEXT]), scratch)
+    (attempt,) = _attempts(scratch)
+    assert "recheck_of" not in attempt
+
+
+def test_three_blocks_end_in_asr_unavailable_after_one_synth_and_three_asr(scratch):
+    provider = Provider([PCM, PCM_SECOND])
+    asr = Asr([_blocked(), _blocked(), _blocked()])
+    sleeps = Sleeps()
+    abort = threading.Event()
+    failure = _fail(provider, asr, scratch, sleeps=sleeps, abort=abort)
+    assert failure.reason == gp.REASON_ASR_UNAVAILABLE
+    assert (len(provider.calls), asr.calls) == (1, 3)
+    assert len(set(asr.audio)) == 1
+    assert sleeps.seconds == [2.0, 8.0]  # no third backoff, and no IndexError
+    assert abort.is_set()
+    assert "asr_blocked" in failure.detail
+    assert [a["outcome"] for a in _attempts(scratch)] == ["asr_blocked"] * 3
+    assert [a["n"] for a in _attempts(scratch)] == [1, 2, 3]
+    assert [a.get("recheck_of") for a in _attempts(scratch)] == [None, 1, 1]
+    assert not (scratch / "chunk-0000.pcm").exists()
+
+
+def test_block_block_pass_backs_off_2_then_8(scratch):
+    provider = Provider([PCM])
+    asr = Asr([_blocked(), _blocked(), TEXT])
+    _, sleeps, _ = _run(provider, asr, scratch)
+    assert (len(provider.calls), asr.calls) == (1, 3)
+    assert sleeps.seconds == [2.0, 8.0]
+    assert [a["n"] for a in _attempts(scratch)] == [1, 2, 3]
+    assert _attempts(scratch)[-1]["recheck_of"] == 1
+
+
+@pytest.mark.parametrize(
+    "reason", ["asr_error", "asr_timeout", "asr_empty", "asr_incomplete"]
+)
+def test_every_other_unavailable_reason_still_fails_at_once(scratch, reason):
+    asr = Asr([TranscriptionUnavailable(reason, "x"), TEXT])
+    failure = _fail(Provider([PCM, PCM]), asr, scratch)
+    assert failure.reason == gp.REASON_ASR_UNAVAILABLE
+    assert asr.calls == 1
+
+
+def test_the_block_reason_is_matched_exactly_not_as_text(scratch):
+    # The detail talks about a block; the reason is not asr_blocked. No retry.
+    exc = TranscriptionUnavailable("asr_error", "asr_blocked: no candidates")
+    asr = Asr([exc, TEXT])
+    sleeps = Sleeps()
+    failure = _fail(Provider([PCM]), asr, scratch, sleeps=sleeps)
+    assert failure.reason == gp.REASON_ASR_UNAVAILABLE
+    assert (asr.calls, sleeps.seconds) == (1, [])
+
+
+def test_omission_then_synth_then_block_then_recheck_pass(scratch):
+    provider = Provider([PCM_REJECTED, PCM])
+    asr = Asr([OMITTED, _blocked(), TEXT])
+    _, sleeps, _ = _run(provider, asr, scratch)
+    assert (len(provider.calls), asr.calls) == (2, 3)
+    # No backoff before the omission re-render; the re-check follows 2 tries, so 8 s.
+    assert sleeps.seconds == [8.0]
+    assert asr.audio[1] == asr.audio[2] == gp.pcm_to_wav(PCM)
+    assert [a["n"] for a in _attempts(scratch)] == [1, 2, 3]
+    assert [a["outcome"] for a in _attempts(scratch)] == [
+        "omission",
+        "asr_blocked",
+        "verified",
+    ]
+    assert _attempts(scratch)[2]["recheck_of"] == 2  # the synth attempt that made it
+
+
+def test_omission_then_synth_then_block_then_recheck_block_is_asr_unavailable(
+    scratch,
+):
+    provider = Provider([PCM_REJECTED, PCM])
+    asr = Asr([OMITTED, _blocked(), _blocked()])
+    sleeps = Sleeps()
+    failure = _fail(provider, asr, scratch, sleeps=sleeps)
+    assert failure.reason == gp.REASON_ASR_UNAVAILABLE
+    assert (len(provider.calls), asr.calls) == (2, 3)
+    assert sleeps.seconds == [8.0]
+
+
+def test_transient_error_then_synth_then_block_then_recheck_pass(scratch):
+    provider = Provider([_err("infra"), PCM])
+    asr = Asr([_blocked(), TEXT])
+    _, sleeps, _ = _run(provider, asr, scratch)
+    assert (len(provider.calls), asr.calls) == (2, 2)
+    assert sleeps.seconds == [2.0, 8.0]
+    assert [a["n"] for a in _attempts(scratch)] == [1, 2, 3]
+    assert _attempts(scratch)[2]["recheck_of"] == 2
+
+
+def test_transient_error_then_synth_then_block_then_block_is_asr_unavailable(scratch):
+    provider = Provider([_err("content"), PCM])
+    asr = Asr([_blocked(), _blocked()])
+    failure = _fail(provider, asr, scratch)
+    assert failure.reason == gp.REASON_ASR_UNAVAILABLE
+    assert (len(provider.calls), asr.calls) == (2, 2)
+
+
+def test_a_block_on_the_last_try_is_asr_unavailable_not_exhausted(scratch):
+    provider = Provider([_err("infra"), _err("infra"), PCM])
+    asr = Asr([_blocked(), TEXT])
+    sleeps = Sleeps()
+    failure = _fail(provider, asr, scratch, sleeps=sleeps)
+    assert failure.reason == gp.REASON_ASR_UNAVAILABLE
+    assert (len(provider.calls), asr.calls) == (3, 1)  # no fourth try
+    assert sleeps.seconds == [2.0, 8.0]
+
+
+def test_a_transient_error_after_a_block_does_not_keep_the_block_verdict(scratch):
+    # block (try 1), recheck omission (try 2), synth error (try 3): exhausted by the
+    # synth error, which is what the chunk last suffered -- not a block.
+    provider = Provider([PCM, _err("infra")])
+    asr = Asr([_blocked(), OMITTED])
+    failure = _fail(provider, asr, scratch)
+    assert failure.reason == gp.REASON_EXHAUSTED
+    assert (len(provider.calls), asr.calls) == (2, 2)
+
+
+def test_block_then_recheck_omission_then_fresh_synth_pass(scratch):
+    provider = Provider([PCM_REJECTED, PCM_SECOND])
+    asr = Asr([_blocked(), OMITTED, TEXT])
+    _, sleeps, _ = _run(provider, asr, scratch)
+    assert (len(provider.calls), asr.calls) == (2, 3)
+    assert sleeps.seconds == [2.0]  # the omission re-render keeps no backoff
+    # The retained PCM is gone: the third request carries the second synth's audio.
+    assert asr.audio[0] == asr.audio[1] == gp.pcm_to_wav(PCM_REJECTED)
+    assert asr.audio[2] == gp.pcm_to_wav(PCM_SECOND)
+    assert (scratch / "chunk-0000.pcm").read_bytes() == PCM_SECOND
+    attempts = _attempts(scratch)
+    assert [a["outcome"] for a in attempts] == ["asr_blocked", "omission", "verified"]
+    assert attempts[1]["synth"] is None and attempts[1]["recheck_of"] == 1
+    assert attempts[2]["synth"]["status"] == "ok" and "recheck_of" not in attempts[2]
+    # A re-check's omission clip is named by that attempt's own n (2), not the synth's.
+    assert attempts[1]["omission_audio"] == gp.omission_name(0, 2)
+    assert (scratch / gp.omission_name(0, 2)).read_bytes() == PCM_REJECTED
+    assert "omission_audio" not in attempts[0]
+
+
+def test_block_then_recheck_omission_then_second_omission_fails(scratch):
+    provider = Provider([PCM, PCM_SECOND])
+    asr = Asr([_blocked(), OMITTED, OMITTED])
+    failure = _fail(provider, asr, scratch)
+    assert failure.reason == gp.REASON_SECOND_OMISSION
+    assert (len(provider.calls), asr.calls) == (2, 3)
+
+
+def test_a_recheck_omission_clip_is_collected_by_the_parent(scratch):
+    _run(Provider([PCM_REJECTED, PCM]), Asr([_blocked(), OMITTED, TEXT]), scratch)
+    clips = gp._collect_omission_audio(scratch, [_progress(scratch)])
+    assert clips == ((0, 2, PCM_REJECTED),)
+
+
+def test_deadline_shorter_than_the_recheck_backoff_fails_without_sleeping(scratch):
+    provider = Provider([PCM])
+    asr = Asr([_blocked(), TEXT])
+    sleeps = Sleeps()
+    failure = _fail(
+        provider, asr, scratch, deadline=time.monotonic() + 1.0, sleeps=sleeps
+    )
+    assert failure.reason == gp.REASON_DEADLINE
+    assert sleeps.seconds == []
+    assert (len(provider.calls), asr.calls) == (1, 1)
+    assert "backoff" in failure.detail
+
+
+def test_abort_during_the_recheck_backoff_stops_quietly(scratch):
+    provider = Provider([PCM])
+    asr = Asr([_blocked(), TEXT])
+    with pytest.raises(gp._ChunkAborted):
+        _run(provider, asr, scratch, sleeps=Sleeps(aborted=True))
+    assert (len(provider.calls), asr.calls) == (1, 1)
+
+
+def test_abort_set_by_a_sibling_beats_the_recheck(scratch):
+    abort = threading.Event()
+    asr = Asr([_blocked(), TEXT])
+    real_make = asr.make
+
+    def make(timeout):
+        t = real_make(timeout)
+        abort.set()  # a sibling fails while our first verification runs
+        return t
+
+    with pytest.raises(gp._ChunkAborted):
+        gp._render_chunk(
+            0, TEXT, LEAF, _far(), scratch, Provider([PCM]), make, abort, Sleeps()
+        )
+    assert asr.calls == 1
+
+
+def test_recheck_is_recorded_as_started_before_its_request(scratch):
+    seen: list[dict] = []
+    asr = Asr([_blocked(), TEXT])
+    real_make = asr.make
+
+    def make(timeout):
+        seen.append(_progress(scratch))
+        return real_make(timeout)
+
+    gp._render_chunk(
+        0,
+        TEXT,
+        LEAF,
+        _far(),
+        scratch,
+        Provider([PCM]),
+        make,
+        threading.Event(),
+        Sleeps(),
+    )
+    assert len(seen) == 2
+    first, during = seen[1]["attempts"]
+    assert first["outcome"] == "asr_blocked"
+    assert during["n"] == 2 and during["synth"] is None and during["recheck_of"] == 1
+    assert during["asr"]["status"] == "started"
+    assert during["asr"]["input_tokens"] is None
+    assert during["outcome"] is None
+
+
+def test_a_fresh_transcriber_is_built_and_closed_per_recheck(scratch):
+    asr = Asr([_blocked(), _blocked(), TEXT])
+    closed: list[int] = []
+
+    class Closing:
+        def __init__(self, inner, k):
+            self._inner, self._k = inner, k
+
+        def __call__(self, audio, mime):
+            return self._inner(audio, mime)
+
+        def close(self):
+            closed.append(self._k)
+
+    built: list[Closing] = []
+
+    def make(timeout):
+        t = Closing(asr.make(timeout), len(built))
+        built.append(t)
+        return t
+
+    gp._render_chunk(
+        0,
+        TEXT,
+        LEAF,
+        _far(),
+        scratch,
+        Provider([PCM]),
+        make,
+        threading.Event(),
+        Sleeps(),
+    )
+    assert len(built) == 3 and len(set(map(id, built))) == 3
+    assert closed == [0, 1, 2]
+
+
+def test_the_recheck_transcriber_timeout_is_recomputed(scratch):
+    asr = Asr([_blocked(), TEXT])
+    _run(Provider([PCM]), asr, scratch, deadline=time.monotonic() + 30.0)
+    assert all(29.0 < t <= 30.0 for t in asr.timeouts) and len(asr.timeouts) == 2
+
+
+def test_a_real_blocked_response_is_rechecked_through_the_real_transcriber(
+    scratch, monkeypatch
+):
+    """No candidates + a real block_reason, as the SDK returns it, through the real
+    GeminiTranscriber and verify_audio: re-checked once on the same bytes, then
+    verified. Only the SDK client is faked."""
+    from google.genai import types
+
+    blocked = types.GenerateContentResponse(
+        candidates=[],
+        prompt_feedback=types.GenerateContentResponsePromptFeedback(
+            block_reason=types.BlockedReason.OTHER
+        ),
+    )
+    good = types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                finish_reason=types.FinishReason.STOP,
+                content=types.Content(parts=[types.Part(text=TEXT)]),
+            )
+        ],
+        usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=100, candidates_token_count=5
+        ),
+    )
+    sent: list[bytes] = []
+    replies = [blocked, good]
+
+    class Models:
+        def generate_content(self, *, model, contents, config):
+            sent.append(contents[0].inline_data.data)
+            return replies.pop(0)
+
+    class Client:
+        models = Models()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(asr_module, "_make_genai_client", lambda timeout_s: Client())
+    sleeps = Sleeps()
+    rec = gp._render_chunk(
+        0,
+        TEXT,
+        LEAF,
+        _far(),
+        scratch,
+        Provider([PCM]),
+        lambda timeout: GeminiTranscriber(timeout_s=timeout),
+        threading.Event(),
+        sleeps,
+    )
+    assert rec["file"] == "chunk-0000.pcm"
+    assert (scratch / "chunk-0000.pcm").read_bytes() == PCM
+    assert len(sent) == 2 and sent[0] == sent[1]  # the same audio bytes, twice
+    assert sleeps.seconds == [2.0]
+    first, second = _attempts(scratch)
+    assert first["outcome"] == "asr_blocked"
+    assert first["asr"]["reasons"] == [ASR_BLOCKED]
+    assert "block_reason=OTHER" in first["asr"]["detail"]
+    assert second["synth"] is None and second["recheck_of"] == 1
+    assert second["outcome"] == "verified"
 
 
 # --- atomic writes -------------------------------------------------------------
