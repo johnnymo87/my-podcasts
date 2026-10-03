@@ -41,7 +41,13 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Literal
 
-from pipeline.tts.asr import ASR_POLICY, Transcription, TranscriptionUnavailable
+from pipeline.tts.asr import (
+    ASR_MODEL,
+    ASR_POLICY,
+    ASR_PROMPT_VERSION,
+    Transcription,
+    TranscriptionUnavailable,
+)
 from pipeline.tts.normalize import normalize_tokens
 
 
@@ -439,8 +445,26 @@ def verify_audio(
     try:
         tr = transcriber(audio, mime_type)
     except TranscriptionUnavailable as exc:
+        usage = exc.usage
+        info = None
+        if usage is not None:
+            # The call answered (blocked, empty, incomplete): keep what it used so
+            # callers' token totals stay known. No transcript came back, hence
+            # transcript_chars 0, and no candidates means finish reason "NONE".
+            model = getattr(transcriber, "model", None)
+            info = AsrInfo(
+                model=model if isinstance(model, str) and model else ASR_MODEL,
+                prompt_version=ASR_PROMPT_VERSION,
+                finish_reason="NONE",
+                elapsed_s=usage.elapsed_s,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                thinking_tokens=usage.thinking_tokens,
+                transcript_chars=0,
+                policy=fallback_policy,
+            )
         return _unavailable(
-            exc.reason, str(exc), thresholds, None, verifier_policy(fallback_policy)
+            exc.reason, str(exc), thresholds, info, verifier_policy(fallback_policy)
         )
     policy = verifier_policy(tr.policy or fallback_policy)
     info = AsrInfo(

@@ -636,3 +636,79 @@ def test_verdict_transcript_is_none_when_the_transcriber_raised():
     t, _ = fake_transcriber(exc=TranscriptionUnavailable("asr_timeout", "slow"))
     v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
     assert v.transcript is None
+
+
+# --- an unavailable verdict keeps the usage of a call that answered (9p3.18) ---
+
+
+def _usage(inp=1777, out=0, think=None, elapsed=2.5):
+    from pipeline.tts.asr import AsrUsage
+
+    return AsrUsage(elapsed, inp, out, think)
+
+
+def test_unavailable_verdict_carries_asr_info_when_the_exception_has_usage():
+    exc = TranscriptionUnavailable(
+        "asr_blocked", "no candidates (block_reason=OTHER)", _usage()
+    )
+    t, _ = fake_transcriber(exc=exc)
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    # Status, reasons and detail are exactly what they were without usage.
+    assert v.status == "unavailable" and v.reasons == ("asr_blocked",)
+    assert v.detail == str(exc) and "block_reason=OTHER" in v.detail
+    assert v.analysis is None and v.recall is None and v.transcript is None
+    assert v.asr is not None
+    assert (v.asr.input_tokens, v.asr.output_tokens, v.asr.thinking_tokens) == (
+        1777,
+        0,
+        None,
+    )
+    assert v.asr.elapsed_s == 2.5
+    assert v.asr.finish_reason == "NONE" and v.asr.transcript_chars == 0
+    assert v.asr.model == "gemini-3.8-flash"
+    assert v.to_dict()["asr"]["input_tokens"] == 1777
+
+
+def test_unavailable_asr_info_uses_the_transcribers_own_model_and_policy():
+    class Declared:
+        model = "gemini-x"
+        policy = "gemini-x|prompt-v1|temp0|thinking-default"
+
+        def __call__(self, audio, mime_type):
+            raise TranscriptionUnavailable("asr_blocked", "x", _usage())
+
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=Declared())
+    assert v.asr.model == "gemini-x"
+    assert v.asr.policy == Declared.policy
+    assert v.verifier_policy.endswith(Declared.policy)
+
+
+def test_unavailable_asr_info_falls_back_to_the_defaults():
+    from pipeline.tts import asr
+
+    t, _ = fake_transcriber(exc=TranscriptionUnavailable("asr_blocked", "x", _usage()))
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.asr.model == asr.ASR_MODEL
+    assert v.asr.prompt_version == asr.ASR_PROMPT_VERSION
+    assert v.asr.policy == asr.ASR_POLICY
+
+
+@pytest.mark.parametrize("reason", ["asr_empty", "asr_incomplete", "asr_blocked"])
+def test_every_answered_unavailable_reason_keeps_its_usage(reason):
+    t, _ = fake_transcriber(
+        exc=TranscriptionUnavailable(reason, "x", _usage(100, 5, 3))
+    )
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.reasons == (reason,)
+    assert (v.asr.input_tokens, v.asr.output_tokens, v.asr.thinking_tokens) == (
+        100,
+        5,
+        3,
+    )
+
+
+def test_unavailable_verdict_has_no_asr_info_when_the_exception_has_no_usage():
+    t, _ = fake_transcriber(exc=TranscriptionUnavailable("asr_timeout", "slow"))
+    v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
+    assert v.asr is None
+    assert v.to_dict()["asr"] is None

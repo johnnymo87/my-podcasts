@@ -3,6 +3,11 @@
 The model gets AUDIO ONLY, never the script: a transcriber that can see the
 script can "hear" what it expects. Callers align afterwards (verify.py).
 
+A response that came back but is unusable (blocked, empty, incomplete) still
+reports what it consumed: ``TranscriptionUnavailable.usage`` carries it, read by
+the same helper (``_read_usage``) as a success, so cost tracking survives a block
+(``my-podcasts-9p3.18``). A call with no response has ``usage=None``: unknown.
+
 The SDK's own retries are OFF (``HttpRetryOptions(attempts=1)``) and a
 timeout is set explicitly; the caller owns retry policy. That timeout is an
 httpx per-phase / per-read limit, NOT a per-request or wall-clock bound: a
@@ -122,6 +127,46 @@ def _is_retryable_block(block: object) -> bool:
     return _block_name(block) in _RETRYABLE_BLOCK_NAMES
 
 
+@dataclass(frozen=True)
+class AsrUsage:
+    """What a response that DID come back reported: its elapsed time and token
+    counts. ``None`` for a count means the response did not say and it cannot be
+    derived (unknown, not zero)."""
+
+    elapsed_s: float
+    input_tokens: int | None
+    output_tokens: int | None
+    thinking_tokens: int | None
+
+
+def _read_usage(resp: object, elapsed_s: float) -> AsrUsage:
+    """The one place a response's usage is read, for a success and for every raise
+    after a response came back, so the two cannot drift.
+
+    ``output_tokens`` is ``candidates_token_count`` when reported. A blocked
+    response omits it (2026-10-03 probe: prompt 1777, total 1777, no candidates
+    count), and its output was genuinely 0, so when it is absent the output is
+    ``total - prompt - thoughts``, but only when ``total`` and ``prompt`` are both
+    reported and the result is not negative; otherwise it stays unknown.
+    ``thinking_tokens`` is as reported (``None`` stays ``None``).
+    """
+    usage = getattr(resp, "usage_metadata", None)
+    prompt = getattr(usage, "prompt_token_count", None)
+    output = getattr(usage, "candidates_token_count", None)
+    thoughts = getattr(usage, "thoughts_token_count", None)
+    if output is None:
+        total = getattr(usage, "total_token_count", None)
+        if total is not None and prompt is not None:
+            derived = total - prompt - (thoughts or 0)
+            output = derived if derived >= 0 else None
+    return AsrUsage(
+        elapsed_s=elapsed_s,
+        input_tokens=prompt,
+        output_tokens=output,
+        thinking_tokens=thoughts,
+    )
+
+
 class TranscriptionUnavailable(Exception):
     """Explicit evidence the transcript cannot be trusted: never a pass.
 
@@ -133,11 +178,22 @@ class TranscriptionUnavailable(Exception):
     and then passed twice in the 2026-10-03 re-test); a response with no
     candidates and any other block reason (SAFETY, PROHIBITED_CONTENT, ...), or
     none, stays ``asr_empty``, with the reason named in the detail.
+
+    ``usage`` is set for every raise after a response came back (``asr_blocked``,
+    both ``asr_empty`` shapes, ``asr_incomplete``): the request was made and
+    reported what it consumed, so callers can keep the token totals known
+    (``my-podcasts-9p3.18``). It is ``None`` when there was no response
+    (``asr_error``, ``asr_timeout``, no budget, client construction): truly
+    unknown. Whether Google bills a blocked prompt is unconfirmed; this is usage,
+    not an invoice.
     """
 
-    def __init__(self, reason: str, message: str) -> None:
+    def __init__(
+        self, reason: str, message: str, usage: AsrUsage | None = None
+    ) -> None:
         super().__init__(f"{reason}: {message}")
         self.reason = reason
+        self.usage = usage
 
 
 @dataclass(frozen=True)
@@ -236,7 +292,7 @@ class GeminiTranscriber:
             raise TranscriptionUnavailable("asr_timeout", repr(exc)) from exc
         except Exception as exc:  # any SDK/transport failure = no transcript
             raise TranscriptionUnavailable("asr_error", repr(exc)) from exc
-        elapsed = time.monotonic() - started
+        usage = _read_usage(resp, time.monotonic() - started)
 
         if not resp.candidates:
             feedback = getattr(resp, "prompt_feedback", None)
@@ -246,29 +302,30 @@ class GeminiTranscriber:
                 detail += f" (block_reason={getattr(block, 'name', block)})"
             if _is_retryable_block(block):
                 # Structural, not textual: the phase retries exactly this reason.
-                raise TranscriptionUnavailable(ASR_BLOCKED, detail)
-            raise TranscriptionUnavailable("asr_empty", detail)
+                raise TranscriptionUnavailable(ASR_BLOCKED, detail, usage)
+            raise TranscriptionUnavailable("asr_empty", detail, usage)
         finish = resp.candidates[0].finish_reason
         finish_name = finish.name if finish is not None else "NONE"
         if finish_name != "STOP":
             raise TranscriptionUnavailable(
-                "asr_incomplete", f"finish_reason={finish_name}"
+                "asr_incomplete", f"finish_reason={finish_name}", usage
             )
         text = resp.text or ""
         if not normalize_tokens(text):
             # Not just blank: "..." or a lone dash carries no words either, and
             # must not become a segment that reads as "everything omitted".
-            raise TranscriptionUnavailable("asr_empty", "transcript has no word tokens")
-        usage = resp.usage_metadata
+            raise TranscriptionUnavailable(
+                "asr_empty", "transcript has no word tokens", usage
+            )
         return Transcription(
             text=text,
             model=self.model,
             prompt_version=ASR_PROMPT_VERSION,
             finish_reason=finish_name,
-            elapsed_s=elapsed,
-            input_tokens=getattr(usage, "prompt_token_count", None),
-            output_tokens=getattr(usage, "candidates_token_count", None),
-            thinking_tokens=getattr(usage, "thoughts_token_count", None),
+            elapsed_s=usage.elapsed_s,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            thinking_tokens=usage.thinking_tokens,
             policy=self.policy,
         )
 

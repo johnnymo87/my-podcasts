@@ -514,3 +514,144 @@ def test_default_policy_string_is_pinned_and_derived():
         "gemini-3.8-flash|prompt-v1|temp0|thinking-default"
     )
     assert asr.ASR_PROMPT_VERSION == "1"
+
+
+# --- usage on a call that answered but was unusable (my-podcasts-9p3.18) ---
+#
+# A blocked response reports its input in full and no candidates count (the
+# 2026-10-03 probe: prompt 1777, total 1777). The raise carries that usage so the
+# phase's token totals stay known; a call that never got a response has none.
+
+
+def _with_usage(resp, **fields):
+    resp.usage_metadata = types.GenerateContentResponseUsageMetadata(**fields)
+    return resp
+
+
+def _raised(resp) -> TranscriptionUnavailable:
+    t, _, p = transcriber_with(resp)
+    with p, pytest.raises(TranscriptionUnavailable) as exc_info:
+        t(b"x", "audio/wav")
+    return exc_info.value
+
+
+def test_a_blocked_response_carries_its_input_tokens_and_zero_output():
+    resp = _blocked(types.BlockedReason.OTHER)
+    _with_usage(resp, prompt_token_count=1777, total_token_count=1777)
+    exc = _raised(resp)
+    assert exc.reason == "asr_blocked"
+    u = exc.usage
+    assert u is not None
+    assert (u.input_tokens, u.output_tokens, u.thinking_tokens) == (1777, 0, None)
+    assert u.elapsed_s >= 0
+
+
+def test_a_blocked_response_derives_output_net_of_thinking():
+    resp = _blocked(types.BlockedReason.OTHER)
+    _with_usage(
+        resp, prompt_token_count=1777, total_token_count=1800, thoughts_token_count=23
+    )
+    u = _raised(resp).usage
+    assert (u.input_tokens, u.output_tokens, u.thinking_tokens) == (1777, 0, 23)
+
+
+def test_a_reported_candidates_count_is_used_as_is():
+    resp = _blocked(types.BlockedReason.OTHER)
+    _with_usage(
+        resp,
+        prompt_token_count=1777,
+        candidates_token_count=9,
+        total_token_count=5000,
+    )
+    assert _raised(resp).usage.output_tokens == 9
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"prompt_token_count": 1777},  # no total
+        {"total_token_count": 1777},  # no prompt
+        {},
+    ],
+)
+def test_output_stays_unknown_when_it_cannot_be_derived(fields):
+    resp = _blocked(types.BlockedReason.OTHER)
+    _with_usage(resp, **fields)
+    u = _raised(resp).usage
+    assert u is not None and u.output_tokens is None
+    assert u.input_tokens == fields.get("prompt_token_count")
+
+
+def test_a_response_with_no_usage_metadata_still_carries_elapsed_with_unknown_tokens():
+    resp = _blocked(types.BlockedReason.OTHER)
+    resp.usage_metadata = None
+    u = _raised(resp).usage
+    assert u is not None and u.elapsed_s >= 0
+    assert (u.input_tokens, u.output_tokens, u.thinking_tokens) == (None, None, None)
+
+
+def test_an_empty_no_candidates_response_carries_usage():
+    resp = response(candidates=False)
+    exc = _raised(resp)
+    assert exc.reason == "asr_empty"
+    assert (exc.usage.input_tokens, exc.usage.output_tokens) == (100, 5)
+
+
+def test_an_incomplete_response_carries_usage():
+    exc = _raised(response(finish="MAX_TOKENS"))
+    assert exc.reason == "asr_incomplete"
+    assert (exc.usage.input_tokens, exc.usage.output_tokens) == (100, 5)
+
+
+def test_a_transcript_with_no_word_tokens_carries_usage():
+    resp = _with_usage(
+        response(text="..."),
+        prompt_token_count=100,
+        candidates_token_count=5,
+        thoughts_token_count=3,
+    )
+    exc = _raised(resp)
+    assert exc.reason == "asr_empty"
+    u = exc.usage
+    assert (u.input_tokens, u.output_tokens, u.thinking_tokens) == (100, 5, 3)
+
+
+@pytest.mark.parametrize(
+    ("result", "reason"),
+    [
+        (RuntimeError("boom"), "asr_error"),
+        (httpx.ReadTimeout("slow"), "asr_timeout"),
+    ],
+)
+def test_a_call_with_no_response_has_no_usage(result, reason):
+    exc = _raised(result)
+    assert exc.reason == reason and exc.usage is None
+
+
+def test_no_budget_and_client_construction_failures_have_no_usage():
+    with pytest.raises(TranscriptionUnavailable) as exc_info:
+        GeminiTranscriber(timeout_s=0)(b"x", "audio/wav")
+    assert exc_info.value.usage is None
+
+    def make(timeout_s):
+        raise ValueError("bad client config")
+
+    with patch.object(asr, "_make_genai_client", make):
+        with pytest.raises(TranscriptionUnavailable) as exc_info:
+            GeminiTranscriber(timeout_s=30)(b"x", "audio/wav")
+    assert exc_info.value.usage is None
+
+
+def test_the_default_exception_has_no_usage():
+    assert TranscriptionUnavailable("asr_error", "x").usage is None
+
+
+def test_success_and_failure_read_usage_through_one_helper():
+    # A success derives output the same way a raise does.
+    resp = _with_usage(
+        response("hello world"), prompt_token_count=10, total_token_count=14
+    )
+    t, _, p = transcriber_with(resp)
+    with p:
+        out = t(b"x", "audio/wav")
+    assert (out.input_tokens, out.output_tokens, out.thinking_tokens) == (10, 4, None)
