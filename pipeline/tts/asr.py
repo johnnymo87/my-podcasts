@@ -165,7 +165,10 @@ def _read_usage(
     response omits it (2026-10-03 probe: prompt 1777, total 1777, no candidates
     count), and its output was genuinely 0, so when it is absent the output is
     ``total - prompt - thoughts``, but only when ``total`` and ``prompt`` are both
-    reported and the result is not negative; otherwise it stays unknown.
+    reported, no ``tool_use_prompt_token_count`` is reported beyond zero (the SDK's
+    total is prompt + candidates + tool-use prompt + thoughts, so a nonzero one
+    would be miscounted as output), and the result is not negative; otherwise it
+    stays unknown.
     ``thinking_tokens`` is as reported (``None`` stays ``None``).
 
     Defensive: telemetry must never turn an unusable response into a different
@@ -179,7 +182,11 @@ def _read_usage(
         thoughts = _count(getattr(usage, "thoughts_token_count", None))
         if output is None:
             total = _count(getattr(usage, "total_token_count", None))
-            if total is not None and prompt is not None:
+            tool_use = getattr(usage, "tool_use_prompt_token_count", None)
+            # Absent or exactly 0 is fine; anything else (nonzero int, odd type)
+            # means the total includes a share we cannot attribute.
+            tool_use_ok = tool_use is None or _count(tool_use) == 0
+            if total is not None and prompt is not None and tool_use_ok:
                 derived = total - prompt - (thoughts or 0)
                 output = derived if derived >= 0 else None
     except Exception:  # noqa: BLE001

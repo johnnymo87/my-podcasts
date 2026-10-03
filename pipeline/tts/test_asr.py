@@ -647,6 +647,43 @@ def test_a_non_int_total_does_not_stop_a_valid_derivation_elsewhere():
     assert (u.input_tokens, u.output_tokens) == (10, None)
 
 
+@pytest.mark.parametrize("tool_use", [5, "5", 1.5, True])
+def test_output_is_not_derived_when_tool_use_tokens_are_in_the_total(tool_use):
+    resp = _blocked(types.BlockedReason.OTHER)
+    resp.usage_metadata = SimpleNamespace(
+        prompt_token_count=1777,
+        total_token_count=1782,
+        tool_use_prompt_token_count=tool_use,
+        thoughts_token_count=None,
+    )
+    u = _raised(resp).usage
+    assert (u.input_tokens, u.output_tokens) == (1777, None)
+
+
+@pytest.mark.parametrize("tool_use", [None, 0])
+def test_a_zero_or_absent_tool_use_count_still_derives_output(tool_use):
+    resp = _blocked(types.BlockedReason.OTHER)
+    resp.usage_metadata = SimpleNamespace(
+        prompt_token_count=1777,
+        total_token_count=1777,
+        tool_use_prompt_token_count=tool_use,
+        thoughts_token_count=None,
+    )
+    assert _raised(resp).usage.output_tokens == 0
+
+
+def test_a_reported_candidates_count_wins_over_tool_use_tokens():
+    resp = _blocked(types.BlockedReason.OTHER)
+    resp.usage_metadata = SimpleNamespace(
+        prompt_token_count=10,
+        candidates_token_count=4,
+        total_token_count=19,
+        tool_use_prompt_token_count=5,
+        thoughts_token_count=None,
+    )
+    assert _raised(resp).usage.output_tokens == 4
+
+
 def test_reading_usage_never_raises_even_from_a_hostile_response():
     class Hostile:
         @property

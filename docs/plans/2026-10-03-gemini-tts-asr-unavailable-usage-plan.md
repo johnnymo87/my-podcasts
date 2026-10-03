@@ -47,7 +47,13 @@ an invoice.)
    `asr_timeout`/`asr_error` attempt still makes totals `null`.
 5. No version bumps: verdict semantics, cache key and retry policy are unchanged; only
    telemetry on unavailable records gains values. (Correction found in
-   implementation: `tts-verify` and the calibration harness call the transcriber
-   directly, not `verify_audio`, so their reports are unchanged.)
+   implementation: `tts-verify` and the calibration harness's ASR steps call the
+   transcriber directly, not `verify_audio`, so their reports are unchanged. But
+   `calibrate_run`'s `deadline` step prices a `render_episode`'s manifest token
+   totals, so a blocked ASR prompt's input now counts as spend with
+   `worst_case=False` where an unknown total used to price the render at its
+   worst case. Kept: it is conservative, since billing of a blocked prompt is
+   unconfirmed.) Output derivation also refuses when a nonzero
+   `tool_use_prompt_token_count` is reported (the SDK's total includes it).
 6. Docs: `pipeline/AGENTS.md` (replace the "known gap" sentence; the `tokens` rule),
    design-doc amendment line, the asr.py docstring.
