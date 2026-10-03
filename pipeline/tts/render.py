@@ -318,8 +318,9 @@ def _stage_completed(stage: str, part: dict) -> bool:
         return status == "ok"
     if status in ("pass", "omission"):
         return True
-    # ASR "unavailable" is a verdict, not a failed call, when the transcript came
-    # back (``asr_empty``): the record then carries the request's elapsed time.
+    # ASR "unavailable" is a verdict, not a failed call, when a response came back
+    # (blocked, ``asr_empty``, ``asr_incomplete``): the record then carries the
+    # request's elapsed time (and whatever usage it reported).
     return status == "unavailable" and part.get("elapsed_s") is not None
 
 

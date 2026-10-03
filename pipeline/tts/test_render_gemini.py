@@ -568,8 +568,8 @@ def test_a_killed_or_errored_asr_attempt_beside_a_block_keeps_totals_unknown():
 
 
 def test_phase_totals_sum_a_recheck_whose_predecessor_reported_usage():
-    # Not a shape the phase writes today (a block carries no usage), but the
-    # arithmetic must not depend on that: a None synth contributes nothing.
+    # A re-check's arithmetic must not depend on what the blocked attempt
+    # reported: a None synth contributes nothing, and any reported ASR usage adds.
     first = attempt(asr_in=10, asr_out=1, asr_think=0, outcome="asr_blocked")
     records = [{"index": 0, "attempts": [first, recheck_attempt()]}]
     totals, generated = render._phase_totals(records)

@@ -672,13 +672,14 @@ def test_unavailable_verdict_carries_asr_info_when_the_exception_has_usage():
 def test_unavailable_asr_info_uses_the_transcribers_own_model_and_policy():
     class Declared:
         model = "gemini-x"
+        prompt_version = "9"
         policy = "gemini-x|prompt-v1|temp0|thinking-default"
 
         def __call__(self, audio, mime_type):
             raise TranscriptionUnavailable("asr_blocked", "x", _usage())
 
     v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=Declared())
-    assert v.asr.model == "gemini-x"
+    assert v.asr.model == "gemini-x" and v.asr.prompt_version == "9"
     assert v.asr.policy == Declared.policy
     assert v.verifier_policy.endswith(Declared.policy)
 
@@ -693,13 +694,20 @@ def test_unavailable_asr_info_falls_back_to_the_defaults():
     assert v.asr.policy == asr.ASR_POLICY
 
 
-@pytest.mark.parametrize("reason", ["asr_empty", "asr_incomplete", "asr_blocked"])
-def test_every_answered_unavailable_reason_keeps_its_usage(reason):
-    t, _ = fake_transcriber(
-        exc=TranscriptionUnavailable(reason, "x", _usage(100, 5, 3))
-    )
+@pytest.mark.parametrize(
+    ("reason", "finish", "chars"),
+    [
+        ("asr_empty", "STOP", 3),
+        ("asr_incomplete", "MAX_TOKENS", 0),
+        ("asr_blocked", "NONE", 0),
+    ],
+)
+def test_every_answered_unavailable_reason_keeps_its_usage(reason, finish, chars):
+    usage = replace(_usage(100, 5, 3), finish_reason=finish, transcript_chars=chars)
+    t, _ = fake_transcriber(exc=TranscriptionUnavailable(reason, "x", usage))
     v = verify_audio(b"WAV", "audio/wav", SCRIPT, transcriber=t)
     assert v.reasons == (reason,)
+    assert v.asr.finish_reason == finish and v.asr.transcript_chars == chars
     assert (v.asr.input_tokens, v.asr.output_tokens, v.asr.thinking_tokens) == (
         100,
         5,

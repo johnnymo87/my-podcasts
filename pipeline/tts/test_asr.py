@@ -600,6 +600,7 @@ def test_an_empty_no_candidates_response_carries_usage():
 def test_an_incomplete_response_carries_usage():
     exc = _raised(response(finish="MAX_TOKENS"))
     assert exc.reason == "asr_incomplete"
+    assert exc.usage.finish_reason == "MAX_TOKENS" and exc.usage.transcript_chars == 0
     assert (exc.usage.input_tokens, exc.usage.output_tokens) == (100, 5)
 
 
@@ -614,6 +615,47 @@ def test_a_transcript_with_no_word_tokens_carries_usage():
     assert exc.reason == "asr_empty"
     u = exc.usage
     assert (u.input_tokens, u.output_tokens, u.thinking_tokens) == (100, 5, 3)
+    assert u.finish_reason == "STOP" and u.transcript_chars == len("...")
+
+
+def test_a_blocked_usage_has_finish_none_and_no_transcript():
+    u = _raised(_blocked(types.BlockedReason.OTHER)).usage
+    assert u.finish_reason == "NONE" and u.transcript_chars == 0
+
+
+@pytest.mark.parametrize(
+    "bad", ["1777", 1777.0, True, object(), [1]], ids=lambda v: type(v).__name__
+)
+def test_a_non_int_usage_field_is_unknown_and_never_raises(bad):
+    resp = _blocked(types.BlockedReason.OTHER)
+    resp.usage_metadata = SimpleNamespace(
+        prompt_token_count=bad,
+        candidates_token_count=bad,
+        thoughts_token_count=bad,
+        total_token_count=bad,
+    )
+    u = _raised(resp).usage
+    assert (u.input_tokens, u.output_tokens, u.thinking_tokens) == (None, None, None)
+
+
+def test_a_non_int_total_does_not_stop_a_valid_derivation_elsewhere():
+    resp = _blocked(types.BlockedReason.OTHER)
+    resp.usage_metadata = SimpleNamespace(
+        prompt_token_count=10, total_token_count="x", thoughts_token_count=None
+    )
+    u = _raised(resp).usage
+    assert (u.input_tokens, u.output_tokens) == (10, None)
+
+
+def test_reading_usage_never_raises_even_from_a_hostile_response():
+    class Hostile:
+        @property
+        def usage_metadata(self):
+            raise RuntimeError("boom")
+
+    u = asr._read_usage(Hostile(), 1.0)
+    assert (u.input_tokens, u.output_tokens, u.thinking_tokens) == (None, None, None)
+    assert u.elapsed_s == 1.0
 
 
 @pytest.mark.parametrize(

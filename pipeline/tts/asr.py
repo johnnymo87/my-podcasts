@@ -23,7 +23,7 @@ import os
 import threading
 import time
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import httpx
 from google import genai
@@ -137,9 +137,27 @@ class AsrUsage:
     input_tokens: int | None
     output_tokens: int | None
     thinking_tokens: int | None
+    # What verify_audio records on the unavailable verdict's AsrInfo: the
+    # response's finish reason ("NONE" when it had no candidates) and the
+    # transcript's length (0 unless a transcript came back).
+    finish_reason: str = "NONE"
+    transcript_chars: int = 0
 
 
-def _read_usage(resp: object, elapsed_s: float) -> AsrUsage:
+def _count(value: object) -> int | None:
+    """A reported token count only if it is a real int (not a bool); else unknown."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _read_usage(
+    resp: object,
+    elapsed_s: float,
+    *,
+    finish_reason: str = "NONE",
+    transcript_chars: int = 0,
+) -> AsrUsage:
     """The one place a response's usage is read, for a success and for every raise
     after a response came back, so the two cannot drift.
 
@@ -149,21 +167,30 @@ def _read_usage(resp: object, elapsed_s: float) -> AsrUsage:
     ``total - prompt - thoughts``, but only when ``total`` and ``prompt`` are both
     reported and the result is not negative; otherwise it stays unknown.
     ``thinking_tokens`` is as reported (``None`` stays ``None``).
+
+    Defensive: telemetry must never turn an unusable response into a different
+    failure, so only real ints are used (anything else is unknown) and this never
+    raises.
     """
-    usage = getattr(resp, "usage_metadata", None)
-    prompt = getattr(usage, "prompt_token_count", None)
-    output = getattr(usage, "candidates_token_count", None)
-    thoughts = getattr(usage, "thoughts_token_count", None)
-    if output is None:
-        total = getattr(usage, "total_token_count", None)
-        if total is not None and prompt is not None:
-            derived = total - prompt - (thoughts or 0)
-            output = derived if derived >= 0 else None
+    try:
+        usage = getattr(resp, "usage_metadata", None)
+        prompt = _count(getattr(usage, "prompt_token_count", None))
+        output = _count(getattr(usage, "candidates_token_count", None))
+        thoughts = _count(getattr(usage, "thoughts_token_count", None))
+        if output is None:
+            total = _count(getattr(usage, "total_token_count", None))
+            if total is not None and prompt is not None:
+                derived = total - prompt - (thoughts or 0)
+                output = derived if derived >= 0 else None
+    except Exception:  # noqa: BLE001
+        prompt = output = thoughts = None
     return AsrUsage(
         elapsed_s=elapsed_s,
         input_tokens=prompt,
         output_tokens=output,
         thinking_tokens=thoughts,
+        finish_reason=finish_reason,
+        transcript_chars=transcript_chars,
     )
 
 
@@ -308,14 +335,18 @@ class GeminiTranscriber:
         finish_name = finish.name if finish is not None else "NONE"
         if finish_name != "STOP":
             raise TranscriptionUnavailable(
-                "asr_incomplete", f"finish_reason={finish_name}", usage
+                "asr_incomplete",
+                f"finish_reason={finish_name}",
+                replace(usage, finish_reason=finish_name),
             )
         text = resp.text or ""
         if not normalize_tokens(text):
             # Not just blank: "..." or a lone dash carries no words either, and
             # must not become a segment that reads as "everything omitted".
             raise TranscriptionUnavailable(
-                "asr_empty", "transcript has no word tokens", usage
+                "asr_empty",
+                "transcript has no word tokens",
+                replace(usage, finish_reason=finish_name, transcript_chars=len(text)),
             )
         return Transcription(
             text=text,

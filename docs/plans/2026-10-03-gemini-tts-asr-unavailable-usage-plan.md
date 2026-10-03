@@ -46,7 +46,8 @@ an invoice.)
    blocked -> re-check pass gives known `asr_input`/`asr_output` totals; an
    `asr_timeout`/`asr_error` attempt still makes totals `null`.
 5. No version bumps: verdict semantics, cache key and retry policy are unchanged; only
-   telemetry on unavailable records gains values. `tts-verify` reports gain the same
-   usage on an unavailable verdict (harmless; exit codes unchanged).
+   telemetry on unavailable records gains values. (Correction found in
+   implementation: `tts-verify` and the calibration harness call the transcriber
+   directly, not `verify_audio`, so their reports are unchanged.)
 6. Docs: `pipeline/AGENTS.md` (replace the "known gap" sentence; the `tokens` rule),
    design-doc amendment line, the asr.py docstring.

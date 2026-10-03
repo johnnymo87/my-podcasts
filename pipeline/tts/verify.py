@@ -449,18 +449,23 @@ def verify_audio(
         info = None
         if usage is not None:
             # The call answered (blocked, empty, incomplete): keep what it used so
-            # callers' token totals stay known. No transcript came back, hence
-            # transcript_chars 0, and no candidates means finish reason "NONE".
+            # callers' token totals stay known. finish_reason / transcript_chars
+            # are the response's own (no candidates: "NONE" and 0).
             model = getattr(transcriber, "model", None)
+            version = getattr(transcriber, "prompt_version", None)
             info = AsrInfo(
                 model=model if isinstance(model, str) and model else ASR_MODEL,
-                prompt_version=ASR_PROMPT_VERSION,
-                finish_reason="NONE",
+                prompt_version=(
+                    version
+                    if isinstance(version, str) and version
+                    else ASR_PROMPT_VERSION
+                ),
+                finish_reason=usage.finish_reason,
                 elapsed_s=usage.elapsed_s,
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
                 thinking_tokens=usage.thinking_tokens,
-                transcript_chars=0,
+                transcript_chars=usage.transcript_chars,
                 policy=fallback_policy,
             )
         return _unavailable(
