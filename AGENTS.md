@@ -34,14 +34,14 @@ Quick start and navigation for humans and coding agents.
 - Domain guides:
   - `pipeline/AGENTS.md`
 - Agent skills:
-  - `.opencode/skills/monitoring-my-podcasts-pipeline/SKILL.md`
-  - `.opencode/skills/monitoring-my-podcasts-pipeline/REFERENCE.md`
-  - `.opencode/skills/operating-daily-podcast-jobs/SKILL.md`
-  - `.opencode/skills/resetting-errored-daily-jobs/SKILL.md`
-  - `.opencode/skills/shipping-my-podcasts-workers/SKILL.md`
-  - `.opencode/skills/shipping-my-podcasts-workers/REFERENCE.md`
-  - `.opencode/skills/operating-things-happen-digest/SKILL.md`
-  - `.opencode/skills/operating-things-happen-digest/REFERENCE.md`
+  - `.agents/skills/monitoring-my-podcasts-pipeline/SKILL.md`
+  - `.agents/skills/monitoring-my-podcasts-pipeline/REFERENCE.md`
+  - `.agents/skills/operating-daily-podcast-jobs/SKILL.md`
+  - `.agents/skills/resetting-errored-daily-jobs/SKILL.md`
+  - `.agents/skills/shipping-my-podcasts-workers/SKILL.md`
+  - `.agents/skills/shipping-my-podcasts-workers/REFERENCE.md`
+  - `.agents/skills/operating-things-happen-digest/SKILL.md`
+  - `.agents/skills/operating-things-happen-digest/REFERENCE.md`
 
 ## Asset Locations
 
@@ -76,10 +76,10 @@ Quick start and navigation for humans and coding agents.
 ## Where To Start
 
 - Daily podcast operations and incident response: `pipeline/AGENTS.md`
-- Whole-system health checks: `.opencode/skills/monitoring-my-podcasts-pipeline/SKILL.md`
-- Stuck or errored Rundown / FP Digest jobs: `.opencode/skills/operating-daily-podcast-jobs/SKILL.md`
-- Resetting errored jobs via CLI: `.opencode/skills/resetting-errored-daily-jobs/SKILL.md`
-- Rundown-specific writer / collection behavior: `.opencode/skills/operating-things-happen-digest/SKILL.md`
+- Whole-system health checks: `.agents/skills/monitoring-my-podcasts-pipeline/SKILL.md`
+- Stuck or errored Rundown / FP Digest jobs: `.agents/skills/operating-daily-podcast-jobs/SKILL.md`
+- Resetting errored jobs via CLI: `.agents/skills/resetting-errored-daily-jobs/SKILL.md`
+- Rundown-specific writer / collection behavior: `.agents/skills/operating-things-happen-digest/SKILL.md`
 
 ## The Rundown Pipeline
 

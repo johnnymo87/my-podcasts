@@ -56,4 +56,4 @@ See `REFERENCE.md` for:
 - R2 object verification commands
 - known failure signatures and fixes
 
-For stuck or errored FP Digest / The Rundown jobs, also use `.opencode/skills/operating-daily-podcast-jobs/SKILL.md`.
+For stuck or errored FP Digest / The Rundown jobs, also use `.agents/skills/operating-daily-podcast-jobs/SKILL.md`.

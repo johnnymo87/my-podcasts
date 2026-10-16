@@ -79,5 +79,5 @@ sudo systemctl restart my-podcasts-consumer  # only if needed
 
 ## Related skills
 
-- Whole-system health: `.opencode/skills/monitoring-my-podcasts-pipeline/SKILL.md`
-- Full incident checklist and job state reference: `.opencode/skills/operating-daily-podcast-jobs/SKILL.md`
+- Whole-system health: `.agents/skills/monitoring-my-podcasts-pipeline/SKILL.md`
+- Full incident checklist and job state reference: `.agents/skills/operating-daily-podcast-jobs/SKILL.md`
