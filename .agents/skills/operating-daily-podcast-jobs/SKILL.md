@@ -56,7 +56,7 @@ for r in rows: print(dict(r))
 
 ## Resetting an errored job
 
-Use the `jobs` CLI — see `.opencode/skills/resetting-errored-daily-jobs/SKILL.md` for the full workflow.
+Use the `jobs` CLI — see `.agents/skills/resetting-errored-daily-jobs/SKILL.md` for the full workflow.
 
 Quick reference:
 
@@ -111,6 +111,6 @@ therefore caught at the next weekday 04:30, not immediately.
 
 ## When to use other skills
 
-- Whole-system monitoring: `.opencode/skills/monitoring-my-podcasts-pipeline/SKILL.md`
-- Reset errored jobs step-by-step: `.opencode/skills/resetting-errored-daily-jobs/SKILL.md`
-- Rundown-specific collection and writer behavior: `.opencode/skills/operating-things-happen-digest/SKILL.md`
+- Whole-system monitoring: `.agents/skills/monitoring-my-podcasts-pipeline/SKILL.md`
+- Reset errored jobs step-by-step: `.agents/skills/resetting-errored-daily-jobs/SKILL.md`
+- Rundown-specific collection and writer behavior: `.agents/skills/operating-things-happen-digest/SKILL.md`

@@ -229,7 +229,7 @@ See `REFERENCE.md` for:
 - Database schema details
 - New module reference
 
-For shared FP Digest / Rundown incident handling, also use `.opencode/skills/operating-daily-podcast-jobs/SKILL.md`.
+For shared FP Digest / Rundown incident handling, also use `.agents/skills/operating-daily-podcast-jobs/SKILL.md`.
 
 ## A story resolved to the wrong article
 
