@@ -31,6 +31,34 @@ Work in `/home/dev/projects/my-podcasts/.worktrees/argument-audio-report`.
 
 ---
 
+## Handoff state (keep current)
+
+- Bead: `my-podcasts-bw3`. Branch `argument-audio-report`, worktree
+  `/home/dev/projects/my-podcasts/.worktrees/argument-audio-report` (based on
+  `origin/main` 96afaeb; the main checkout's local `main` was behind origin).
+- Status 2026-10-18: design + plan committed; adversarial review of the design
+  done (approve-with-changes, all 8 findings folded into the design doc). No
+  feature code yet. Next: Phase 1 via subagent-driven development.
+- Owner process (verbatim intent): full discipline — optional oracle-astra
+  consult, SDD, adversarial-reviewer-astra on the finished diff, PR if
+  applicable, keep bead + this plan updated.
+- **Pilot gate:** after Task 7, hand the owner both dry-run scripts + attribution
+  findings and STOP; Phase 2 only after sign-off. Suggested PR shape: Phase 1 is
+  inert (dry-run only) — open its PR after the pilot, or fold into the Phase 2 PR
+  if the pilot changes transcription; decide with the owner.
+- Episode GUIDs (live feed 2026-10-18):
+  - 2026-10-15 `audioboom-01a13c3d-ae49-7326-a550-f82c9eff9be1` Canceling (and un-canceling) historic heroes (80 min) — pilot, hosts only
+  - 2026-10-08 `audioboom-01a1185a-d441-72a3-9173-6bc283662916` Trump, Xi, and the race for superintelligence (85 min) — pilot, guest Jordan Schneider
+  - 2026-10-01 `audioboom-01a0f39d-75cf-79af-9db5-6192b276aebd` What the hell is going on in Europe? (61 min)
+  - 2026-09-10 `audioboom-01a0882b-df68-7722-984d-ba79baf4bb6e` How 9/11 changed American politics forever (97 min; longest — size the child deadline from it)
+  - Backfill set after ship = Sep 10, Oct 1, Oct 8, Oct 15 (owner chose all four). Sep 17 / Sep 24 already have Slow Boring Reports — do not backfill.
+- Correction to the review: `segment.decode_to_pcm_with_log` already keeps ffmpeg
+  warnings; only `decode_to_pcm` drops them. Use the `_with_log` variant.
+- `gws` is authenticated as jonathan.mohrbacher@gmail.com (re-authed this
+  session) if mail needs re-checking.
+
+---
+
 ## Phase 1 — pure pipeline + pilot
 
 ### Task 1: Podcast source definition and RSS parsing
