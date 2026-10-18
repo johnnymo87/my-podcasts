@@ -36,9 +36,22 @@ Work in `/home/dev/projects/my-podcasts/.worktrees/argument-audio-report`.
 - Bead: `my-podcasts-bw3`. Branch `argument-audio-report`, worktree
   `/home/dev/projects/my-podcasts/.worktrees/argument-audio-report` (based on
   `origin/main` 96afaeb; the main checkout's local `main` was behind origin).
-- Status 2026-10-18: design + plan committed; adversarial review of the design
-  done (approve-with-changes, all 8 findings folded into the design doc). No
-  feature code yet. Next: Phase 1 via subagent-driven development.
+- Status 2026-10-18 (later): **Phase 1 Tasks 1-6 implemented** via SDD
+  (c330a64..b77b8cc), each with spec + quality review and fix rounds; full suite
+  2341 passed. Pre-PR adversarial-reviewer-astra: blocked on 5 findings
+  (work-dir/episode binding, policy digest missing from checkpoint key, cached
+  results skipping current validation, hosts seeded as "identified", ceiling
+  exempt on short tails) -> all fixed -> **approve**. Task 7 pilot dry runs
+  launched (logs `/tmp/opencode/pilot/oct15.log`, `oct08.log`; work dirs
+  `/persist/my-podcasts/podcast-work/dry-run/argument/<sha256(guid)[:16]>/`).
+  Phase 1 code diverged from the plan snippets in places (real module APIs win:
+  `run_episode_to_script` in `pipeline/podcast_report.py`, policy digest,
+  checkpoints in `work_dir/pieces/`, `.rejected.txt` raw replies, carried list
+  worded "Names already used for voices in earlier pieces").
+- Phase 2 notes from reviews: key state by `(source.key, guid)`; record
+  acquisition (URL, time, audio sha) separately from immutable admission
+  metadata in item.json; executor must wrap `run_episode_to_script` in the
+  killable child; tag the failing stage for retry-vs-terminal mapping.
 - Owner process (verbatim intent): full discipline — optional oracle-astra
   consult, SDD, adversarial-reviewer-astra on the finished diff, PR if
   applicable, keep bead + this plan updated.
