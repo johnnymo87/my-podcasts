@@ -25,6 +25,7 @@ def download_enclosure(
 ) -> int:
     if dest.exists() and dest.stat().st_size > 0:
         return dest.stat().st_size
+    dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")
     own = client is None
     client = client or httpx.Client(
@@ -33,7 +34,7 @@ def download_enclosure(
         headers={"User-Agent": "my-podcasts/1.0"},
     )
     try:
-        with client.stream("GET", url) as resp:
+        with client.stream("GET", url, headers={"Accept-Encoding": "identity"}) as resp:
             if resp.status_code != 200:
                 raise DownloadError(f"HTTP {resp.status_code} for {url}")
             declared = resp.headers.get("content-length")
@@ -44,14 +45,21 @@ def download_enclosure(
                     if written > max_bytes:
                         raise DownloadError(f"download exceeds {max_bytes} bytes")
                     fh.write(chunk)
-        if declared is not None and declared.isdigit() and int(declared) != written:
+        if (
+            declared is not None
+            and declared.isascii()
+            and declared.isdigit()
+            and int(declared) != written
+        ):
             raise DownloadError(f"incomplete download: {written} of {declared} bytes")
         if written == 0:
             raise DownloadError("incomplete download: empty body")
         os.replace(tmp, dest)
         return written
-    except httpx.HTTPError as exc:
+    except httpx.RemoteProtocolError as exc:
         raise DownloadError(f"incomplete download: {exc!r}") from exc
+    except httpx.HTTPError as exc:
+        raise DownloadError(f"download failed: {type(exc).__name__}: {exc}") from exc
     finally:
         tmp.unlink(missing_ok=True)
         if own:

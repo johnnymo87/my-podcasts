@@ -35,12 +35,55 @@ def test_hms_duration() -> None:
     assert _items()[2].duration_s == 3665
 
 
-def test_item_without_enclosure_or_guid_is_skipped() -> None:
+@pytest.mark.parametrize(
+    "removed",
+    [
+        '<guid isPermaLink="false">Buzzsprout-12345</guid>',
+        (
+            '<enclosure url="https://audioboom.com/posts/1.mp3"'
+            ' length="12345" type="audio/mpeg" />'
+        ),
+        "<pubDate>Thu, 01 Jan 2026 07:00:00 +0000</pubDate>",
+    ],
+    ids=["guid", "enclosure", "pubDate"],
+)
+def test_item_missing_required_field_is_skipped(removed: str, caplog) -> None:
+    xml = FIXTURE.read_text(encoding="utf-8")
+    assert removed in xml
+    with caplog.at_level("WARNING", logger="pipeline.podcast_feed"):
+        got = parse_podcast_feed(xml.replace(removed, ""))
+    assert len(got) == 2
+    assert "An older episode" in caplog.text
+
+
+def test_unparseable_pub_date_is_skipped(caplog) -> None:
     xml = FIXTURE.read_text(encoding="utf-8").replace(
-        '<guid isPermaLink="false">Buzzsprout-12345</guid>', ""
+        "Thu, 01 Jan 2026 07:00:00 +0000", "not a date"
     )
-    assert [i.guid for i in parse_podcast_feed(xml)][-1] != "Buzzsprout-12345"
-    assert len(parse_podcast_feed(xml)) == 2
+    with caplog.at_level("WARNING", logger="pipeline.podcast_feed"):
+        got = parse_podcast_feed(xml)
+    assert len(got) == 2
+    assert "An older episode" in caplog.text
+
+
+def test_non_ascii_digit_duration_does_not_abort_parse() -> None:
+    xml = FIXTURE.read_text(encoding="utf-8").replace(
+        "<itunes:duration>01:01:05</itunes:duration>",
+        "<itunes:duration>\u00b2</itunes:duration>",
+    )
+    got = parse_podcast_feed(xml)
+    assert len(got) == 3
+    assert got[2].duration_s is None
+
+
+def test_naive_pub_date_is_treated_as_utc() -> None:
+    # RFC 2822 "-0000" means "UTC, local zone unknown"; Python parses it naive.
+    xml = FIXTURE.read_text(encoding="utf-8").replace(
+        "Thu, 15 Oct 2026 07:00:00 +0000", "Thu, 15 Oct 2026 07:00:00 -0000"
+    )
+    assert parse_podcast_feed(xml)[0].pub_date == datetime(
+        2026, 10, 15, 7, 0, tzinfo=UTC
+    )
 
 
 def test_eligible_items_cutoff_future_and_oldest_first() -> None:
