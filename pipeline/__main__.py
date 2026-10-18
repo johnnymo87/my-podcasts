@@ -1875,6 +1875,9 @@ def podcast_report_dry_run_command(
         logging.basicConfig(
             level=logging.INFO, format="%(asctime)s %(name)s: %(message)s"
         )
+    # httpx logs every request URL at INFO, and audioboom's are signed.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     try:
         if rss_file is not None:

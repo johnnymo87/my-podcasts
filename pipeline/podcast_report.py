@@ -40,6 +40,7 @@ AUDIO_NAME = "audio.mp3"
 ITEM_NAME = "item.json"
 SCRIPT_NAME = "script.txt"
 SUMMARY_NAME = "summary.txt"
+ACQUISITION_NAME = "acquisition.json"
 
 _RSS_TIMEOUT_S = 30.0
 
@@ -131,6 +132,14 @@ def item_metadata(source: PodcastSource, item: PodcastItem) -> dict[str, Any]:
     }
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def _manifest_stamp(work_dir: Path) -> tuple[int, int] | None:
     """Identity of the manifest file: a fresh transcription replaces it (new
     inode and mtime); a reused transcript leaves it untouched."""
@@ -162,10 +171,11 @@ def _claim_work_dir(source: PodcastSource, item: PodcastItem, work_dir: Path) ->
 
     ``download_enclosure`` and the transcript/checkpoint reuse all trust whatever
     is already on disk, so a work dir reused for another episode would be
-    narrated under the wrong title. ``item.json`` is the owner record. Once it
-    exists its fields are kept as written: the audio is pinned to the
-    ``enclosure_url`` recorded there, and a feed that later hands out different
-    tracking params must not make the record disagree with the audio.
+    narrated under the wrong title. ``item.json`` is the owner record, written
+    once and never touched again: the audio is pinned to the ``enclosure_url``
+    recorded there, and a feed that later hands out different tracking params
+    must not make the record disagree with the audio. (The URL actually fetched
+    is recorded separately in ``acquisition.json``.)
     """
     item_path = work_dir / ITEM_NAME
     owner: dict[str, Any] | None = None
@@ -195,10 +205,13 @@ def _claim_work_dir(source: PodcastSource, item: PodcastItem, work_dir: Path) ->
                 f"{', '.join(leftovers)}; it is not known to belong to "
                 f"{source.key}/{item.guid}. Refusing to reuse it"
             )
-    record = owner if owner is not None else item_metadata(source, item)
-    record["last_requested_at"] = datetime.now(UTC).isoformat()
+    if owner is not None:
+        return  # written once, never rewritten
     work_dir.mkdir(parents=True, exist_ok=True)
-    persist_raw_output(item_path, json.dumps(record, indent=2, ensure_ascii=False))
+    persist_raw_output(
+        item_path,
+        json.dumps(item_metadata(source, item), indent=2, ensure_ascii=False),
+    )
 
 
 def run_episode_to_script(
@@ -209,22 +222,46 @@ def run_episode_to_script(
     carry_context: bool = True,
     transcriber_factory: Callable[[], Any] | None = None,
     progress: Callable[[str], None] | None = None,
+    on_stage: Callable[[str], None] | None = None,
 ) -> DryRunResult:
     """Download, transcribe and write one episode into ``work_dir``.
 
     Pure of DB/R2/feed. ``transcriber_factory`` defaults to
     ``GeminiPieceTranscriber``; the instance is closed afterwards (``close()``
-    when it has one). ``progress`` receives one line before each stage.
+    when it has one). ``progress`` receives one line before each stage;
+    ``on_stage`` receives the stage name (``claim``, ``download``,
+    ``transcribe``, ``write``) as each begins, so a caller that kills or loses
+    this run can say where it was.
     """
     say = progress or (lambda _msg: None)
+    stage = on_stage or (lambda _name: None)
+    stage("claim")
     _claim_work_dir(source, item, work_dir)
 
+    stage("download")
     say(f"Downloading {item.enclosure_url} ...")
     t0 = time.monotonic()
     audio_path = work_dir / AUDIO_NAME
-    download_enclosure(item.enclosure_url, audio_path)
+    fresh = not audio_path.exists() or audio_path.stat().st_size == 0
+    size = download_enclosure(item.enclosure_url, audio_path)
+    if fresh:
+        # The URL actually fetched (it may differ from item.json's by tracking
+        # params) and what came back. Written only for a real download.
+        persist_raw_output(
+            work_dir / ACQUISITION_NAME,
+            json.dumps(
+                {
+                    "url": item.enclosure_url,
+                    "downloaded_at": datetime.now(UTC).isoformat(),
+                    "bytes": size,
+                    "sha256": _sha256_file(audio_path),
+                },
+                indent=2,
+            ),
+        )
     t1 = time.monotonic()
 
+    stage("transcribe")
     say("Transcribing (Gemini, in ~10-minute pieces) ...")
     stamp_before = _manifest_stamp(work_dir)
     transcriber = (transcriber_factory or GeminiPieceTranscriber)()
@@ -250,6 +287,7 @@ def run_episode_to_script(
     # A stale script from an earlier run must not survive a failed write stage.
     (work_dir / SCRIPT_NAME).unlink(missing_ok=True)
     (work_dir / SUMMARY_NAME).unlink(missing_ok=True)
+    stage("write")
     say("Writing report (opencode-serve) ...")
     report = write_report(
         transcript=transcript,

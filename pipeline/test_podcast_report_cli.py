@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 from pathlib import Path
 
 import httpx
@@ -258,9 +260,7 @@ def test_matching_rerun_keeps_original_item_json_fields(monkeypatch, tmp_path, c
     assert result.exit_code == 0, result.output
     after = json.loads(item_path.read_text())
     assert after["enclosure_url"] == "https://old.example/pinned.mp3"
-    fields = {k: v for k, v in after.items() if k != "last_requested_at"}
-    assert fields == {k: v for k, v in stale.items() if k != "last_requested_at"}
-    assert "last_requested_at" in after
+    assert after == stale
 
 
 def test_default_work_dir_is_per_source_hash_of_guid():
@@ -423,3 +423,111 @@ def test_feed_http_error_is_a_clean_cli_error(monkeypatch, tmp_path, calls):
     assert "HTTPStatusError" in result.output and "503" in result.output
     assert "Traceback" not in result.output
     assert calls["download"] == []
+
+
+def _direct_args():
+    from pipeline.podcast_feed import parse_podcast_feed
+    from pipeline.podcast_sources import get_podcast_source
+
+    source = get_podcast_source("argument")
+    item = next(
+        i
+        for i in parse_podcast_feed(FIXTURE.read_text(encoding="utf-8"))
+        if i.guid == GUID
+    )
+    return source, item
+
+
+def test_on_stage_receives_stages_in_order(tmp_path, calls):
+    source, item = _direct_args()
+    seen: list[str] = []
+    podcast_report.run_episode_to_script(
+        source, item, tmp_path / "work", on_stage=seen.append
+    )
+    assert seen == ["claim", "download", "transcribe", "write"]
+
+
+def test_on_stage_names_the_stage_that_failed(monkeypatch, tmp_path, calls):
+    source, item = _direct_args()
+    seen: list[str] = []
+
+    def bad_write(**kw):
+        raise RuntimeError("refused")
+
+    monkeypatch.setattr(podcast_report, "write_report", bad_write)
+    with pytest.raises(RuntimeError):
+        podcast_report.run_episode_to_script(
+            source, item, tmp_path / "work", on_stage=seen.append
+        )
+    assert seen[-1] == "write"
+
+
+def test_fresh_download_writes_acquisition_json(tmp_path, calls):
+    source, item = _direct_args()
+    work = tmp_path / "work"
+    podcast_report.run_episode_to_script(source, item, work)
+
+    acq = json.loads((work / "acquisition.json").read_text())
+    assert acq["url"] == item.enclosure_url
+    assert acq["bytes"] == 3
+    assert acq["sha256"] == hashlib.sha256(b"mp3").hexdigest()
+    from datetime import datetime
+
+    assert datetime.fromisoformat(acq["downloaded_at"]).tzinfo is not None
+    assert not list(work.glob("*.tmp"))
+
+
+def test_existing_audio_does_not_rewrite_acquisition_json(tmp_path, calls):
+    source, item = _direct_args()
+    work = tmp_path / "work"
+    podcast_report.run_episode_to_script(source, item, work)
+    before = (work / "acquisition.json").read_bytes()
+    stat_before = (work / "acquisition.json").stat()
+
+    podcast_report.run_episode_to_script(source, item, work)
+
+    assert (work / "acquisition.json").read_bytes() == before
+    assert (work / "acquisition.json").stat().st_ino == stat_before.st_ino
+
+
+def test_empty_audio_counts_as_a_fresh_download(tmp_path, calls):
+    source, item = _direct_args()
+    work = tmp_path / "work"
+    podcast_report.run_episode_to_script(source, item, work)
+    (work / "audio.mp3").write_bytes(b"")
+    (work / "acquisition.json").write_text("stale")
+
+    podcast_report.run_episode_to_script(source, item, work)
+
+    assert json.loads((work / "acquisition.json").read_text())["bytes"] == 3
+
+
+def test_item_json_is_written_once_and_never_churns(tmp_path, calls):
+    source, item = _direct_args()
+    work = tmp_path / "work"
+    podcast_report.run_episode_to_script(source, item, work)
+    before = (work / "item.json").read_bytes()
+    assert "last_requested_at" not in json.loads(before)
+
+    podcast_report.run_episode_to_script(source, item, work)
+    assert (work / "item.json").read_bytes() == before
+
+    from pipeline.podcast_feed import parse_podcast_feed
+
+    other = next(
+        i
+        for i in parse_podcast_feed(FIXTURE.read_text(encoding="utf-8"))
+        if i.guid != GUID
+    )
+    with pytest.raises(RuntimeError, match="work dir belongs to"):
+        podcast_report.run_episode_to_script(source, other, work)
+    assert (work / "item.json").read_bytes() == before
+
+
+def test_dry_run_quiets_the_http_loggers(monkeypatch, tmp_path, calls):
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+    for name in ("httpx", "httpcore"):
+        monkeypatch.setattr(logging.getLogger(name), "level", logging.NOTSET)
+    assert _run(tmp_path).exit_code == 0
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
