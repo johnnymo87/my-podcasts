@@ -1822,7 +1822,9 @@ def podcast_report_group() -> None:
     "work_dir",
     default=None,
     type=click.Path(file_okay=False, path_type=Path),
-    help="Work dir (default: /persist/my-podcasts/podcast-work/dry-run/<hash>).",
+    help=(
+        "Work dir (default: /persist/my-podcasts/podcast-work/dry-run/<source>/<hash>)."
+    ),
 )
 @click.option(
     "--no-carry-context",
@@ -1841,8 +1843,16 @@ def podcast_report_dry_run_command(
     """Download, transcribe and write one episode into a work dir.
 
     Publishes nothing: touches no DB, no R2, no feed.
+
+    The work dir's audio.mp3 is the pinned input of every rerun: the host
+    inserts ads dynamically, so a fresh download is different audio and would
+    miss every transcript checkpoint. To resume from checkpoints, rerun with
+    the same --work-dir and leave audio.mp3 in place.
     """
+    import logging
+
     import httpx
+    import requests
 
     from pipeline import podcast_report
     from pipeline.podcast_sources import get_podcast_source
@@ -1857,6 +1867,16 @@ def podcast_report_dry_run_command(
         raise click.ClickException("GEMINI_API_KEY is not set; transcription needs it.")
 
     try:
+        podcast_report.check_opencode_serve()
+    except podcast_report.OpencodeUnavailableError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO, format="%(asctime)s %(name)s: %(message)s"
+        )
+
+    try:
         if rss_file is not None:
             rss_xml = rss_file.read_text(encoding="utf-8")
         else:
@@ -1866,15 +1886,19 @@ def podcast_report_dry_run_command(
         raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
 
     if work_dir is None:
-        work_dir = podcast_report.default_work_dir(guid)
+        work_dir = podcast_report.default_work_dir(source.key, guid)
     click.echo(f"Episode: {item.title} ({item.pub_date.date().isoformat()})")
     click.echo(f"Work dir: {work_dir}")
 
     try:
-        result = podcast_report.run_dry_run(
-            source, item, work_dir, carry_context=not no_carry_context
+        result = podcast_report.run_episode_to_script(
+            source,
+            item,
+            work_dir,
+            carry_context=not no_carry_context,
+            progress=click.echo,
         )
-    except RuntimeError as exc:
+    except (RuntimeError, requests.RequestException, httpx.HTTPError, OSError) as exc:
         raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
 
     click.echo(f"Transcript: {result.transcript_path}")
@@ -1882,8 +1906,16 @@ def podcast_report_dry_run_command(
     if result.summary_path is not None:
         click.echo(f"Summary: {result.summary_path}")
     click.echo(f"Script words: {result.script_words}")
+    if result.transcript_reused:
+        reuse = "transcript reused from an earlier run (no ASR calls)"
+    else:
+        reuse = (
+            f"{result.pieces_from_checkpoint}/{result.piece_count} pieces "
+            "from checkpoints"
+        )
+    click.echo(f"Pieces: {result.piece_count} ({reuse})")
     click.echo(
-        f"Pieces: {result.piece_count}, tokens in/out: "
+        "Tokens recorded in manifest (in/out, include reused work): "
         f"{result.input_tokens}/{result.output_tokens}"
     )
     click.echo(

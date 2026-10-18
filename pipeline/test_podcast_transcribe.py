@@ -872,3 +872,27 @@ def test_gemini_transcriber_missing_api_key(monkeypatch) -> None:
     monkeypatch.setattr("pipeline.tts.asr._make_genai_client", no_key)
     with pytest.raises(pt.TranscriptionError, match="asr_error"):
         pt.GeminiPieceTranscriber()(b"mp3", "prompt")
+
+
+def test_logs_one_info_line_per_piece(audio, tmp_path, caplog) -> None:
+    first = FakeTranscriber(fail_piece=1, exc=_err("asr_error", 400))
+    with caplog.at_level("INFO", logger=pt.logger.name):
+        with pytest.raises(pt.TranscriptionError):
+            _run(audio, tmp_path, first)
+        second = FakeTranscriber()
+        second.accepted = 1
+        caplog.clear()
+        _run(audio, tmp_path, second)
+    msgs = [r.getMessage() for r in caplog.records if "piece " in r.getMessage()]
+    count = len(_manifest(tmp_path)["pieces"])
+    assert len(msgs) == count
+    assert msgs[0].startswith(f"piece 1/{count}:") and "checkpoint" in msgs[0]
+    assert msgs[1].startswith(f"piece 2/{count}:") and "attempt" in msgs[1]
+    assert all("words" in m for m in msgs)
+
+
+def test_logs_transcript_reuse(audio, tmp_path, caplog) -> None:
+    _run(audio, tmp_path, FakeTranscriber())
+    with caplog.at_level("INFO", logger=pt.logger.name):
+        _run(audio, tmp_path, FakeTranscriber())
+    assert any("reusing" in r.getMessage() for r in caplog.records)

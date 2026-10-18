@@ -22,6 +22,14 @@ class _Fetch:
         return self.reply
 
 
+def _live_raw(tmp_path: Path) -> list[Path]:
+    return [
+        p
+        for p in tmp_path.glob("raw_writer_output-*.txt")
+        if not p.name.endswith(".rejected.txt")
+    ]
+
+
 def _write(tmp_path: Path, **kw: str):
     args = {
         "transcript": "T",
@@ -97,17 +105,21 @@ def test_min_script_chars_is_the_transcript_paths_floor() -> None:
     assert pw.MIN_SCRIPT_CHARS == tr._MIN_SCRIPT_CHARS
 
 
-def test_refused_preexisting_raw_file_is_unlinked_and_regenerated(
+def test_refused_preexisting_raw_file_is_quarantined_and_regenerated(
     tmp_path, monkeypatch
 ) -> None:
     fetch = _Fetch()
     monkeypatch.setattr(pw, "fetch_report_text", fetch)
     _write(tmp_path)  # populates the raw file with GOOD
     (raw,) = tmp_path.glob("raw_writer_output-*.txt")
-    raw.write_text("reasoning with no tags " * 200, encoding="utf-8")
+    bad = "reasoning with no tags " * 200
+    raw.write_text(bad, encoding="utf-8")
     with pytest.raises(RuntimeError):  # reuse path parses the bad file, refuses
         _write(tmp_path)
     assert not raw.exists()
+    (rejected,) = tmp_path.glob("raw_writer_output-*.rejected.txt")
+    assert rejected.name == raw.name.removesuffix(".txt") + ".rejected.txt"
+    assert rejected.read_text(encoding="utf-8") == bad  # evidence kept
     assert len(fetch.calls) == 1  # the refusal itself made no model call
     assert _write(tmp_path).script.startswith("word")  # next call regenerates
     assert len(fetch.calls) == 2
@@ -136,16 +148,31 @@ def test_field_boundaries_are_not_ambiguous(tmp_path, monkeypatch) -> None:
     assert len(fetch.calls) == 2
 
 
-def test_refusal_unlinks_raw_and_reraises(tmp_path, monkeypatch) -> None:
+def test_refusal_quarantines_raw_and_reraises(tmp_path, monkeypatch) -> None:
     fetch = _Fetch("no tags here " * 400)
     monkeypatch.setattr(pw, "fetch_report_text", fetch)
     with pytest.raises(RuntimeError):
         _write(tmp_path)
-    assert list(tmp_path.glob("raw_writer_output-*.txt")) == []
+    assert _live_raw(tmp_path) == []
+    (rejected,) = tmp_path.glob("raw_writer_output-*.rejected.txt")
+    assert rejected.read_text(encoding="utf-8") == "no tags here " * 400
     # next retry regenerates instead of looping on the broken file
     fetch.reply = GOOD
     assert _write(tmp_path).script.startswith("word")
     assert len(fetch.calls) == 2
+    assert rejected.exists()  # a good run does not delete the evidence
+
+
+def test_second_refusal_overwrites_older_rejected_file(tmp_path, monkeypatch) -> None:
+    fetch = _Fetch("first bad reply " * 400)
+    monkeypatch.setattr(pw, "fetch_report_text", fetch)
+    with pytest.raises(RuntimeError):
+        _write(tmp_path)
+    fetch.reply = "second bad reply " * 400
+    with pytest.raises(RuntimeError):
+        _write(tmp_path)
+    (rejected,) = tmp_path.glob("raw_writer_output-*.rejected.txt")
+    assert rejected.read_text(encoding="utf-8").startswith("second bad reply")
 
 
 def test_short_script_is_refused(tmp_path, monkeypatch) -> None:
@@ -154,7 +181,8 @@ def test_short_script_is_refused(tmp_path, monkeypatch) -> None:
     )
     with pytest.raises(RuntimeError, match="too short"):
         _write(tmp_path)
-    assert list(tmp_path.glob("raw_writer_output-*.txt")) == []
+    assert _live_raw(tmp_path) == []
+    assert len(list(tmp_path.glob("raw_writer_output-*.rejected.txt"))) == 1
 
 
 def test_fetch_failure_persists_nothing(tmp_path, monkeypatch) -> None:

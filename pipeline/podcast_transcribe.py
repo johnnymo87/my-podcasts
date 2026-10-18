@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -37,6 +38,8 @@ from pipeline.tts import asr as _asr
 from pipeline.tts.config import PCM_BYTES_PER_SECOND, PCM_SAMPLE_RATE
 from pipeline.tts.segment import decode_to_pcm_with_log, split_pcm
 
+
+logger = logging.getLogger(__name__)
 
 PIECE_PROMPT_VERSION = "1"
 ASR_MODEL = "gemini-3.8-flash"
@@ -533,6 +536,7 @@ def transcribe_episode(
         prompt_inputs_sha=inputs_sha,
     )
     if reused is not None:
+        logger.info("reusing transcript already in %s", work_dir)
         return reused
 
     # Not reusable: drop anything stale first, so a failed run cannot leave a
@@ -565,6 +569,7 @@ def transcribe_episode(
     sponsor_open = False
     previous = ""
     for i, (start, end) in enumerate(ranges):
+        piece_started = time.monotonic()
         context = (
             _context_block(previous, speakers) if (carry_context and i > 0) else None
         )
@@ -642,6 +647,14 @@ def transcribe_episode(
         for name in names:
             if name not in speakers:
                 speakers.append(name)
+        logger.info(
+            "piece %d/%d: %.1fs, %s, %d words",
+            i + 1,
+            count,
+            time.monotonic() - piece_started,
+            "from checkpoint" if cp is not None else f"{attempts} attempt(s)",
+            words,
+        )
         previous = text
         texts.append(text)
         pieces.append(

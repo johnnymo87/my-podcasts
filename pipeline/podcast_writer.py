@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from pathlib import Path
 
 from pipeline.report_engine import (
@@ -62,9 +63,10 @@ def write_report(
 ) -> ReportOutput:
     """Generate (or re-parse a persisted) spoken report for one transcript.
 
-    A refusal from ``parse_report`` (a ``RuntimeError``) deletes the persisted
-    raw reply before re-raising, so the next retry regenerates instead of
-    looping on the same broken content.
+    A refusal from ``parse_report`` (a ``RuntimeError``) moves the persisted
+    raw reply aside to ``<name>.rejected.txt`` (overwriting any older one)
+    before re-raising: the next retry regenerates instead of looping on the same
+    broken content, and the operator keeps the evidence.
     """
     instruction = build_audio_report_instruction(
         transcript=transcript, title=title, description=description, hosts=hosts
@@ -90,7 +92,7 @@ def write_report(
         )
     except RuntimeError:
         try:
-            raw_path.unlink()
+            os.replace(raw_path, raw_path.with_name(f"{raw_path.stem}.rejected.txt"))
         except FileNotFoundError:
             pass
         raise
