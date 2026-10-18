@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pipeline.feed import regenerate_and_upload_feed
-from pipeline.podcast_jobs import item_from_row, podcast_identity
+from pipeline.podcast_jobs import PodcastIdentity, item_from_row, podcast_identity
 from pipeline.podcast_report import EPISODE_AUDIO_NAME, SUMMARY_NAME
 from pipeline.podcast_sources import get_podcast_source
 from pipeline.report_engine import persist_raw_output
@@ -69,16 +69,13 @@ def _show_notes(source: PodcastSource, item: PodcastItem, work_dir: Path) -> str
     )
 
 
-def publish_podcast_episode(
-    row: dict, work_dir: Path, *, store: StateStore, r2_client: R2Client
-) -> str:
-    """Publish the episode a job row describes. Returns ``"published"`` or
-    ``"reconciled"`` (the episode was already committed; only feeds re-sent).
+def validate_identity(row: dict) -> PodcastIdentity:
+    """Recompute a job row's publish identity and compare it to what was frozen
+    at admission. Returns the recomputed identity.
 
-    Raises ``RuntimeError`` on identity drift, before any TTS.
-
-    Note: after a ``reset`` of an already-published episode, the next run
-    reconciles and keeps the existing audio (by design); it never re-renders.
+    Raises ``RuntimeError`` on any difference (identity drift is a bug; nothing
+    must be rendered, uploaded or reconciled under a name the row does not
+    carry). The executor calls this before it spends a child run on the row.
     """
     source = get_podcast_source(row["source"])
     item = item_from_row(row)
@@ -102,9 +99,37 @@ def publish_podcast_episode(
             f"{', '.join(drift)} differ between the admitted row and a "
             "recomputation; refusing to publish"
         )
+    return ident
 
-    if store.get_episode_by_r2_key(row["r2_key"]) is not None:
-        regenerate_and_upload_feed(store, r2_client)
+
+def reconcile_committed(row: dict, *, store: StateStore, r2_client: R2Client) -> bool:
+    """If the row's episode is already committed, re-send the feeds and return
+    True (no TTS, no insert, and no need for any audio). Otherwise False.
+
+    The caller must have validated the identity first.
+    """
+    if store.get_episode_by_r2_key(row["r2_key"]) is None:
+        return False
+    regenerate_and_upload_feed(store, r2_client)
+    return True
+
+
+def publish_podcast_episode(
+    row: dict, work_dir: Path, *, store: StateStore, r2_client: R2Client
+) -> str:
+    """Publish the episode a job row describes. Returns ``"published"`` or
+    ``"reconciled"`` (the episode was already committed; only feeds re-sent).
+
+    Raises ``RuntimeError`` on identity drift, before any TTS.
+
+    Note: after a ``reset`` of an already-published episode, the next run
+    reconciles and keeps the existing audio (by design); it never re-renders.
+    """
+    source = get_podcast_source(row["source"])
+    item = item_from_row(row)
+    ident = validate_identity(row)
+
+    if reconcile_committed(row, store=store, r2_client=r2_client):
         return "reconciled"
 
     audio = work_dir / EPISODE_AUDIO_NAME

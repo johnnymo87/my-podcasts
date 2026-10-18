@@ -758,3 +758,187 @@ def test_a_hanging_alert_cannot_stall_the_executor(store, work_root, monkeypatch
     # The give-up alert timed out; the row transition happened regardless.
     assert result == f"argument/{item.guid}: errored (1)"
     assert store.get_podcast_episode("argument", item.guid)["status"] == "errored"
+
+
+# --- reconcile before the child -------------------------------------------------
+
+
+def _commit_episode(store, item):
+    """The state an earlier attempt left: audio uploaded, episode row inserted."""
+    from pipeline.db import Episode
+
+    row = store.get_podcast_episode("argument", item.guid)
+    store.insert_episode(
+        Episode(
+            id="e1",
+            title=row["display_title"],
+            slug=row["episode_slug"],
+            pub_date="Sun, 18 Oct 2026 12:00:00 +0000",
+            r2_key=row["r2_key"],
+            feed_slug="yglesias",
+            category="News",
+            source_tag=None,
+            preset_name="Script",
+            source_url=item.link,
+            size_bytes=10,
+            duration_seconds=60,
+            summary="s",
+            show_notes_html=None,
+        )
+    )
+
+
+class Reconcile:
+    """The real ``reconcile_committed`` with the feed upload replaced."""
+
+    def __init__(self, monkeypatch, exc: Exception | None = None):
+        self.calls: list[tuple] = []
+        self.exc = exc
+        monkeypatch.setattr(
+            "pipeline.podcast_publish.regenerate_and_upload_feed", self._regen
+        )
+
+    def _regen(self, store, r2):
+        self.calls.append((store, r2))
+        if self.exc is not None:
+            raise self.exc
+
+
+def _no_child(*a, **k):
+    raise AssertionError("the child must not run for a committed episode")
+
+
+def _run_no_child(store, work_root, publish, alerts, **kw):
+    return run_one_podcast_episode(
+        store,
+        "the-r2",
+        now=NOW,
+        run_child=_no_child,
+        publish=publish,
+        alert=alerts,
+        work_root=work_root,
+        **kw,
+    )
+
+
+def test_committed_episode_is_reconciled_without_running_the_child(
+    store, work_root, monkeypatch
+):
+    item = _admit(store)
+    _commit_episode(store, item)
+    recon, publish, alerts = Reconcile(monkeypatch), Publish(), Alerts()
+    work_dir = work_dir_for("argument", item.guid, work_root)
+    work_dir.mkdir(parents=True)
+    (work_dir / "audio.mp3").write_bytes(b"a")
+    (work_dir / "episode.mp3").write_bytes(b"b")
+
+    result = _run_no_child(store, work_root, publish, alerts)
+
+    assert result == f"argument/{item.guid}: reconciled"
+    assert recon.calls == [(store, "the-r2")]
+    assert publish.calls == []  # no publish either: feeds only
+    row = store.get_podcast_episode("argument", item.guid)
+    assert row["status"] == "completed"
+    stats = json.loads(row["stats_json"])
+    assert stats["publish"] == "reconciled"
+    assert stats["child_elapsed_s"] == 0.0
+    assert stats["decoded_minus_rss_s"] is None  # no manifest: best effort
+    assert not (work_dir / "audio.mp3").exists()
+    assert not (work_dir / "episode.mp3").exists()
+    assert alerts.calls == []
+
+
+def test_reconcile_uses_the_manifest_stats_when_a_prior_run_left_one(
+    store, work_root, monkeypatch
+):
+    item = _admit(store)
+    _commit_episode(store, item)
+    Reconcile(monkeypatch)
+    work_dir = work_dir_for("argument", item.guid, work_root)
+    work_dir.mkdir(parents=True)
+    (work_dir / MANIFEST_NAME).write_text(json.dumps(_manifest()), encoding="utf-8")
+
+    _run_no_child(store, work_root, Publish(), Alerts())
+
+    stats = json.loads(store.get_podcast_episode("argument", item.guid)["stats_json"])
+    assert stats["decoded_minus_rss_s"] == 30.0
+    assert stats["publish"] == "reconciled"
+
+
+def test_feed_upload_failure_during_reconcile_is_a_normal_failure(
+    store, work_root, monkeypatch
+):
+    item = _admit(store)
+    _commit_episode(store, item)
+    Reconcile(monkeypatch, exc=OSError("r2 down"))
+    alerts = Alerts()
+
+    result = _run_no_child(store, work_root, Publish(), alerts)
+
+    assert result == f"argument/{item.guid}: failed (1)"
+    row = store.get_podcast_episode("argument", item.guid)
+    assert row["status"] == "pending"  # not terminal
+    assert row["failure_count"] == 1
+    assert row["last_error"].startswith("publish: OSError: r2 down")
+    assert datetime.fromisoformat(row["next_attempt_at"]) == NOW + PODCAST_RETRY_BACKOFF
+    assert alerts.calls == []  # one failure is not give-up
+
+
+def test_reconcile_failure_exhausts_the_budget_like_any_other(
+    store, work_root, monkeypatch
+):
+    item = _admit(store)
+    _commit_episode(store, item)
+    Reconcile(monkeypatch, exc=OSError("r2 down"))
+    alerts = Alerts()
+    now = NOW
+    for _ in range(PODCAST_MAX_FAILURES):
+        run_one_podcast_episode(
+            store,
+            "r2",
+            now=now,
+            run_child=_no_child,
+            publish=Publish(),
+            alert=alerts,
+            work_root=work_root,
+        )
+        now += PODCAST_RETRY_BACKOFF
+    assert store.get_podcast_episode("argument", item.guid)["status"] == "errored"
+    assert len(alerts.calls) == 1
+
+
+def test_drift_is_refused_before_the_child_and_before_reconcile(
+    store, work_root, monkeypatch
+):
+    item = _admit(store)
+    _commit_episode(store, item)
+    recon = Reconcile(monkeypatch)
+    store._conn.execute("UPDATE podcast_episodes SET episode_slug = 'drifted'")
+    store._conn.commit()
+
+    result = _run_no_child(store, work_root, Publish(), Alerts())
+
+    assert result == f"argument/{item.guid}: failed (1)"
+    row = store.get_podcast_episode("argument", item.guid)
+    assert row["last_error"].startswith("identity: RuntimeError: identity drift")
+    assert recon.calls == []
+
+
+def test_uncommitted_episode_still_runs_child_then_publish(
+    store, work_root, monkeypatch
+):
+    item = _admit(store)
+    recon = Reconcile(monkeypatch)
+    child, publish = FakeChild(work_root), Publish()
+    result = run_one_podcast_episode(
+        store,
+        "r2",
+        now=NOW,
+        run_child=child,
+        publish=publish,
+        alert=Alerts(),
+        work_root=work_root,
+    )
+    assert result == f"argument/{item.guid}: published"
+    assert len(child.calls) == 1 and len(publish.calls) == 1
+    assert recon.calls == []

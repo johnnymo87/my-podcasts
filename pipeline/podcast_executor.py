@@ -1,4 +1,8 @@
-"""Run at most one due podcast-report job: child -> publish -> bookkeeping.
+"""Run at most one due podcast-report job: (reconcile | child -> publish) ->
+bookkeeping.
+
+An episode already committed to the ``episodes`` table is reconciled (feeds
+re-sent, job completed) *without* running the child.
 
 The consumer is the only executor. ``run_one_podcast_episode`` never raises for
 a job failure: whatever the child, the publish, or the stats do, the outcome is
@@ -26,6 +30,7 @@ from pipeline import podcast_child, podcast_publish
 from pipeline.alerts import send_alert, send_alert_bounded
 from pipeline.podcast_child import scrub_detail
 from pipeline.podcast_jobs import PODCAST_WORK_ROOT, item_from_row, work_dir_for
+from pipeline.podcast_publish import validate_identity
 from pipeline.podcast_report import AUDIO_NAME, EPISODE_AUDIO_NAME
 from pipeline.podcast_sources import get_podcast_source
 from pipeline.podcast_transcribe import (
@@ -129,6 +134,7 @@ def run_one_podcast_episode(
     now: datetime | None = None,
     run_child=podcast_child.run_episode_in_child,
     publish=podcast_publish.publish_podcast_episode,
+    reconcile=podcast_publish.reconcile_committed,
     alert: Callable[..., bool] = send_alert,
     work_root: Path = PODCAST_WORK_ROOT,
 ) -> str | None:
@@ -195,28 +201,51 @@ def run_one_podcast_episode(
     except Exception as exc:  # noqa: BLE001 -- a row we cannot even interpret
         return fail(f"setup: {type(exc).__name__}: {exc}")
 
+    # Identity first: a drifted row must not cost a child run (or be reconciled
+    # under a name it no longer carries).
     try:
-        child = run_child(source, item, work_dir)
-    except Exception as exc:  # noqa: BLE001 -- never raise for a job failure
-        return fail(f"child: {type(exc).__name__}: {exc}")
+        validate_identity(row)
+    except Exception as exc:  # noqa: BLE001
+        return fail(f"identity: {type(exc).__name__}: {exc}")
 
-    if not child.ok:
-        terminal = child.stage == "claim" or child.code == TERMINAL_HTTP_CODE
-        return fail(f"{child.stage}: {child.reason}: {child.detail}", terminal=terminal)
-
+    # Reconcile before the child: if the episode is already committed (an
+    # earlier attempt published it but could not record completion, or the feed
+    # upload failed after the insert) there is nothing to generate. Re-send the
+    # feeds and complete; never spend a transcription, a writer run and a render
+    # on an episode that is already live.
     try:
-        mode = publish(row, work_dir, store=store, r2_client=r2_client)
+        reconciled = reconcile(row, store=store, r2_client=r2_client)
     except Exception as exc:  # noqa: BLE001
         return fail(f"publish: {type(exc).__name__}: {exc}")
+
+    if reconciled:
+        mode, child_elapsed_s = "reconciled", 0.0
+    else:
+        try:
+            child = run_child(source, item, work_dir)
+        except Exception as exc:  # noqa: BLE001 -- never raise for a job failure
+            return fail(f"child: {type(exc).__name__}: {exc}")
+
+        if not child.ok:
+            terminal = child.stage == "claim" or child.code == TERMINAL_HTTP_CODE
+            return fail(
+                f"{child.stage}: {child.reason}: {child.detail}", terminal=terminal
+            )
+
+        try:
+            mode = publish(row, work_dir, store=store, r2_client=r2_client)
+        except Exception as exc:  # noqa: BLE001
+            return fail(f"publish: {type(exc).__name__}: {exc}")
+        child_elapsed_s = child.elapsed_s
 
     # Published. From here on nothing may undo that. Stats are best-effort
     # and get their own guard, so a bug there cannot turn a live episode into
     # a failed job.
     try:
-        stats = collect_stats(work_dir, child_elapsed_s=child.elapsed_s, mode=mode)
+        stats = collect_stats(work_dir, child_elapsed_s=child_elapsed_s, mode=mode)
     except Exception:  # noqa: BLE001
         logger.exception("%s: stats collection failed; completing without", label)
-        stats = _blank_stats(child.elapsed_s, mode)
+        stats = _blank_stats(child_elapsed_s, mode)
 
     # If recording completion itself fails, the row goes back to pending so the
     # next attempt reconciles (finds the episode committed, re-sends feeds only,
