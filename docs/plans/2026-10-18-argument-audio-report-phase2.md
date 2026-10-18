@@ -38,6 +38,16 @@ branch `argument-audio-phase2`, stacked on `argument-audio-report` (PR #37).
 
 ## Decisions taken while expanding (binding for implementers)
 
+> **Amended after the pre-PR adversarial review** (work outside the killable
+> child had no wall-clock bound in the single-threaded consumer): decision 1's
+> "TTS + publish run in the parent" and `CHILD_DEADLINE_S = 1500` are
+> superseded. The child now also renders the audio (`episode.mp3`, deadline
+> 1800 s) and the parent only uploads it (`publish_script(prerendered_audio=)`);
+> the RSS fetch has a 60 s total deadline and a 10 MB cap; every alert goes
+> through `alerts.send_alert_bounded`; a committed episode is reconciled before
+> the child runs; the dry-run CLI never prints signed URLs. See root
+> `AGENTS.md`, "Podcast Audio Reports (The Argument)".
+
 1. **The child runs the whole `run_episode_to_script`** (download, transcribe,
    write), not only download+transcribe. Both the Gemini SDK (per-read timeout)
    and opencode can trickle; one wall-clock bound covers both. Deadline

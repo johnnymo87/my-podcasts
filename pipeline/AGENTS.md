@@ -167,6 +167,7 @@ The Argument audio reports live in a separate table, `podcast_episodes`, keyed b
 
 - `status`: `pending` (runs once `next_attempt_at <= now`; the column is `next_attempt_at`, not `process_after`), `in_progress` (the consumer has it; a restart re-queues it and counts as a failure), `completed`, `errored` (4th failure or a terminal one: stage `claim`, Gemini HTTP 400; not retried automatically).
 - `failure_count` is the running total against a budget of 4, not "consecutive"; backoff is 6 h. `last_error` is URL-scrubbed.
+- A row whose episode is already in `episodes` is **reconciled before any child run** (feeds re-sent, `stats_json.publish = "reconciled"`, `child_elapsed_s = 0`); a row that failed `identity:` is a drifted row and never reaches the child. The child (30-minute deadline) also renders the audio to `episode.mp3` in the work dir; `last_error` starting `render:` is a TTS failure.
 - `stats_json` (completed rows) carries the decoded-minus-RSS duration delta and its allowance.
 - Inspect: `uv run python -m pipeline podcast-report list [--source argument]`. Recover an `errored` row: `uv run python -m pipeline podcast-report reset --source argument --guid <GUID>` (refuses `completed` and `in_progress`).
 
