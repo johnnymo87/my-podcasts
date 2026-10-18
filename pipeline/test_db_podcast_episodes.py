@@ -494,3 +494,28 @@ def test_health_alerted_flag_set_at_threshold_and_cleared_on_success(store):
     assert store.get_podcast_health("argument")["alerted"] == 1
     store.record_podcast_discovery("argument", ok=True, error=None, now=NOW)
     assert store.get_podcast_health("argument")["alerted"] == 0
+
+
+def test_get_episode_by_r2_key(store):
+    from pipeline.db import Episode
+
+    assert store.get_episode_by_r2_key("episodes/yglesias/x.mp3") is None
+    ep = Episode(
+        id="e1",
+        title="T",
+        slug="x",
+        pub_date="Thu, 13 Mar 2026 12:00:00 +0000",
+        r2_key="episodes/yglesias/x.mp3",
+        feed_slug="yglesias",
+        category="News",
+        source_tag=None,
+        preset_name="Script",
+        source_url="https://example.com/p",
+        size_bytes=10,
+        duration_seconds=5,
+        summary="s",
+        show_notes_html="<p>s</p>",
+    )
+    store.insert_episode(ep)
+    assert store.get_episode_by_r2_key("episodes/yglesias/x.mp3") == ep
+    assert store.get_episode_by_r2_key("episodes/yglesias/y.mp3") is None

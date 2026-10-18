@@ -174,6 +174,24 @@ def _slugify(title: str) -> str:
     return slug
 
 
+@dataclass(frozen=True)
+class EpisodeIdentity:
+    """The published identity of a script episode: its slug and R2 key."""
+
+    slug: str
+    r2_key: str
+
+
+def episode_identity(title: str, feed_slug: str, date_str: str) -> EpisodeIdentity:
+    """The one formula for an episode's slug and R2 key.
+
+    Shared by ``publish_script`` and the podcast-report admission path, which
+    freezes the result on the job row so a retry cannot drift.
+    """
+    slug = f"{date_str}-{_slugify(title)}"
+    return EpisodeIdentity(slug=slug, r2_key=f"episodes/{feed_slug}/{slug}.mp3")
+
+
 def publish_script(
     *,
     script_file: Path,
@@ -212,9 +230,9 @@ def publish_script(
         show_notes_html = render_show_notes_html(notes_md)
 
     # TTS
-    title_slug = _slugify(title)
-    episode_slug = f"{date_str}-{title_slug}"
-    episode_r2_key = f"episodes/{feed_slug}/{episode_slug}.mp3"
+    identity = episode_identity(title, feed_slug, date_str)
+    episode_slug = identity.slug
+    episode_r2_key = identity.r2_key
 
     with tempfile.TemporaryDirectory(prefix="publish-script-") as tmp_dir:
         tmp = Path(tmp_dir)

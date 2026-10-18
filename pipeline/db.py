@@ -138,6 +138,44 @@ CREATE TABLE IF NOT EXISTS podcast_source_health (
 """
 
 
+_EPISODE_COLUMNS = """\
+                    id,
+                    title,
+                    slug,
+                    pub_date,
+                    r2_key,
+                    feed_slug,
+                    category,
+                    source_tag,
+                    preset_name,
+                    source_url,
+                    size_bytes,
+                    duration_seconds,
+                    summary,
+                    articles_json,
+                    show_notes_html"""
+
+
+def _row_to_episode(row: sqlite3.Row) -> Episode:
+    return Episode(
+        id=row["id"],
+        title=row["title"],
+        slug=row["slug"],
+        pub_date=row["pub_date"],
+        r2_key=row["r2_key"],
+        feed_slug=row["feed_slug"],
+        category=row["category"],
+        source_tag=row["source_tag"],
+        preset_name=row["preset_name"],
+        source_url=row["source_url"],
+        size_bytes=row["size_bytes"],
+        duration_seconds=row["duration_seconds"],
+        summary=row["summary"],
+        articles_json=row["articles_json"],
+        show_notes_html=row["show_notes_html"],
+    )
+
+
 def _utc_iso(moment: datetime) -> str:
     """Format *moment* as a fixed-width ISO-8601 UTC string.
 
@@ -380,26 +418,26 @@ class StateStore:
                 ORDER BY created_at DESC
                 """
             ).fetchall()
-        return [
-            Episode(
-                id=row["id"],
-                title=row["title"],
-                slug=row["slug"],
-                pub_date=row["pub_date"],
-                r2_key=row["r2_key"],
-                feed_slug=row["feed_slug"],
-                category=row["category"],
-                source_tag=row["source_tag"],
-                preset_name=row["preset_name"],
-                source_url=row["source_url"],
-                size_bytes=row["size_bytes"],
-                duration_seconds=row["duration_seconds"],
-                summary=row["summary"],
-                articles_json=row["articles_json"],
-                show_notes_html=row["show_notes_html"],
-            )
-            for row in rows
-        ]
+        return [_row_to_episode(row) for row in rows]
+
+    def get_episode_by_r2_key(self, r2_key: str) -> Episode | None:
+        """The episode published under ``r2_key``, or None.
+
+        ``episodes.r2_key`` is not constrained unique; if a historical
+        duplicate exists the newest row wins, as in ``list_episodes``.
+        """
+        row = self._conn.execute(
+            f"""
+            SELECT
+{_EPISODE_COLUMNS}
+            FROM episodes
+            WHERE r2_key = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (r2_key,),
+        ).fetchone()
+        return _row_to_episode(row) if row is not None else None
 
     def recent_coverage_summary(self, feed_slug: str, days: int = 3) -> list[dict]:
         """Return coverage frequency of themes from recent episodes.

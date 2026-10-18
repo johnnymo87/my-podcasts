@@ -609,3 +609,61 @@ def test_publish_script_explicit_voice_is_used(
 
     [call] = fake_tts_render
     assert call["config"] == openai_config(model="tts-1-hd", voice="ash")
+
+
+def test_episode_identity_formula_is_pinned() -> None:
+    """slug/r2_key are the published identity of every script episode; the
+    podcast-report path computes them through the same function."""
+    from pipeline.script_processor import EpisodeIdentity, episode_identity
+
+    ident = episode_identity(
+        "Some Title: With  Punctuation!", "deep-dives", "2026-03-13"
+    )
+    assert ident == EpisodeIdentity(
+        slug="2026-03-13-some-title-with-punctuation",
+        r2_key="episodes/deep-dives/2026-03-13-some-title-with-punctuation.mp3",
+    )
+
+
+def test_publish_script_uses_the_pinned_identity(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="60.0\n"),
+    )
+    monkeypatch.setattr(
+        "pipeline.script_processor.regenerate_and_upload_feed", lambda s, r: None
+    )
+    script_file = tmp_path / "script.md"
+    script_file.write_text("The episode body.", encoding="utf-8")
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2 = MagicMock()
+    try:
+        result = publish_script(
+            script_file=script_file,
+            title="Some Title",
+            feed_slug="deep-dives",
+            store=store,
+            r2_client=r2,
+            date_str="2026-03-13",
+        )
+        [ep] = store.list_episodes(feed_slug="deep-dives")
+    finally:
+        store.close()
+    [call] = fake_tts_render
+    assert call["episode_id"] == "2026-03-13-some-title"
+    assert result.r2_key == "episodes/deep-dives/2026-03-13-some-title.mp3"
+    assert r2.upload_file.call_args[0][1] == result.r2_key
+    assert (ep.slug, ep.r2_key) == (
+        "2026-03-13-some-title",
+        "episodes/deep-dives/2026-03-13-some-title.mp3",
+    )
+
+
+def test_episode_identity_rejects_empty_slug() -> None:
+    from pipeline.script_processor import episode_identity
+
+    with pytest.raises(ValueError):
+        episode_identity("!!!", "deep-dives", "2026-03-13")
