@@ -1,20 +1,24 @@
-"""Run one podcast episode (download -> transcribe -> write) in a killable child.
+"""Run one podcast episode (download -> transcribe -> write -> render) in a
+killable child.
 
-The whole of ``podcast_report.run_episode_to_script`` runs in a ``spawn``ed
-process under one wall-clock deadline. Both the Gemini SDK (a per-read timeout)
-and opencode can trickle bytes forever, so no in-process timeout can bound the
-run; only a ``kill()`` from the parent can. The consumer is a single thread, so
-an unbounded episode would stall every other feed.
+The whole of ``podcast_report.run_episode_to_audio`` runs in a ``spawn``ed
+process under one wall-clock deadline. The Gemini SDK, opencode and the OpenAI
+TTS client all have only per-read timeouts and can trickle bytes forever, so no
+in-process timeout can bound the run; only a ``kill()`` from the parent can. The
+consumer is a single thread, so an unbounded episode would stall every other
+feed. Nothing slow is left outside the child: the parent only validates files
+and uploads the finished mp3.
 
 The parent and the child talk through files in the work dir, written atomically:
 
-``job.json``           parent -> child: ``item_metadata`` of the episode
+``job.json``           parent -> child: ``item_metadata`` of the episode plus
+                       ``display_title`` and ``feed_slug``
 ``child_stage.json``   child -> parent: the last stage the run reported
 ``child_result.json``  child -> parent: the terminal result (ok or not)
 
 Same shape as ``pipeline/tts/gemini_phase.py`` (the idea is copied, its private
 names are not imported). The parent trusts nothing the child says: an ok result
-is checked against ``script.txt`` on disk.
+is checked against ``script.txt`` and ``episode.mp3`` on disk.
 
 Two honest limits. A killed child can orphan an in-flight ``ffmpeg`` for a
 moment; it dies on ``EPIPE`` once the child's pipes close. And the child's
@@ -41,7 +45,8 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.podcast_feed import PodcastItem
-from pipeline.podcast_report import item_metadata, sha256_file
+from pipeline.podcast_jobs import podcast_identity
+from pipeline.podcast_report import clear_episode_audio, item_metadata, sha256_file
 from pipeline.podcast_sources import PodcastSource, get_podcast_source
 from pipeline.podcast_transcribe import TranscriptionError
 from pipeline.report_engine import persist_raw_output
@@ -49,16 +54,18 @@ from pipeline.report_engine import persist_raw_output
 
 logger = logging.getLogger(__name__)
 
-# Pilot: ~4.5 min end to end for 80-85 min episodes; the writer's own timeout is
-# 900 s. 25 minutes leaves room for a slow ASR day without letting a trickling
-# connection hold the consumer.
-CHILD_DEADLINE_S = 1500.0
+# Pilot: ~4.5 min for transcription + writer on 80-85 min episodes; the writer's
+# own timeout is 900 s; an OpenAI render of a ~1700-word script takes ~1-2 min.
+# 30 minutes leaves room for a slow ASR day and a slow render without letting a
+# trickling connection hold the consumer.
+CHILD_DEADLINE_S = 1800.0
 
 JOB_NAME = "job.json"
 RESULT_NAME = "child_result.json"
 STAGE_NAME = "child_stage.json"
 SCRIPT_NAME = "script.txt"
-DEFAULT_RUNNER = "pipeline.podcast_report:run_episode_to_script"
+AUDIO_NAME = "episode.mp3"
+DEFAULT_RUNNER = "pipeline.podcast_report:run_episode_to_audio"
 
 POLL_SECONDS = 0.5  # parent: how often to look for the result
 REAP_TIMEOUT_SECONDS = 5.0  # parent: join() after kill()
@@ -126,7 +133,15 @@ class _BadJobError(Exception):
     pass
 
 
-def _load_job(source_key: str, work_dir: Path) -> tuple[PodcastSource, PodcastItem]:
+@dataclass(frozen=True)
+class _Job:
+    source: PodcastSource
+    item: PodcastItem
+    display_title: str
+    feed_slug: str
+
+
+def _load_job(source_key: str, work_dir: Path) -> _Job:
     try:
         source = get_podcast_source(source_key)
     except KeyError:
@@ -150,9 +165,18 @@ def _load_job(source_key: str, work_dir: Path) -> tuple[PodcastSource, PodcastIt
             enclosure_url=str(job["enclosure_url"]),
             description=str(job["description"]),
         )
+        display_title = job["display_title"]
+        feed_slug = job["feed_slug"]
     except (KeyError, TypeError, ValueError) as exc:
         raise _BadJobError(f"invalid {JOB_NAME}: {exc!r}") from exc
-    return source, item
+    if not isinstance(display_title, str) or not display_title.strip():
+        raise _BadJobError(f"{JOB_NAME} has no usable display_title")
+    if feed_slug != source.feed_slug:
+        raise _BadJobError(
+            f"{JOB_NAME} feed_slug {feed_slug!r} is not the source's "
+            f"{source.feed_slug!r}"
+        )
+    return _Job(source, item, display_title, feed_slug)
 
 
 def _child_body(
@@ -186,13 +210,20 @@ def _child_body(
         )
 
     try:
-        source, item = _load_job(source_key, work_dir)
+        job = _load_job(source_key, work_dir)
     except _BadJobError as exc:
         failed("job", "bad_job", None, str(exc))
         return
 
     try:
-        res = runner(source, item, work_dir, on_stage=on_stage)
+        res = runner(
+            job.source,
+            job.item,
+            work_dir,
+            on_stage=on_stage,
+            display_title=job.display_title,
+            feed_slug=job.feed_slug,
+        )
         script_path = Path(res.script_path)
         payload = {
             "ok": True,
@@ -200,6 +231,9 @@ def _child_body(
             "piece_count": res.piece_count,
             "input_tokens": res.input_tokens,
             "output_tokens": res.output_tokens,
+            "audio_sha256": res.audio_sha256,
+            "audio_bytes": res.audio_bytes,
+            "tts_text_sha256": res.tts_text_sha256,
         }
     except TranscriptionError as exc:
         failed(last_stage[0], exc.reason, exc.code, str(exc))
@@ -379,13 +413,16 @@ def _is_int(value: object) -> bool:
 
 
 def _validate_ok(result: dict[str, Any], work_dir: Path) -> None:
-    """An ok result is only as good as the script on disk."""
+    """An ok result is only as good as the script and the audio on disk."""
     sha = result.get("script_sha256")
     if not isinstance(sha, str):
         raise _InvalidResultError("ok result has no script_sha256")
-    for key in ("piece_count", "input_tokens", "output_tokens"):
+    for key in ("piece_count", "input_tokens", "output_tokens", "audio_bytes"):
         if not _is_int(result.get(key)):
             raise _InvalidResultError(f"ok result has a non-integer {key}")
+    for key in ("audio_sha256", "tts_text_sha256"):
+        if not isinstance(result.get(key), str) or not result[key]:
+            raise _InvalidResultError(f"ok result has no {key}")
     script = work_dir / SCRIPT_NAME
     try:
         data = script.read_bytes()
@@ -396,6 +433,29 @@ def _validate_ok(result: dict[str, Any], work_dir: Path) -> None:
     if hashlib.sha256(data).hexdigest() != sha:
         raise _InvalidResultError(
             f"{SCRIPT_NAME} does not match the sha256 the child reported"
+        )
+    _validate_audio(result, work_dir)
+
+
+def _validate_audio(result: dict[str, Any], work_dir: Path) -> None:
+    audio = work_dir / AUDIO_NAME
+    try:
+        size = audio.stat().st_size
+    except OSError as exc:
+        raise _InvalidResultError(f"{AUDIO_NAME} unreadable: {exc!r}") from exc
+    if size == 0:
+        raise _InvalidResultError(f"{AUDIO_NAME} is empty")
+    if size != result["audio_bytes"]:
+        raise _InvalidResultError(
+            f"{AUDIO_NAME} is {size} bytes, the child reported {result['audio_bytes']}"
+        )
+    try:
+        digest = sha256_file(audio)
+    except OSError as exc:
+        raise _InvalidResultError(f"{AUDIO_NAME} unreadable: {exc!r}") from exc
+    if digest != result["audio_sha256"]:
+        raise _InvalidResultError(
+            f"{AUDIO_NAME} does not match the sha256 the child reported"
         )
 
 
@@ -446,7 +506,7 @@ def run_episode_in_child(
     _runner: str = DEFAULT_RUNNER,
     _bootstrap: Callable[[], Any] | None = None,
 ) -> ChildOutcome:
-    """Run ``run_episode_to_script`` for one episode in a spawned child, within
+    """Run ``run_episode_to_audio`` for one episode in a spawned child, within
     ``deadline_s`` seconds of wall clock.
 
     One absolute ``time.monotonic()`` deadline; the child honours nothing of it
@@ -489,7 +549,17 @@ def run_episode_in_child(
             work_dir.mkdir(parents=True, exist_ok=True)
             (work_dir / RESULT_NAME).unlink(missing_ok=True)
             (work_dir / STAGE_NAME).unlink(missing_ok=True)
-            _write_json(work_dir / JOB_NAME, item_metadata(source, item))
+            # Old audio must not survive into this run: a failed render would
+            # otherwise leave something a publish could pick up.
+            clear_episode_audio(work_dir)
+            _write_json(
+                work_dir / JOB_NAME,
+                {
+                    **item_metadata(source, item),
+                    "display_title": podcast_identity(source, item).display_title,
+                    "feed_slug": source.feed_slug,
+                },
+            )
         except OSError as exc:
             return outcome(False, type(exc).__name__, str(exc), stage="child")
 

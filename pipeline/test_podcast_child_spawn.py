@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from pipeline import podcast_child as pc
-from pipeline._podcast_child_testing import SCRIPT_TEXT
+from pipeline._podcast_child_testing import AUDIO_BYTES, SCRIPT_TEXT
 from pipeline.podcast_feed import parse_podcast_feed
 from pipeline.podcast_sources import get_podcast_source
 from pipeline.tts._phase_testing import deny_network, pid_gone, wait_for_pid
@@ -95,8 +95,12 @@ def test_happy_runner_is_ok_and_validated(tmp_path, source, item):
         "piece_count": 8,
         "input_tokens": 1000,
         "output_tokens": 200,
+        "audio_sha256": hashlib.sha256(AUDIO_BYTES).hexdigest(),
+        "audio_bytes": len(AUDIO_BYTES),
+        "tts_text_sha256": hashlib.sha256(b"tts text").hexdigest(),
     }
     assert (work / "script.txt").read_text() == SCRIPT_TEXT
+    assert (work / "episode.mp3").read_bytes() == AUDIO_BYTES
     assert out.elapsed_s < GENEROUS_S
 
 
@@ -137,6 +141,49 @@ def test_script_that_differs_from_the_reported_sha_is_invalid(tmp_path, source, 
     out = _run(source, item, tmp_path / "w", "mismatch_runner")
     assert (out.ok, out.reason) == (False, "invalid_result")
     assert "sha256" in out.detail
+
+
+@pytest.mark.parametrize(
+    ("runner", "needle"),
+    [
+        ("audio_mismatch_runner", "sha256"),
+        ("no_audio_runner", "episode.mp3"),
+        ("empty_audio_runner", "empty"),
+    ],
+)
+def test_audio_that_does_not_check_out_is_invalid(
+    tmp_path, source, item, runner, needle
+):
+    out = _run(source, item, tmp_path / "w", runner)
+    assert (out.ok, out.reason) == (False, "invalid_result")
+    assert needle in out.detail
+
+
+def test_old_audio_never_reaches_a_run_and_a_failed_run_leaves_none(
+    tmp_path, source, item
+):
+    work = tmp_path / "w"
+    work.mkdir()
+    (work / "episode.mp3").write_bytes(b"AUDIO FROM AN EARLIER ATTEMPT")
+    (work / "episode.mp3.tmp").write_bytes(b"PARTIAL")
+
+    out = _run(source, item, work, "stale_audio_runner")
+
+    assert (out.ok, out.stage, out.reason) == (False, "render", "RuntimeError")
+    assert (work / "stale_seen.txt").read_text() == "False"
+    assert not (work / "episode.mp3").exists()
+    assert not (work / "episode.mp3.tmp").exists()
+
+
+def test_job_json_carries_display_title_and_feed_slug(tmp_path, source, item):
+    import json
+
+    work = tmp_path / "w"
+    _run(source, item, work, "happy_runner")
+    job = json.loads((work / "job.json").read_text())
+    assert job["feed_slug"] == "yglesias"
+    assert job["display_title"].startswith("Report: 2026-10-")
+    assert item.title in job["display_title"]
 
 
 def test_unresolvable_runner_is_a_child_failure_not_a_hang(tmp_path, source, item):

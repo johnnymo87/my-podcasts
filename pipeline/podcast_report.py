@@ -7,8 +7,10 @@ its "one episode into a work dir" step.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -19,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import requests
 
-from pipeline import opencode_client
+from pipeline import opencode_client, tts
 from pipeline.podcast_download import download_enclosure
 from pipeline.podcast_feed import PodcastItem, parse_podcast_feed
 from pipeline.podcast_transcribe import (
@@ -41,6 +43,7 @@ ITEM_NAME = "item.json"
 SCRIPT_NAME = "script.txt"
 SUMMARY_NAME = "summary.txt"
 ACQUISITION_NAME = "acquisition.json"
+EPISODE_AUDIO_NAME = "episode.mp3"
 
 _RSS_TIMEOUT_S = 30.0  # per read; see FEED_FETCH_DEADLINE_S for the total
 FEED_FETCH_DEADLINE_S = 60  # total wall clock for one feed fetch
@@ -377,4 +380,110 @@ def run_episode_to_script(
         download_s=t1 - t0,
         transcribe_s=t2 - t1,
         write_s=t3 - t2,
+    )
+
+
+@dataclass(frozen=True)
+class EpisodeAudioResult:
+    """What the killable child reports after script *and* audio are done."""
+
+    script_path: Path
+    piece_count: int
+    input_tokens: int
+    output_tokens: int
+    audio_path: Path
+    audio_sha256: str
+    audio_bytes: int
+    tts_text_sha256: str
+
+
+def clear_episode_audio(work_dir: Path) -> None:
+    """Remove ``episode.mp3`` and any partial sibling of it.
+
+    Called at the start of every child run, so a stage that fails can never
+    leave an earlier attempt's audio lying where a publish would pick it up.
+    """
+    for path in work_dir.glob(EPISODE_AUDIO_NAME + "*"):
+        with contextlib.suppress(OSError):
+            path.unlink()
+
+
+def run_episode_to_audio(
+    source: PodcastSource,
+    item: PodcastItem,
+    work_dir: Path,
+    *,
+    display_title: str,
+    feed_slug: str,
+    on_stage: Callable[[str], None] | None = None,
+    carry_context: bool = True,
+    transcriber_factory: Callable[[], Any] | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> EpisodeAudioResult:
+    """The production child's job: ``run_episode_to_script``, then render the
+    script to ``work_dir/episode.mp3``.
+
+    Rendering happens here, inside the killable child, because the single-
+    threaded consumer must never wait on a TTS provider that can trickle. The
+    TTS text is built by the same ``build_tts_text`` ``publish_script`` uses,
+    and ``render_episode`` gets the config, feed and episode id it would get
+    there, so the audio is what a publish would have rendered (and a retry
+    replays the render cache).
+
+    ``episode.mp3`` is written via a tmp file and ``os.replace``, so it exists
+    only when complete. It is deleted first thing (see ``clear_episode_audio``)
+    and again if the render fails.
+    """
+    # Before anything else: whatever happens next, old audio must not survive.
+    work_dir.mkdir(parents=True, exist_ok=True)
+    clear_episode_audio(work_dir)
+    stage = on_stage or (lambda _name: None)
+
+    script = run_episode_to_script(
+        source,
+        item,
+        work_dir,
+        carry_context=carry_context,
+        transcriber_factory=transcriber_factory,
+        progress=progress,
+        on_stage=on_stage,
+    )
+
+    # Imported here: script_processor pulls in the daily processors, which the
+    # dry-run CLI path never needs.
+    from pipeline.podcast_jobs import podcast_identity
+    from pipeline.script_processor import build_tts_text
+
+    stage("render")
+    tts_text = build_tts_text(
+        script.script_path.read_text(encoding="utf-8"),
+        feed_slug=feed_slug,
+        title=display_title,
+    )
+    episode_id = podcast_identity(source, item).slug
+    final = work_dir / EPISODE_AUDIO_NAME
+    tmp = work_dir / (EPISODE_AUDIO_NAME + ".tmp")
+    try:
+        tts.render_episode(
+            tts_text,
+            tts.resolve_render_config(feed_slug),
+            tmp,
+            feed_slug=feed_slug,
+            episode_id=episode_id,
+        )
+        if not tmp.exists() or tmp.stat().st_size == 0:
+            raise RuntimeError("TTS render produced an empty or missing mp3")
+        os.replace(tmp, final)
+    except BaseException:
+        clear_episode_audio(work_dir)
+        raise
+    return EpisodeAudioResult(
+        script_path=script.script_path,
+        piece_count=script.piece_count,
+        input_tokens=script.input_tokens,
+        output_tokens=script.output_tokens,
+        audio_path=final,
+        audio_sha256=sha256_file(final),
+        audio_bytes=final.stat().st_size,
+        tts_text_sha256=hashlib.sha256(tts_text.encode("utf-8")).hexdigest(),
     )

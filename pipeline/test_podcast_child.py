@@ -42,9 +42,29 @@ def work(tmp_path, source, item) -> Path:
     d = tmp_path / "work"
     d.mkdir()
     (d / pc.JOB_NAME).write_text(
-        json.dumps(podcast_report.item_metadata(source, item)), encoding="utf-8"
+        json.dumps(
+            {
+                **podcast_report.item_metadata(source, item),
+                "display_title": "Report: 2026-10-15 - The Argument - Title",
+                "feed_slug": "yglesias",
+            }
+        ),
+        encoding="utf-8",
     )
     return d
+
+
+def _ok_payload(script: bytes = b"script\n", audio: bytes = b"mp3") -> dict:
+    return {
+        "ok": True,
+        "script_sha256": hashlib.sha256(script).hexdigest(),
+        "piece_count": 1,
+        "input_tokens": 2,
+        "output_tokens": 3,
+        "audio_sha256": hashlib.sha256(audio).hexdigest(),
+        "audio_bytes": len(audio),
+        "tts_text_sha256": hashlib.sha256(b"tts").hexdigest(),
+    }
 
 
 def _read(work: Path, name: str) -> dict:
@@ -54,8 +74,8 @@ def _read(work: Path, name: str) -> dict:
 def test_body_rebuilds_the_item_and_writes_an_ok_result(work, source, item):
     seen: dict = {}
 
-    def runner(src, it, wd, *, on_stage=None):
-        seen.update(source=src, item=it, work_dir=wd)
+    def runner(src, it, wd, *, on_stage=None, **job):
+        seen.update(source=src, item=it, work_dir=wd, job=job)
         on_stage("claim")
         on_stage("write")
         script = wd / "script.txt"
@@ -67,19 +87,26 @@ def test_body_rebuilds_the_item_and_writes_an_ok_result(work, source, item):
     assert seen["source"] == source
     assert seen["item"] == item  # frozen dataclass equality: every field survived
     assert seen["work_dir"] == work
+    assert seen["job"] == {
+        "display_title": "Report: 2026-10-15 - The Argument - Title",
+        "feed_slug": "yglesias",
+    }
     assert _read(work, pc.RESULT_NAME) == {
         "ok": True,
         "script_sha256": hashlib.sha256(SCRIPT_TEXT.encode()).hexdigest(),
         "piece_count": 9,
         "input_tokens": 5,
         "output_tokens": 200,
+        "audio_sha256": StubResult.audio_sha256,
+        "audio_bytes": StubResult.audio_bytes,
+        "tts_text_sha256": StubResult.tts_text_sha256,
     }
     assert _read(work, pc.STAGE_NAME) == {"stage": "write"}
     assert not list(work.glob("*.tmp"))
 
 
 def test_transcription_error_carries_reason_code_and_last_stage(work):
-    def runner(src, it, wd, *, on_stage=None):
+    def runner(src, it, wd, *, on_stage=None, **job):
         on_stage("transcribe")
         raise TranscriptionError("key rejected", reason="asr_error", code=400)
 
@@ -95,7 +122,7 @@ def test_transcription_error_carries_reason_code_and_last_stage(work):
 
 
 def test_other_exception_uses_its_type_name(work):
-    def runner(src, it, wd, *, on_stage=None):
+    def runner(src, it, wd, *, on_stage=None, **job):
         on_stage("claim")
         raise RuntimeError("work dir belongs to someone else")
 
@@ -112,7 +139,7 @@ def test_other_exception_uses_its_type_name(work):
 
 
 def test_failure_before_any_stage_reports_the_child_stage(work):
-    def runner(src, it, wd, *, on_stage=None):
+    def runner(src, it, wd, *, on_stage=None, **job):
         raise ValueError("boom")
 
     pc._child_body("argument", work, runner)
@@ -146,7 +173,7 @@ def test_unknown_source_is_bad_job(work):
 
 def test_runner_returning_no_script_is_an_error_not_an_ok(work):
     # A runner that "succeeds" without a script it can point at is not ok.
-    def runner(src, it, wd, *, on_stage=None):
+    def runner(src, it, wd, *, on_stage=None, **job):
         return StubResult(script_path=wd / "missing.txt")
 
     pc._child_body("argument", work, runner)
@@ -281,6 +308,8 @@ def test_parent_writes_job_and_clears_stale_files(monkeypatch, tmp_path, source,
     work.mkdir()
     (work / pc.RESULT_NAME).write_text(json.dumps({"ok": True}))
     (work / pc.STAGE_NAME).write_text(json.dumps({"stage": "write"}))
+    (work / "episode.mp3").write_bytes(b"old audio")
+    (work / "episode.mp3.tmp").write_bytes(b"old partial")
     proc = FakeProc(alive=False, exitcode=1)
     seen = _patch_proc(monkeypatch, proc)
 
@@ -288,14 +317,19 @@ def test_parent_writes_job_and_clears_stale_files(monkeypatch, tmp_path, source,
 
     assert (out.ok, out.reason, out.stage) == (False, "child_no_result", "child")
     assert not (work / pc.RESULT_NAME).exists()
-    assert json.loads((work / pc.JOB_NAME).read_text()) == podcast_report.item_metadata(
-        source, item
-    )
+    assert not (work / "episode.mp3").exists()  # a stale mp3 never survives
+    assert not (work / "episode.mp3.tmp").exists()
+    assert json.loads((work / pc.JOB_NAME).read_text()) == {
+        **podcast_report.item_metadata(source, item),
+        "display_title": "Report: 2026-10-15 - The Argument - "
+        "Canceling (and un-canceling) historic heroes",
+        "feed_slug": "yglesias",
+    }
     key, wd, deadline, ppid, runner, bootstrap = seen["args"]
     assert (key, wd, runner, bootstrap) == (
         "argument",
         str(work),
-        "pipeline.podcast_report:run_episode_to_script",
+        "pipeline.podcast_report:run_episode_to_audio",
         None,
     )
     assert isinstance(deadline, float)
@@ -329,16 +363,9 @@ def test_result_landing_as_the_clock_expires_wins(monkeypatch, tmp_path, source,
         # Only visible once the child has been killed at the deadline.
         if proc.killed:
             (work / "script.txt").write_text(script)
+            (work / "episode.mp3").write_bytes(b"mp3")
             (work / pc.RESULT_NAME).write_text(
-                json.dumps(
-                    {
-                        "ok": True,
-                        "script_sha256": hashlib.sha256(script.encode()).hexdigest(),
-                        "piece_count": 1,
-                        "input_tokens": 2,
-                        "output_tokens": 3,
-                    }
-                )
+                json.dumps(_ok_payload(script.encode(), b"mp3"))
             )
 
     proc = FakeProc()
@@ -412,6 +439,54 @@ def test_ok_result_with_missing_or_empty_script_is_invalid(
     proc.on_join = land
     out = pc.run_episode_in_child(source, item, work, deadline_s=5.0)
     assert (out.ok, out.reason) == (False, "invalid_result")
+
+
+def _land(work, *, script=b"script\n", audio: bytes | None = b"mp3", **override):
+    payload = _ok_payload(script, audio if audio is not None else b"mp3")
+    payload.update(override)
+    work.mkdir(exist_ok=True)
+    (work / "script.txt").write_bytes(script)
+    if audio is not None:
+        (work / "episode.mp3").write_bytes(audio)
+    (work / pc.RESULT_NAME).write_text(json.dumps(payload))
+
+
+def test_ok_result_with_matching_audio_is_ok(monkeypatch, tmp_path, source, item):
+    work = tmp_path / "w"
+    proc = FakeProc()
+    _patch_proc(monkeypatch, proc)
+    proc.on_join = lambda: _land(work)
+    out = pc.run_episode_in_child(source, item, work, deadline_s=5.0)
+    assert out.ok, out
+    assert out.result["audio_bytes"] == 3
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "needle"),
+    [
+        ({"audio": None}, "episode.mp3"),
+        ({"audio": b""}, "empty"),
+        ({"audio_sha256": "0" * 64}, "sha256"),
+        ({"audio_bytes": 99}, "99"),
+        ({"audio_sha256": None}, "audio_sha256"),
+        ({"audio_bytes": "3"}, "audio_bytes"),
+        ({"tts_text_sha256": None}, "tts_text_sha256"),
+    ],
+)
+def test_ok_result_with_bad_audio_is_invalid(
+    monkeypatch, tmp_path, source, item, kwargs, needle
+):
+    work = tmp_path / "w"
+    proc = FakeProc()
+    _patch_proc(monkeypatch, proc)
+    proc.on_join = lambda: _land(work, **kwargs)
+    out = pc.run_episode_in_child(source, item, work, deadline_s=5.0)
+    assert (out.ok, out.reason) == (False, "invalid_result")
+    assert needle in out.detail
+
+
+def test_deadline_is_thirty_minutes():
+    assert pc.CHILD_DEADLINE_S == 1800.0
 
 
 def test_not_ok_result_keeps_stage_reason_code(monkeypatch, tmp_path, source, item):
@@ -539,7 +614,7 @@ def test_an_unwritable_stage_file_does_not_fail_the_episode(
 
     monkeypatch.setattr(pc, "_write_json", flaky)
 
-    def runner(src, it, wd, *, on_stage=None):
+    def runner(src, it, wd, *, on_stage=None, **job):
         on_stage("claim")
         (wd / "script.txt").write_text(SCRIPT_TEXT, encoding="utf-8")
         return StubResult(script_path=wd / "script.txt")
@@ -574,7 +649,7 @@ def test_scrub_happens_before_the_cap_cuts(work):
 def test_child_failure_detail_never_carries_a_signed_url(work):
     from pipeline.podcast_download import DownloadError
 
-    def runner(src, it, wd, *, on_stage=None):
+    def runner(src, it, wd, *, on_stage=None, **job):
         on_stage("download")
         raise DownloadError(f"download failed: ConnectError: {SIGNED}")
 

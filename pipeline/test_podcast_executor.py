@@ -62,6 +62,7 @@ class FakeChild:
         self.calls.append((source.key, item.guid, work_dir))
         work_dir.mkdir(parents=True, exist_ok=True)
         (work_dir / "audio.mp3").write_bytes(b"audio")
+        (work_dir / "episode.mp3").write_bytes(b"rendered")
         (work_dir / "script.txt").write_text("script", encoding="utf-8")
         if self.outcome.ok:
             (work_dir / MANIFEST_NAME).write_text(
@@ -188,6 +189,7 @@ def test_happy_path_completes_stores_stats_deletes_audio(store, work_root):
     }
     work_dir = work_dir_for("argument", item.guid, work_root)
     assert not (work_dir / "audio.mp3").exists()
+    assert not (work_dir / "episode.mp3").exists()
     assert (work_dir / "script.txt").exists()
     assert child.calls == [("argument", item.guid, work_dir)]
     assert publish.calls[0]["work_dir"] == work_dir
@@ -229,6 +231,24 @@ def test_failed_audio_is_kept_for_the_retry(store, work_root):
     _run(store, work_root, FakeChild(work_root, _bad()), Publish(), Alerts())
     work_dir = work_dir_for("argument", item.guid, work_root)
     assert (work_dir / "audio.mp3").exists()
+
+
+def test_one_undeletable_file_does_not_keep_the_other(store, work_root, monkeypatch):
+    item = _admit(store)
+    from pathlib import Path
+
+    real_unlink = Path.unlink
+
+    def unlink(self, *a, **kw):
+        if self.name == "audio.mp3":
+            raise PermissionError("nope")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    _run(store, work_root, FakeChild(work_root), Publish(), Alerts())
+    work_dir = work_dir_for("argument", item.guid, work_root)
+    assert (work_dir / "audio.mp3").exists()
+    assert not (work_dir / "episode.mp3").exists()
 
 
 def test_fourth_failure_errors_with_exactly_one_error_alert(store, work_root):
@@ -535,7 +555,7 @@ def test_audio_delete_failure_does_not_fail_the_job(store, work_root, monkeypatc
     real_unlink = Path.unlink
 
     def unlink(self, *a, **kw):
-        if self.name == "audio.mp3":
+        if self.name in ("audio.mp3", "episode.mp3"):
             raise PermissionError("nope")
         return real_unlink(self, *a, **kw)
 
@@ -626,7 +646,7 @@ def test_stats_collection_raising_does_not_fail_the_job(store, work_root, monkey
 
 def test_failures_use_a_fresh_clock_unless_now_is_injected(store, work_root):
     # Admitted long ago, due at once; backoff must be measured from the real
-    # clock at failure time, not from a stale value taken before a 25 min child.
+    # clock at failure time, not from a stale value taken before a 30 min child.
     item = _item(pub_date=datetime(2019, 1, 1, tzinfo=UTC))
     admit_item(store, SOURCE, item, via="poll", now=datetime(2020, 1, 1, tzinfo=UTC))
     before = datetime.now(UTC)

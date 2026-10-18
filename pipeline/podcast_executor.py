@@ -26,7 +26,7 @@ from pipeline import podcast_child, podcast_publish
 from pipeline.alerts import send_alert
 from pipeline.podcast_child import scrub_detail
 from pipeline.podcast_jobs import PODCAST_WORK_ROOT, item_from_row, work_dir_for
-from pipeline.podcast_report import AUDIO_NAME
+from pipeline.podcast_report import AUDIO_NAME, EPISODE_AUDIO_NAME
 from pipeline.podcast_sources import get_podcast_source
 from pipeline.podcast_transcribe import (
     DURATION_TOLERANCE_FRACTION,
@@ -153,7 +153,7 @@ def run_one_podcast_episode(
     injected_now = now
 
     def clock() -> datetime:
-        # A job can take 25 minutes in the child: failure backoff is measured
+        # A job can take 30 minutes in the child: failure backoff is measured
         # from when the failure happens, not from when the row was selected.
         return injected_now or datetime.now(UTC)
 
@@ -237,10 +237,11 @@ def run_one_podcast_episode(
     except Exception as exc:  # noqa: BLE001
         return fail(f"complete: {type(exc).__name__}: {exc}")
 
-    try:
-        (work_dir / AUDIO_NAME).unlink(missing_ok=True)
-    except OSError as exc:
-        logger.warning("%s: could not delete %s: %r", label, AUDIO_NAME, exc)
+    for name in (AUDIO_NAME, EPISODE_AUDIO_NAME):
+        try:
+            (work_dir / name).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("%s: could not delete %s: %r", label, name, exc)
 
     if _headroom_used(stats):
         sent = _safe_alert(

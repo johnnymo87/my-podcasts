@@ -27,14 +27,19 @@ ITEM = PodcastItem(
 )
 
 
+AUDIO = b"\xff\xfb\x90\x00" * 40
+
+
 class FakeR2:
     def __init__(self) -> None:
+        self.uploaded_bytes: list[bytes] = []
         self.uploads: list[tuple[str, str]] = []
         self.puts: list[str] = []
         self.fail_put_once = False
 
     def upload_file(self, path, key, content_type=None):
         assert Path(path).exists()
+        self.uploaded_bytes.append(Path(path).read_bytes())
         self.uploads.append((key, content_type))
 
     def put_object_bytes(self, key, data, content_type=None):
@@ -64,6 +69,7 @@ def _setup(tmp_path, store, *, summary: str | None = "A tight summary."):
     work = tmp_path / "work"
     work.mkdir()
     (work / "script.txt").write_text("Welcome to the briefing.", encoding="utf-8")
+    (work / "episode.mp3").write_bytes(AUDIO)  # rendered in the child
     if summary is not None:
         (work / "summary.txt").write_text(summary, encoding="utf-8")
     return row, work
@@ -85,9 +91,39 @@ def test_happy_path_publishes_one_episode(tmp_path, store, fake_tts_render):
     assert ep.summary == "A tight summary."
     assert "unofficial" in ep.show_notes_html.lower()
     assert "feed.xml" in r2.puts and "feeds/yglesias.xml" in r2.puts
-    assert len(fake_tts_render) == 1
-    assert fake_tts_render[0]["feed_slug"] == "yglesias"
-    assert fake_tts_render[0]["episode_id"] == row["episode_slug"]
+    # The parent never renders: it uploads the file the child produced.
+    assert fake_tts_render == []
+    assert r2.uploaded_bytes == [AUDIO]
+    assert ep.size_bytes == len(AUDIO)
+    assert (work / "episode.mp3").read_bytes() == AUDIO  # left for the executor
+
+
+@pytest.mark.parametrize("damage", ["missing", "empty"])
+def test_no_rendered_audio_refuses_before_any_upload(
+    tmp_path, store, fake_tts_render, damage
+):
+    row, work = _setup(tmp_path, store)
+    if damage == "missing":
+        (work / "episode.mp3").unlink()
+    else:
+        (work / "episode.mp3").write_bytes(b"")
+    r2 = FakeR2()
+
+    with pytest.raises(RuntimeError, match="episode.mp3"):
+        publish_podcast_episode(row, work, store=store, r2_client=r2)
+
+    assert fake_tts_render == []  # never falls back to rendering in the parent
+    assert r2.uploads == []
+    assert store.list_episodes() == []
+
+
+def test_reconcile_does_not_need_the_audio(tmp_path, store, fake_tts_render):
+    row, work = _setup(tmp_path, store)
+    publish_podcast_episode(row, work, store=store, r2_client=FakeR2())
+    (work / "episode.mp3").unlink()  # the executor deletes it on completion
+    r2 = FakeR2()
+    assert publish_podcast_episode(row, work, store=store, r2_client=r2) == "reconciled"
+    assert r2.uploads == []
 
 
 def test_show_notes_content(tmp_path, store, fake_tts_render):
@@ -138,6 +174,7 @@ def test_no_link_publishes_without_source_url(tmp_path, store, fake_tts_render):
     work = tmp_path / "w2"
     work.mkdir()
     (work / "script.txt").write_text("Body.", encoding="utf-8")
+    (work / "episode.mp3").write_bytes(AUDIO)
     publish_podcast_episode(row, work, store=store, r2_client=FakeR2())
     [ep] = store.list_episodes(feed_slug="yglesias")
     assert ep.source_url is None
@@ -169,7 +206,7 @@ def test_failure_after_audio_upload_retry_reinserts_exactly_once(
 
     assert [k for k, _ in r2.uploads] == [row["r2_key"]] * 2
     assert len(store.list_episodes(feed_slug="yglesias")) == 1
-    assert len(fake_tts_render) == 2
+    assert fake_tts_render == []
 
 
 def test_failure_after_db_commit_retry_reconciles_without_tts(
@@ -200,7 +237,7 @@ def test_failure_after_db_commit_retry_reconciles_without_tts(
     assert publish_podcast_episode(row, work, store=store, r2_client=r2) == "reconciled"
 
     assert len(store.list_episodes(feed_slug="yglesias")) == 1
-    assert len(fake_tts_render) == 1
+    assert fake_tts_render == []
     assert [k for k, _ in r2.uploads] == [row["r2_key"]]
     assert "feeds/yglesias.xml" in r2.puts
 
@@ -217,7 +254,7 @@ def test_failure_during_feed_upload_retry_reconciles(tmp_path, store, fake_tts_r
     assert publish_podcast_episode(row, work, store=store, r2_client=r2) == "reconciled"
 
     assert len(store.list_episodes(feed_slug="yglesias")) == 1
-    assert len(fake_tts_render) == 1
+    assert fake_tts_render == []
     assert "feed.xml" in r2.puts and "feeds/yglesias.xml" in r2.puts
 
 

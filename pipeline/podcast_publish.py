@@ -1,10 +1,12 @@
 """Publish one podcast-report episode, safely re-runnable.
 
-``publish_script`` is not idempotent: it renders, uploads audio, inserts the
-``episodes`` row, then regenerates and uploads every feed. A failure in the
-middle leaves some of that done. A retry must therefore reconcile, not repeat:
-the episode's ``r2_key`` (frozen on the job row at admission) says whether the
-row is already committed, in which case only the feeds are (re)uploaded.
+``publish_script`` is not idempotent: it uploads audio, inserts the ``episodes``
+row, then regenerates and uploads every feed. The audio was rendered earlier,
+inside the killable child (``work_dir/episode.mp3``): the parent never waits on
+a TTS provider. A failure in the middle leaves some of that done. A retry must
+therefore reconcile, not repeat: the episode's ``r2_key`` (frozen on the job row
+at admission) says whether the row is already committed, in which case only the
+feeds are (re)uploaded.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from pipeline.feed import regenerate_and_upload_feed
 from pipeline.podcast_jobs import item_from_row, podcast_identity
-from pipeline.podcast_report import SUMMARY_NAME
+from pipeline.podcast_report import EPISODE_AUDIO_NAME, SUMMARY_NAME
 from pipeline.podcast_sources import get_podcast_source
 from pipeline.report_engine import persist_raw_output
 from pipeline.script_processor import publish_script
@@ -105,6 +107,17 @@ def publish_podcast_episode(
         regenerate_and_upload_feed(store, r2_client)
         return "reconciled"
 
+    audio = work_dir / EPISODE_AUDIO_NAME
+    try:
+        audio_size = audio.stat().st_size
+    except OSError as exc:
+        raise RuntimeError(
+            f"no rendered audio at {audio} ({exc!r}); the child renders it, the "
+            "parent never does"
+        ) from exc
+    if audio_size == 0:
+        raise RuntimeError(f"rendered audio {audio} is empty")
+
     show_notes_file = work_dir / SHOW_NOTES_NAME
     persist_raw_output(show_notes_file, _show_notes(source, item, work_dir))
     result = publish_script(
@@ -117,6 +130,7 @@ def publish_podcast_episode(
         category=CATEGORY,
         date_str=ident.date_str,
         source_url=item.link or None,
+        prerendered_audio=audio,
     )
     if result.r2_key != row["r2_key"]:
         raise RuntimeError(
