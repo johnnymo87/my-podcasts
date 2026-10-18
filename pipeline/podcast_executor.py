@@ -79,6 +79,20 @@ def _read_manifest(work_dir: Path) -> dict[str, Any]:
     return manifest if isinstance(manifest, dict) else {}
 
 
+def _blank_stats(child_elapsed_s: float, mode: str) -> dict:
+    return {
+        "decoded_duration_s": None,
+        "rss_duration_s": None,
+        "decoded_minus_rss_s": None,
+        "allowed_s": None,
+        "pieces": None,
+        "input_tokens": None,
+        "output_tokens": None,
+        "child_elapsed_s": round(child_elapsed_s, 3),
+        "publish": mode,
+    }
+
+
 def collect_stats(work_dir: Path, *, child_elapsed_s: float, mode: str) -> dict:
     """Run statistics for ``stats_json``. Unknown values are ``None``."""
     manifest = _read_manifest(work_dir)
@@ -88,22 +102,22 @@ def collect_stats(work_dir: Path, *, child_elapsed_s: float, mode: str) -> dict:
     if not isinstance(pieces, list):
         pieces = None
 
+    stats = _blank_stats(child_elapsed_s, mode)
     diff = allowed = None
     if decoded is not None and rss is not None:
         diff = round(decoded - rss, 3)
         # Same formula as podcast_transcribe._check_duration.
         allowed = max(DURATION_TOLERANCE_MIN_S, DURATION_TOLERANCE_FRACTION * rss)
-    return {
-        "decoded_duration_s": decoded,
-        "rss_duration_s": rss,
-        "decoded_minus_rss_s": diff,
-        "allowed_s": allowed,
-        "pieces": len(pieces) if pieces is not None else None,
-        "input_tokens": _sum_tokens(pieces, "input_tokens") if pieces else None,
-        "output_tokens": _sum_tokens(pieces, "output_tokens") if pieces else None,
-        "child_elapsed_s": round(child_elapsed_s, 3),
-        "publish": mode,
-    }
+    stats.update(
+        decoded_duration_s=decoded,
+        rss_duration_s=rss,
+        decoded_minus_rss_s=diff,
+        allowed_s=allowed,
+        pieces=len(pieces) if pieces is not None else None,
+        input_tokens=_sum_tokens(pieces, "input_tokens") if pieces else None,
+        output_tokens=_sum_tokens(pieces, "output_tokens") if pieces else None,
+    )
+    return stats
 
 
 def _headroom_used(stats: dict) -> bool:
@@ -132,11 +146,18 @@ def run_one_podcast_episode(
 
     Outcomes: ``published`` / ``reconciled`` (completed), ``failed (n)`` (back
     to pending), ``errored (n)`` (retry budget spent, or a terminal failure),
-    ``failure not recorded`` (the database refused the failure itself; the row
-    stays ``in_progress`` until the next consumer start re-queues it).
+    ``failure not recorded`` (the database refused the failure itself; one
+    error alert is attempted and the row stays ``in_progress`` until the next
+    consumer start re-queues it).
     """
-    now = now or datetime.now(UTC)
-    row = store.next_due_podcast_episode(now)
+    injected_now = now
+
+    def clock() -> datetime:
+        # A job can take 25 minutes in the child: failure backoff is measured
+        # from when the failure happens, not from when the row was selected.
+        return injected_now or datetime.now(UTC)
+
+    row = store.next_due_podcast_episode(clock())
     if row is None:
         return None
     source_key, guid = row["source"], row["guid"]
@@ -150,15 +171,22 @@ def run_one_podcast_episode(
         error = scrub_detail(error)
         try:
             retry = store.fail_podcast_episode(
-                source_key, guid, error, now=now, terminal=terminal
+                source_key, guid, error, now=clock(), terminal=terminal
             )
         except Exception:  # noqa: BLE001 -- see the docstring
             logger.exception("%s: could not record failure %r", label, error)
+            sent = _safe_alert(
+                alert,
+                f"could not record failure for {label}; row stuck in_progress "
+                f"until consumer restart: {error}",
+                "error",
+            )
+            print(f"podcast-report {label}: failure not recorded, alert sent={sent}")
             return f"{label}: failure not recorded"
-        outcome = f"{'errored' if retry.status == 'errored' else 'failed'}"
-        outcome += f" ({retry.failure_count})"
-        logger.warning("%s: %s: %s", label, outcome, error)
-        print(f"podcast-report {label}: {outcome}: {error}")
+        verdict = "errored" if retry.status == "errored" else "failed"
+        verdict += f" ({retry.failure_count})"
+        logger.warning("%s: %s: %s", label, verdict, error)
+        print(f"podcast-report {label}: {verdict}: {error}")
         if retry.exhausted:
             sent = _safe_alert(
                 alert,
@@ -167,7 +195,7 @@ def run_one_podcast_episode(
                 "error",
             )
             print(f"podcast-report {label}: give-up alert sent={sent}")
-        return f"{label}: {outcome}"
+        return f"{label}: {verdict}"
 
     try:
         source = get_podcast_source(source_key)
@@ -177,26 +205,34 @@ def run_one_podcast_episode(
         return fail(f"setup: {type(exc).__name__}: {exc}")
 
     try:
-        outcome = run_child(source, item, work_dir)
+        child = run_child(source, item, work_dir)
     except Exception as exc:  # noqa: BLE001 -- never raise for a job failure
         return fail(f"child: {type(exc).__name__}: {exc}")
 
-    if not outcome.ok:
-        terminal = outcome.stage == "claim" or outcome.code == TERMINAL_HTTP_CODE
-        return fail(
-            f"{outcome.stage}: {outcome.reason}: {outcome.detail}", terminal=terminal
-        )
+    if not child.ok:
+        terminal = child.stage == "claim" or child.code == TERMINAL_HTTP_CODE
+        return fail(f"{child.stage}: {child.reason}: {child.detail}", terminal=terminal)
 
     try:
         mode = publish(row, work_dir, store=store, r2_client=r2_client)
     except Exception as exc:  # noqa: BLE001
         return fail(f"publish: {type(exc).__name__}: {exc}")
 
-    # Published. From here on nothing may undo that: stats are best-effort, and
-    # if recording completion itself fails the row goes back to pending so the
-    # next attempt reconciles (finds the episode committed, re-sends feeds only).
+    # Published. From here on nothing may undo that. Stats are best-effort
+    # and get their own guard, so a bug there cannot turn a live episode into
+    # a failed job.
     try:
-        stats = collect_stats(work_dir, child_elapsed_s=outcome.elapsed_s, mode=mode)
+        stats = collect_stats(work_dir, child_elapsed_s=child.elapsed_s, mode=mode)
+    except Exception:  # noqa: BLE001
+        logger.exception("%s: stats collection failed; completing without", label)
+        stats = _blank_stats(child.elapsed_s, mode)
+
+    # If recording completion itself fails, the row goes back to pending so the
+    # next attempt reconciles (finds the episode committed, re-sends feeds only,
+    # no TTS). Rare corner: if that was already the 4th failure the row becomes
+    # 'errored' although the episode is live. The give-up alert then names the
+    # complete: error, and `podcast-report reset` is safe (it reconciles).
+    try:
         store.complete_podcast_episode(source_key, guid, stats=stats)
     except Exception as exc:  # noqa: BLE001
         return fail(f"complete: {type(exc).__name__}: {exc}")

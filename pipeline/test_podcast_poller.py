@@ -34,6 +34,13 @@ class Alerts:
         return self.result
 
 
+@pytest.fixture(autouse=True)
+def _fresh_collision_memory():
+    podcast_poller._ALERTED_COLLISIONS.clear()
+    yield
+    podcast_poller._ALERTED_COLLISIONS.clear()
+
+
 @pytest.fixture
 def store(tmp_path):
     s = StateStore(tmp_path / "test.db")
@@ -234,3 +241,91 @@ def test_collisions_across_sources_share_one_alert(store, monkeypatch):
     alerts = Alerts()
     discover(store, now=NOW, fetch=_fetch_ok, alert=alerts, sources=[a, b])
     assert len(alerts.calls) == 1
+
+
+def test_permanent_collision_alerts_once_across_ticks(store, monkeypatch):
+    def admit(store_, source_, item, **kw):
+        raise sqlite3.IntegrityError("UNIQUE constraint failed: r2_key")
+
+    monkeypatch.setattr(podcast_poller, "admit_item", admit)
+    alerts = Alerts()
+    kwargs = {"fetch": _fetch_ok, "alert": alerts, "sources": [SOURCE]}
+    discover(store, now=NOW, **kwargs)
+    discover(store, now=NOW, **kwargs)
+    discover(store, now=NOW, **kwargs)
+    assert len(alerts.calls) == 1
+
+
+def test_a_new_collision_alerts_again_naming_only_the_new_one(store, monkeypatch):
+    source = dataclasses.replace(SOURCE, since=datetime(2026, 10, 1, tzinfo=UTC))
+    colliding = {MIDDLE}
+
+    def admit(store_, source_, item, **kw):
+        if item.guid in colliding:
+            raise sqlite3.IntegrityError("UNIQUE constraint failed: r2_key")
+        return False
+
+    monkeypatch.setattr(podcast_poller, "admit_item", admit)
+    alerts = Alerts()
+    kwargs = {"fetch": _fetch_ok, "alert": alerts, "sources": [source]}
+    discover(store, now=NOW, **kwargs)
+    colliding.add(NEWEST)
+    discover(store, now=NOW, **kwargs)
+    assert len(alerts.calls) == 2
+    assert NEWEST in alerts.calls[1][0]
+    assert MIDDLE not in alerts.calls[1][0]
+
+
+class _HealthRaises:
+    """A store whose health bookkeeping fails; everything else is real."""
+
+    def __init__(self, real, fail_ok=True, fail_failure=True):
+        self._real = real
+        self.fail_ok = fail_ok
+        self.fail_failure = fail_failure
+        self.record_calls = 0
+
+    def record_podcast_discovery(self, source, *, ok, error, now):
+        self.record_calls += 1
+        if (ok and self.fail_ok) or (not ok and self.fail_failure):
+            raise sqlite3.OperationalError("database is locked")
+        return self._real.record_podcast_discovery(source, ok=ok, error=error, now=now)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_health_recording_failing_on_failure_path_does_not_stop_other_sources(store):
+    bad = dataclasses.replace(SOURCE, key="bad", rss_url="https://bad.example/rss")
+    good = dataclasses.replace(
+        SOURCE, key="good", rss_url="https://good.example/rss", feed_slug="other"
+    )
+
+    def fetch(url: str) -> str:
+        if "bad" in url:
+            raise ConnectionError("down")
+        return FEED_XML
+
+    wrapped = _HealthRaises(store, fail_ok=False, fail_failure=True)
+    counts = discover(
+        wrapped, now=NOW, fetch=fetch, alert=Alerts(), sources=[bad, good]
+    )
+    assert counts == {"bad": 0, "good": 1}
+    assert [r["source"] for r in store.list_podcast_episodes()] == ["good"]
+    assert wrapped.record_calls == 2
+
+
+def test_health_recording_failing_on_success_path_is_contained(store):
+    other = dataclasses.replace(SOURCE, key="other", feed_slug="other")
+    wrapped = _HealthRaises(store, fail_ok=True, fail_failure=True)
+    counts = discover(
+        wrapped, now=NOW, fetch=_fetch_ok, alert=Alerts(), sources=[SOURCE, other]
+    )
+    # Admission happened; the bookkeeping failure is logged, not raised.
+    assert counts == {"argument": 1, "other": 1}
+    assert wrapped.record_calls == 2
+
+
+def test_discover_never_raises_for_a_source(store):
+    wrapped = _HealthRaises(store)
+    discover(wrapped, now=NOW, fetch=_raising, alert=Alerts(), sources=[SOURCE])

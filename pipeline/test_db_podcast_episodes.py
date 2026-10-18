@@ -290,7 +290,8 @@ def test_recover_flips_only_in_progress(store):
     store.claim_podcast_episode("argument", "busy2")
     store.complete_podcast_episode("argument", "done", stats=None)
     store.fail_podcast_episode("argument", "err", "x", now=NOW, terminal=True)
-    assert store.recover_interrupted_podcast_episodes() == 2
+    recovered = store.recover_interrupted_podcast_episodes()
+    assert sorted(r["guid"] for r in recovered) == ["busy1", "busy2"]
     statuses = {r["guid"]: r["status"] for r in store.list_podcast_episodes()}
     assert statuses == {
         "pend": "pending",
@@ -299,19 +300,50 @@ def test_recover_flips_only_in_progress(store):
         "done": "completed",
         "err": "errored",
     }
-    assert store.recover_interrupted_podcast_episodes() == 0
+    assert store.recover_interrupted_podcast_episodes() == []
 
 
-def test_recover_keeps_next_attempt_and_failure_count(store):
+def test_recover_returns_row_summaries(store):
+    _admit(store)
+    store.claim_podcast_episode("argument", "g1")
+    row = store.get_podcast_episode("argument", "g1")
+    assert store.recover_interrupted_podcast_episodes() == [
+        {
+            "source": "argument",
+            "guid": "g1",
+            "display_title": row["display_title"],
+            "failure_count": 1,
+            "status": "pending",
+        }
+    ]
+
+
+def test_recover_counts_an_interruption_as_a_failure(store):
     _admit(store)
     store.fail_podcast_episode("argument", "g1", "e", now=NOW)
     row = store.get_podcast_episode("argument", "g1")
     store.claim_podcast_episode("argument", "g1")
-    assert store.recover_interrupted_podcast_episodes() == 1
+    assert len(store.recover_interrupted_podcast_episodes()) == 1
     after = store.get_podcast_episode("argument", "g1")
     assert after["next_attempt_at"] == row["next_attempt_at"]
-    assert after["failure_count"] == 1
+    assert after["failure_count"] == 2
+    assert after["last_error"] == "interrupted: consumer stopped mid-run"
     assert after["status"] == "pending"
+
+
+def test_recover_errors_a_row_that_exhausts_its_budget(store):
+    """A job that crashes the consumer every time must not loop forever."""
+    _admit(store)
+    for expected in range(1, PODCAST_MAX_FAILURES + 1):
+        assert store.claim_podcast_episode("argument", "g1")
+        (rec,) = store.recover_interrupted_podcast_episodes()
+        assert rec["failure_count"] == expected
+        if expected < PODCAST_MAX_FAILURES:
+            assert rec["status"] == "pending"
+    assert rec["status"] == "errored"
+    assert store.get_podcast_episode("argument", "g1")["status"] == "errored"
+    assert store.next_due_podcast_episode(NOW + timedelta(days=30)) is None
+    assert store.recover_interrupted_podcast_episodes() == []
 
 
 def test_recover_makes_just_claimed_row_run_at_once(store):

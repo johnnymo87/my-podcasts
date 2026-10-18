@@ -42,6 +42,15 @@ class Alerts:
         return self.result
 
 
+class ExplodingAlerts:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, text: str, severity: str = "info") -> bool:
+        self.calls.append((text, severity))
+        raise RuntimeError("pigeon down")
+
+
 class FakeChild:
     def __init__(self, work_root, outcome: ChildOutcome | None = None, **manifest):
         self.work_root = work_root
@@ -320,14 +329,86 @@ def test_child_raising_is_a_failure_not_a_crash(store, work_root):
     assert row["last_error"].startswith("child: OSError: disk on fire")
 
 
-def test_keyboard_interrupt_from_child_propagates(store, work_root):
-    _admit(store)
+def test_keyboard_interrupt_from_child_propagates_and_leaves_row_in_progress(
+    store, work_root
+):
+    item = _admit(store)
+    alerts = Alerts()
 
     def child(source, item, work_dir):
         raise KeyboardInterrupt
 
     with pytest.raises(KeyboardInterrupt):
-        _run(store, work_root, child, Publish(), Alerts())
+        _run(store, work_root, child, Publish(), alerts)
+    row = store.get_podcast_episode("argument", item.guid)
+    assert row["status"] == "in_progress"
+    assert row["failure_count"] == 0
+    assert alerts.calls == []
+    # What the consumer does on its next start (counted as an interruption).
+    (rec,) = store.recover_interrupted_podcast_episodes()
+    assert rec["guid"] == item.guid and rec["status"] == "pending"
+
+
+def test_keyboard_interrupt_from_publish_propagates(store, work_root):
+    item = _admit(store)
+    with pytest.raises(KeyboardInterrupt):
+        _run(
+            store,
+            work_root,
+            FakeChild(work_root),
+            Publish(exc=KeyboardInterrupt()),
+            Alerts(),
+        )
+    assert store.get_podcast_episode("argument", item.guid)["status"] == "in_progress"
+
+
+def test_corrupt_item_json_is_a_setup_failure(store, work_root):
+    item = _admit(store)
+    store._conn.execute(
+        "UPDATE podcast_episodes SET item_json = '{not json' WHERE guid = ?",
+        (item.guid,),
+    )
+    store._conn.commit()
+    child = FakeChild(work_root)
+    result = _run(store, work_root, child, Publish(), Alerts())
+    assert result == f"argument/{item.guid}: failed (1)"
+    row = store.get_podcast_episode("argument", item.guid)
+    assert row["status"] == "pending"
+    assert row["last_error"].startswith("setup: JSONDecodeError")
+    assert child.calls == []
+
+
+def test_unknown_source_is_a_setup_failure(store, work_root):
+    store.admit_podcast_episode(
+        source="nosuch",
+        guid="g",
+        item_json="{}",
+        pub_date="2026-10-10T09:00:00+00:00",
+        display_title="t",
+        episode_slug="s",
+        r2_key="episodes/x/s.mp3",
+        admitted_via="poll",
+        now=NOW - timedelta(hours=1),
+    )
+    child = FakeChild(work_root)
+    result = _run(store, work_root, child, Publish(), Alerts())
+    assert result == "nosuch/g: failed (1)"
+    row = store.get_podcast_episode("nosuch", "g")
+    assert row["last_error"].startswith("setup: KeyError")
+    assert child.calls == []
+
+
+def test_exhaustion_alert_text_has_no_signed_url(store, work_root):
+    _admit(store)
+    alerts = Alerts()
+    child = FakeChild(
+        work_root,
+        _bad(stage="claim", detail="GET https://cdn.example/a.mp3?sig=SECRET failed"),
+    )
+    _run(store, work_root, child, Publish(), alerts)
+    assert len(alerts.calls) == 1
+    assert "SECRET" not in alerts.calls[0][0]
+    assert "https://cdn.example/a.mp3" in alerts.calls[0][0]
 
 
 def test_headroom_over_75_percent_sends_one_info_alert(store, work_root):
@@ -378,23 +459,19 @@ def test_short_episode_uses_the_two_minute_floor(store, work_root):
 
 def test_info_alert_failing_to_send_does_not_fail_the_job(store, work_root):
     item = _admit(store)
-
-    def exploding(text, severity="info"):
-        raise RuntimeError("pigeon down")
-
+    exploding = ExplodingAlerts()
     _run(store, work_root, FakeChild(work_root, decoded=5320.0), Publish(), exploding)
     assert store.get_podcast_episode("argument", item.guid)["status"] == "completed"
+    assert [sev for _, sev in exploding.calls] == ["info"]
 
 
 def test_exhaustion_alert_failing_to_send_still_errors_the_row(store, work_root):
     item = _admit(store)
-
-    def exploding(text, severity="info"):
-        raise RuntimeError("pigeon down")
-
+    exploding = ExplodingAlerts()
     child = FakeChild(work_root, _bad(stage="claim"))
     _run(store, work_root, child, Publish(), exploding)
     assert store.get_podcast_episode("argument", item.guid)["status"] == "errored"
+    assert [sev for _, sev in exploding.calls] == ["error"]
 
 
 @pytest.mark.parametrize("kind", ["missing", "garbage", "wrong_shape"])
@@ -487,17 +564,116 @@ def test_complete_raising_after_publish_is_recorded_as_a_failure(
     assert (work_dir / "audio.mp3").exists()
 
 
-def test_failure_recording_raising_is_contained(store, work_root, monkeypatch):
+def test_failure_recording_raising_is_contained_and_alerted(
+    store, work_root, monkeypatch
+):
+    item = _admit(store)
+
+    def boom(*a, **kw):
+        raise RuntimeError("db is locked https://x/y.mp3?sig=SECRET")
+
+    monkeypatch.setattr(store, "fail_podcast_episode", boom)
+    alerts = Alerts()
+    result = _run(store, work_root, FakeChild(work_root, _bad()), Publish(), alerts)
+    assert result == f"argument/{item.guid}: failure not recorded"
+    # Left in_progress: the next consumer start recovers it.
+    assert store.get_podcast_episode("argument", item.guid)["status"] == "in_progress"
+    assert len(alerts.calls) == 1
+    text, severity = alerts.calls[0]
+    assert severity == "error"
+    assert text.startswith(
+        f"could not record failure for argument/{item.guid}; "
+        "row stuck in_progress until consumer restart: "
+    )
+    assert "transcribe: deadline" in text
+    assert "SECRET" not in text
+
+
+def test_failure_recording_and_alert_both_raising_is_still_contained(
+    store, work_root, monkeypatch
+):
     item = _admit(store)
 
     def boom(*a, **kw):
         raise RuntimeError("db is locked")
 
     monkeypatch.setattr(store, "fail_podcast_episode", boom)
-    result = _run(store, work_root, FakeChild(work_root, _bad()), Publish(), Alerts())
+    exploding = ExplodingAlerts()
+    result = _run(store, work_root, FakeChild(work_root, _bad()), Publish(), exploding)
     assert result == f"argument/{item.guid}: failure not recorded"
-    # Left in_progress: the next consumer start recovers it.
-    assert store.get_podcast_episode("argument", item.guid)["status"] == "in_progress"
+    assert len(exploding.calls) == 1
+
+
+def test_stats_collection_raising_does_not_fail_the_job(store, work_root, monkeypatch):
+    item = _admit(store)
+
+    def boom(*a, **kw):
+        raise RuntimeError("stats exploded")
+
+    monkeypatch.setattr("pipeline.podcast_executor.collect_stats", boom)
+    alerts = Alerts()
+    result = _run(store, work_root, FakeChild(work_root), Publish(), alerts)
+    assert result == f"argument/{item.guid}: published"
+    row = store.get_podcast_episode("argument", item.guid)
+    assert row["status"] == "completed"
+    stats = json.loads(row["stats_json"])
+    assert stats["decoded_duration_s"] is None
+    assert stats["pieces"] is None
+    assert stats["child_elapsed_s"] == 12.5
+    assert stats["publish"] == "published"
+    assert alerts.calls == []
+
+
+def test_failures_use_a_fresh_clock_unless_now_is_injected(store, work_root):
+    # Admitted long ago, due at once; backoff must be measured from the real
+    # clock at failure time, not from a stale value taken before a 25 min child.
+    item = _item(pub_date=datetime(2019, 1, 1, tzinfo=UTC))
+    admit_item(store, SOURCE, item, via="poll", now=datetime(2020, 1, 1, tzinfo=UTC))
+    before = datetime.now(UTC)
+    run_one_podcast_episode(
+        store,
+        "r2",
+        run_child=FakeChild(work_root, _bad()),
+        publish=Publish(),
+        alert=Alerts(),
+        work_root=work_root,
+    )
+    after = datetime.now(UTC)
+    row = store.get_podcast_episode("argument", item.guid)
+    due = datetime.fromisoformat(row["next_attempt_at"])
+    assert before + PODCAST_RETRY_BACKOFF <= due <= after + PODCAST_RETRY_BACKOFF
+
+
+def test_clock_is_re_read_after_the_child_runs(store, work_root, monkeypatch):
+    item = _item(pub_date=datetime(2019, 1, 1, tzinfo=UTC))
+    admit_item(store, SOURCE, item, via="poll", now=datetime(2020, 1, 1, tzinfo=UTC))
+    import pipeline.podcast_executor as ex
+
+    times = iter(
+        [
+            datetime(2026, 10, 18, 12, 0, tzinfo=UTC),  # selecting the row
+            datetime(2026, 10, 18, 12, 25, tzinfo=UTC),  # recording the failure
+        ]
+    )
+
+    class _Clock:
+        @staticmethod
+        def now(tz=None):
+            return next(times)
+
+    monkeypatch.setattr(ex, "datetime", _Clock)
+    run_one_podcast_episode(
+        store,
+        "r2",
+        run_child=FakeChild(work_root, _bad()),
+        publish=Publish(),
+        alert=Alerts(),
+        work_root=work_root,
+    )
+    row = store.get_podcast_episode("argument", item.guid)
+    assert datetime.fromisoformat(row["next_attempt_at"]) == datetime(
+        2026, 10, 18, 18, 25, tzinfo=UTC
+    )
 
 
 def test_two_due_rows_one_call_runs_only_the_oldest(store, work_root):

@@ -262,8 +262,12 @@ need no clock patching; every write commits):
   `next_attempt_at now`; `completed`/`in_progress` -> `ValueError` (re-publishing
   is not supported; in_progress means the consumer is on it); unknown ->
   `KeyError`.
-- `recover_interrupted_podcast_episodes() -> int` — `in_progress -> pending`
-  (keep `next_attempt_at`, so it runs at once); returns count.
+- `recover_interrupted_podcast_episodes() -> list[dict]` — `in_progress ->
+  pending`, counting the interruption as a failure (`failure_count + 1`,
+  `last_error "interrupted: consumer stopped mid-run"`; the
+  `PODCAST_MAX_FAILURES`-th makes it `errored`, so a job that kills the
+  consumer cannot crash-loop). Keeps `next_attempt_at` (runs at once). Returns
+  `{source, guid, display_title, failure_count, status}` per recovered row.
 - `record_podcast_discovery(source, *, ok: bool, error: str | None, now) ->
   tuple[int, bool]` — ok: count 0, `alerted 0`, `last_success_at now`; failure:
   count+1, `last_error`. Returns `(consecutive_failures, should_alert)` where
@@ -441,7 +445,9 @@ alert and still completed; two due rows -> one call runs only the oldest.
   completion of the attempt), then `run_one_podcast_episode` (own try/except).
   Called once per loop iteration after the blog poll.
 - At the top of `consume_forever` (before `while True`): `n =
-  store.recover_interrupted_podcast_episodes()` in try/except; print when n > 0.
+  store.recover_interrupted_podcast_episodes()` in try/except; print when the
+  list is non-empty, and send one `error` alert naming each row that came back
+  `status == "errored"` (the interruption exhausted its budget).
 - Tests: `_podcast_tick` calls discovery on the first tick and not again within
   6 h, again after; a discovery exception does not prevent the executor call;
   an executor exception does not propagate; `consume_forever` calls recovery

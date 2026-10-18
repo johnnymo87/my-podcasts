@@ -25,6 +25,12 @@ from pipeline.podcast_sources import PODCAST_SOURCES, PodcastSource
 
 logger = logging.getLogger(__name__)
 
+# (source, guid) r2_key collisions already alerted in this process. A collision
+# is permanent (the identity is frozen from the feed item), so without this the
+# same alert would repeat every 6-hour tick. Cleared by a consumer restart,
+# which re-alerts once: acceptable, and better than silence after a restart.
+_ALERTED_COLLISIONS: set[tuple[str, str]] = set()
+
 
 def _safe_alert(alert: Callable[..., bool], text: str, severity: str) -> bool:
     """Send an alert; an alert that cannot be sent must not abort discovery."""
@@ -41,7 +47,7 @@ def _tick(
     *,
     now: datetime,
     fetch: Callable[[str], str],
-    collisions: list[str],
+    collisions: list[tuple[str, str]],
 ) -> int:
     """One fetch+parse+admit pass for ``source``; returns the admitted count.
 
@@ -69,7 +75,7 @@ def _tick(
                 item.guid,
                 exc,
             )
-            collisions.append(f"{source.key}/{item.guid}")
+            collisions.append((source.key, item.guid))
     return admitted
 
 
@@ -85,40 +91,53 @@ def discover(
     now=now)`` via ``admit_item(via="poll")``. Returns ``{source.key:
     admitted_count}``.
 
-    Each source is isolated: one failing never stops another. Never raises for
-    a source failure.
+    Total: a source's failure never stops another, and neither does a failure
+    of the health bookkeeping itself (a locked database, say). Never raises
+    for a source; only ``KeyboardInterrupt``/``SystemExit`` propagate.
     """
     results: dict[str, int] = {}
-    collisions: list[str] = []
+    collisions: list[tuple[str, str]] = []
     for source in sources:
         admitted = 0
+        error: str | None = None
         try:
             admitted = _tick(store, source, now=now, fetch=fetch, collisions=collisions)
         except Exception as exc:  # noqa: BLE001 -- a failed tick, not a crash
             error = f"{type(exc).__name__}: {scrub_detail(exc)}"
             logger.warning("podcast discovery for %s failed: %s", source.key, error)
-            count, should_alert = store.record_podcast_discovery(
-                source.key, ok=False, error=error, now=now
-            )
-            if should_alert:
-                sent = _safe_alert(
-                    alert,
-                    f"Podcast discovery for {source.name} failed {count} times "
-                    f"in a row: {error}",
-                    "error",
-                )
-                logger.error(
-                    "podcast discovery for %s: health alert sent=%s", source.key, sent
-                )
-        else:
-            store.record_podcast_discovery(source.key, ok=True, error=None, now=now)
         results[source.key] = admitted
 
-    if collisions:
+        try:
+            count, should_alert = store.record_podcast_discovery(
+                source.key, ok=error is None, error=error, now=now
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "podcast discovery for %s: could not record the tick's health",
+                source.key,
+            )
+            continue
+        if error is not None and should_alert:
+            sent = _safe_alert(
+                alert,
+                f"Podcast discovery for {source.name} failed {count} times "
+                f"in a row: {error}",
+                "error",
+            )
+            logger.error(
+                "podcast discovery for %s: health alert sent=%s", source.key, sent
+            )
+
+    new = [c for c in dict.fromkeys(collisions) if c not in _ALERTED_COLLISIONS]
+    for c in dict.fromkeys(collisions):
+        if c in _ALERTED_COLLISIONS:
+            logger.info("podcast discovery: %s/%s still collides (already alerted)", *c)
+    if new:
+        _ALERTED_COLLISIONS.update(new)
         sent = _safe_alert(
             alert,
             "Podcast discovery: r2_key collision, episode(s) not admitted: "
-            + ", ".join(collisions),
+            + ", ".join(f"{s}/{g}" for s, g in new),
             "error",
         )
         logger.error("podcast discovery: collision alert sent=%s", sent)

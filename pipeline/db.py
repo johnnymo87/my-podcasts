@@ -932,17 +932,51 @@ class StateStore:
         self._conn.commit()
         return prior
 
-    def recover_interrupted_podcast_episodes(self) -> int:
-        """in_progress -> pending after a consumer restart; returns the count.
+    def recover_interrupted_podcast_episodes(self) -> list[dict]:
+        """in_progress -> pending after a consumer restart.
 
-        next_attempt_at is kept, so a row that was already due runs at once.
+        An interruption counts as a failed attempt: a job that kills the
+        consumer every time (OOM, a hang the supervisor restarts) must run out
+        of budget like any other failure, not crash-loop forever. Each
+        recovered row gets ``failure_count + 1`` and ``last_error``
+        "interrupted: ..."; the PODCAST_MAX_FAILURES-th makes it 'errored'.
+        ``next_attempt_at`` is kept, so a row that was already due runs at once.
+
+        Returns one dict per recovered row (source, guid, display_title,
+        failure_count, status) so the caller can alert on newly errored ones.
         """
-        cursor = self._conn.execute(
-            "UPDATE podcast_episodes SET status = 'pending', "
-            "updated_at = datetime('now') WHERE status = 'in_progress'"
-        )
+        rows = self._conn.execute(
+            "SELECT source, guid, display_title, failure_count "
+            "FROM podcast_episodes WHERE status = 'in_progress' "
+            "ORDER BY pub_date ASC, guid ASC"
+        ).fetchall()
+        recovered: list[dict] = []
+        for row in rows:
+            failure_count = int(row["failure_count"] or 0) + 1
+            status = "errored" if failure_count >= PODCAST_MAX_FAILURES else "pending"
+            self._conn.execute(
+                "UPDATE podcast_episodes SET status = ?, failure_count = ?, "
+                "last_error = ?, updated_at = datetime('now') "
+                "WHERE source = ? AND guid = ? AND status = 'in_progress'",
+                (
+                    status,
+                    failure_count,
+                    "interrupted: consumer stopped mid-run",
+                    row["source"],
+                    row["guid"],
+                ),
+            )
+            recovered.append(
+                {
+                    "source": row["source"],
+                    "guid": row["guid"],
+                    "display_title": row["display_title"],
+                    "failure_count": failure_count,
+                    "status": status,
+                }
+            )
         self._conn.commit()
-        return cursor.rowcount
+        return recovered
 
     def record_podcast_discovery(
         self, source: str, *, ok: bool, error: str | None, now: datetime
