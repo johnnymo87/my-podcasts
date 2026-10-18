@@ -41,9 +41,12 @@ Work in `/home/dev/projects/my-podcasts/.worktrees/argument-audio-report`.
   2341 passed. Pre-PR adversarial-reviewer-astra: blocked on 5 findings
   (work-dir/episode binding, policy digest missing from checkpoint key, cached
   results skipping current validation, hosts seeded as "identified", ceiling
-  exempt on short tails) -> all fixed -> **approve**. Task 7 pilot dry runs
-  launched (logs `/tmp/opencode/pilot/oct15.log`, `oct08.log`; work dirs
-  `/persist/my-podcasts/podcast-work/dry-run/argument/<sha256(guid)[:16]>/`).
+  exempt on short tails) -> all fixed -> **approve**. **Task 7 pilot DONE**:
+  both dry runs succeeded (~4.5 min each); findings in
+  `docs/plans/2026-10-18-argument-audio-report-pilot.md`; evidence in
+  `/persist/my-podcasts/podcast-work/dry-run/argument/pilot-evidence/`.
+  **GATE: waiting on owner** (ear check, proceed/tune/hedge, script length,
+  PR now vs fold into Phase 2). Do not start Phase 2 before that answer.
   Phase 1 code diverged from the plan snippets in places (real module APIs win:
   `run_episode_to_script` in `pipeline/podcast_report.py`, policy digest,
   checkpoints in `work_dir/pieces/`, `.rejected.txt` raw replies, carried list
