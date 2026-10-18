@@ -12,6 +12,7 @@ import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -151,6 +152,55 @@ def _manifest_totals(work_dir: Path) -> tuple[int, int, int, int]:
     return len(pieces), from_cp, total("input_tokens"), total("output_tokens")
 
 
+# Anything a previous run leaves behind that a different episode must not reuse.
+_WORK_ARTIFACTS = (AUDIO_NAME, "transcript.txt", MANIFEST_NAME, "pieces")
+
+
+def _claim_work_dir(source: PodcastSource, item: PodcastItem, work_dir: Path) -> None:
+    """Bind ``work_dir`` to this (source, guid), or refuse. Writes nothing on a
+    refusal.
+
+    ``download_enclosure`` and the transcript/checkpoint reuse all trust whatever
+    is already on disk, so a work dir reused for another episode would be
+    narrated under the wrong title. ``item.json`` is the owner record. Once it
+    exists its fields are kept as written: the audio is pinned to the
+    ``enclosure_url`` recorded there, and a feed that later hands out different
+    tracking params must not make the record disagree with the audio.
+    """
+    item_path = work_dir / ITEM_NAME
+    owner: dict[str, Any] | None = None
+    if item_path.exists():
+        try:
+            loaded = json.loads(item_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                f"work dir {work_dir} has an unreadable {ITEM_NAME} ({exc!r}); "
+                "refusing to reuse it"
+            ) from exc
+        if not isinstance(loaded, dict):
+            raise RuntimeError(
+                f"work dir {work_dir} has a malformed {ITEM_NAME}; refusing to reuse it"
+            )
+        if (loaded.get("source"), loaded.get("guid")) != (source.key, item.guid):
+            raise RuntimeError(
+                f"work dir belongs to {loaded.get('source')}/{loaded.get('guid')}, "
+                f"not {source.key}/{item.guid}; use a different --work-dir"
+            )
+        owner = loaded
+    else:
+        leftovers = [n for n in _WORK_ARTIFACTS if (work_dir / n).exists()]
+        if leftovers:
+            raise RuntimeError(
+                f"work dir {work_dir} has no {ITEM_NAME} but contains "
+                f"{', '.join(leftovers)}; it is not known to belong to "
+                f"{source.key}/{item.guid}. Refusing to reuse it"
+            )
+    record = owner if owner is not None else item_metadata(source, item)
+    record["last_requested_at"] = datetime.now(UTC).isoformat()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    persist_raw_output(item_path, json.dumps(record, indent=2, ensure_ascii=False))
+
+
 def run_episode_to_script(
     source: PodcastSource,
     item: PodcastItem,
@@ -167,11 +217,7 @@ def run_episode_to_script(
     when it has one). ``progress`` receives one line before each stage.
     """
     say = progress or (lambda _msg: None)
-    work_dir.mkdir(parents=True, exist_ok=True)
-    persist_raw_output(
-        work_dir / ITEM_NAME,
-        json.dumps(item_metadata(source, item), indent=2, ensure_ascii=False),
-    )
+    _claim_work_dir(source, item, work_dir)
 
     say(f"Downloading {item.enclosure_url} ...")
     t0 = time.monotonic()

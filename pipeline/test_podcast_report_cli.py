@@ -15,6 +15,7 @@ from pipeline.report_engine import ReportOutput
 
 FIXTURE = Path(__file__).parent / "fixtures" / "argument_feed.xml"
 GUID = "audioboom-01a13c3d-ae49-7326-a550-f82c9eff9be1"
+OTHER_GUID = "audioboom-0000aaaa-bbbb-cccc-dddd-eeeeffff0000"
 
 
 class FakeTranscriber:
@@ -195,6 +196,71 @@ def test_stage_failure_is_clean_error(monkeypatch, tmp_path, calls):
     assert "refused: too short" in result.output
     assert not (tmp_path / "work" / "script.txt").exists()
     assert FakeTranscriber.instances[0].closed
+
+
+def _snapshot(root: Path) -> dict[str, bytes]:
+    return {
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
+
+
+def test_work_dir_of_another_episode_is_refused_untouched(monkeypatch, tmp_path, calls):
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+    assert _run(tmp_path).exit_code == 0
+    work = tmp_path / "work"
+    before = _snapshot(work)
+    n_downloads = len(calls["download"])
+
+    result = _run(tmp_path, guid=OTHER_GUID)
+
+    assert result.exit_code != 0
+    assert f"work dir belongs to argument/{GUID}" in result.output
+    assert _snapshot(work) == before  # no file changed, none added
+    assert len(calls["download"]) == n_downloads
+    assert len(calls["transcribe"]) == 1
+    assert len(calls["write"]) == 1
+
+
+@pytest.mark.parametrize(
+    "leftover", ["audio.mp3", "transcript.txt", "pieces/0000.json"]
+)
+def test_unowned_work_dir_with_artifacts_is_refused(
+    monkeypatch, tmp_path, calls, leftover
+):
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+    work = tmp_path / "work"
+    (work / leftover).parent.mkdir(parents=True, exist_ok=True)
+    (work / leftover).write_bytes(b"someone else's")
+    before = _snapshot(work)
+
+    result = _run(tmp_path)
+
+    assert result.exit_code != 0
+    assert "no item.json" in result.output and leftover.split("/")[0] in result.output
+    assert _snapshot(work) == before
+    assert not (work / "item.json").exists()
+    assert calls["download"] == []
+
+
+def test_matching_rerun_keeps_original_item_json_fields(monkeypatch, tmp_path, calls):
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+    assert _run(tmp_path).exit_code == 0
+    item_path = tmp_path / "work" / "item.json"
+    original = json.loads(item_path.read_text())
+    # The feed now hands out different tracking params for the same episode.
+    stale = dict(original, enclosure_url="https://old.example/pinned.mp3")
+    item_path.write_text(json.dumps(stale))
+
+    result = _run(tmp_path)
+
+    assert result.exit_code == 0, result.output
+    after = json.loads(item_path.read_text())
+    assert after["enclosure_url"] == "https://old.example/pinned.mp3"
+    fields = {k: v for k, v in after.items() if k != "last_requested_at"}
+    assert fields == {k: v for k, v in stale.items() if k != "last_requested_at"}
+    assert "last_requested_at" in after
 
 
 def test_default_work_dir_is_per_source_hash_of_guid():
