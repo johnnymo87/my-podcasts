@@ -56,6 +56,11 @@ Work in `/home/dev/projects/my-podcasts/.worktrees/argument-audio-report`.
   `run_episode_to_script` in `pipeline/podcast_report.py`, policy digest,
   checkpoints in `work_dir/pieces/`, `.rejected.txt` raw replies, carried list
   worded "Names already used for voices in earlier pieces").
+- **Phase 2 (2026-10-18):** expanded into
+  `docs/plans/2026-10-18-argument-audio-report-phase2.md` (Tasks 8-16 + 11
+  binding decisions); executing via SDD in worktree
+  `.worktrees/argument-audio-phase2`, branch `argument-audio-phase2` (stacked
+  on `argument-audio-report`, PR #37 awaiting owner merge).
 - Phase 2 notes from reviews: key state by `(source.key, guid)`; record
   acquisition (URL, time, audio sha) separately from immutable admission
   metadata in item.json; executor must wrap `run_episode_to_script` in the
@@ -949,7 +954,7 @@ Hand the owner both `script.txt` files plus the attribution findings. Outcomes:
 
 ---
 
-## Phase 2 — outline (expand into full tasks after the pilot)
+## Phase 2 — outline (EXPANDED: see `docs/plans/2026-10-18-argument-audio-report-phase2.md`, which supersedes this outline)
 
 Each item below becomes a TDD task of the Phase 1 shape. Order matters.
 
