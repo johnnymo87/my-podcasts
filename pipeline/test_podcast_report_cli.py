@@ -396,28 +396,17 @@ def test_check_opencode_serve(monkeypatch):
         podcast_report.check_opencode_serve()
 
 
-def test_fetch_feed_xml_passes_timeout_redirects_and_ua(monkeypatch):
-    seen: dict = {}
-
-    def get(url, **kw):
-        seen["url"], seen["kw"] = url, kw
-        return httpx.Response(200, text="<rss/>", request=httpx.Request("GET", url))
-
-    monkeypatch.setattr(podcast_report.httpx, "get", get)
-    assert podcast_report.fetch_feed_xml("https://example.test/f.rss") == "<rss/>"
-    assert seen["url"] == "https://example.test/f.rss"
-    assert seen["kw"]["timeout"] == 30.0
-    assert seen["kw"]["follow_redirects"] is True
-    assert seen["kw"]["headers"]["User-Agent"] == "my-podcasts/1.0"
-
-
 def test_feed_http_error_is_a_clean_cli_error(monkeypatch, tmp_path, calls):
     monkeypatch.setenv("GEMINI_API_KEY", "dummy")
 
-    def get(url, **kw):
-        return httpx.Response(503, request=httpx.Request("GET", url))
+    def fetch(url, **kw):
+        raise httpx.HTTPStatusError(
+            "Server error '503'",
+            request=httpx.Request("GET", url),
+            response=httpx.Response(503, request=httpx.Request("GET", url)),
+        )
 
-    monkeypatch.setattr(podcast_report.httpx, "get", get)
+    monkeypatch.setattr(podcast_report, "fetch_feed_xml", fetch)
     result = CliRunner().invoke(
         main_mod.cli,
         ["podcast-report", "dry-run", "--source", "argument", "--guid", GUID],

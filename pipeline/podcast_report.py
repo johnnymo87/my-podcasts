@@ -42,7 +42,9 @@ SCRIPT_NAME = "script.txt"
 SUMMARY_NAME = "summary.txt"
 ACQUISITION_NAME = "acquisition.json"
 
-_RSS_TIMEOUT_S = 30.0
+_RSS_TIMEOUT_S = 30.0  # per read; see FEED_FETCH_DEADLINE_S for the total
+FEED_FETCH_DEADLINE_S = 60  # total wall clock for one feed fetch
+FEED_MAX_BYTES = 10 * 1024 * 1024  # the real feed is ~175 KB
 
 
 _SERVE_HEALTH_TIMEOUT_S = 5.0
@@ -100,15 +102,70 @@ def check_opencode_serve() -> None:
         ) from exc
 
 
-def fetch_feed_xml(url: str) -> str:
-    resp = httpx.get(
-        url,
-        timeout=_RSS_TIMEOUT_S,
-        follow_redirects=True,
-        headers={"User-Agent": "my-podcasts/1.0"},
-    )
-    resp.raise_for_status()
-    return resp.text
+class FeedFetchError(httpx.HTTPError):
+    """The feed fetch exceeded its total deadline or its size cap.
+
+    An ``httpx.HTTPError``, so every caller that already handles a failed fetch
+    (the CLI, the discovery poller) handles this. The message never names the
+    URL: it may be signed.
+    """
+
+
+def fetch_feed_xml(
+    url: str,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    transport: httpx.BaseTransport | None = None,
+) -> str:
+    """The feed body as text, within ``FEED_FETCH_DEADLINE_S`` and
+    ``FEED_MAX_BYTES``.
+
+    The per-read timeout alone does not bound a fetch: a server that trickles a
+    byte every few seconds never trips it, and the consumer is single-threaded.
+    So the body is streamed and the total wall clock is checked between chunks.
+    A single read that blocks is still bounded by the per-read timeout, so the
+    worst case is the deadline plus one read timeout.
+
+    ``clock`` and ``transport`` are test seams.
+    """
+    deadline = clock() + FEED_FETCH_DEADLINE_S
+
+    def over_deadline() -> bool:
+        return clock() > deadline
+
+    with (
+        httpx.Client(
+            timeout=_RSS_TIMEOUT_S,
+            follow_redirects=True,
+            headers={"User-Agent": "my-podcasts/1.0"},
+            transport=transport,
+        ) as client,
+        client.stream("GET", url) as resp,
+    ):
+        resp.raise_for_status()
+        declared = resp.headers.get("content-length")
+        if declared is not None and declared.isdigit():
+            if int(declared) > FEED_MAX_BYTES:
+                raise FeedFetchError(
+                    f"feed declares {declared} bytes, over the cap of "
+                    f"{FEED_MAX_BYTES} bytes"
+                )
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in resp.iter_bytes():
+            total += len(chunk)
+            if total > FEED_MAX_BYTES:
+                raise FeedFetchError(
+                    f"feed body exceeded the cap of {FEED_MAX_BYTES} bytes"
+                )
+            chunks.append(chunk)
+            if over_deadline():
+                raise FeedFetchError(
+                    f"feed fetch exceeded the {FEED_FETCH_DEADLINE_S}s deadline "
+                    f"({total} bytes received)"
+                )
+        # Same decoding as ``Response.text``: declared charset, else UTF-8.
+        return b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
 
 
 def find_item(rss_xml: str, guid: str) -> PodcastItem:
