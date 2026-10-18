@@ -437,12 +437,15 @@ def _load_reusable(
     carry_context: bool,
     prompt_inputs_sha: str,
     policy_sha: str,
+    rss_duration_s: int | None,
 ) -> str | None:
     """The stored transcript, iff BOTH files exist and the manifest matches this
     audio, prompt version, model, carry_context, prompt inputs and
     transcription policy digest, and
-    transcript.txt is the text the manifest recorded. Anything else is a miss
-    (re-transcribe)."""
+    transcript.txt is the text the manifest recorded, AND the stored result still
+    clears the *current* duration and per-piece word-rate rules (the rules may
+    have changed, or the RSS duration may differ from the one it was accepted
+    under). Anything else is a miss (re-transcribe)."""
     txt_path = work_dir / TRANSCRIPT_NAME
     manifest_path = work_dir / MANIFEST_NAME
     if not (txt_path.is_file() and manifest_path.is_file()):
@@ -464,7 +467,35 @@ def _load_reusable(
         or manifest.get("transcript_sha256") != _sha256_text(text)
     ):
         return None
+    if not _cached_result_passes_current_checks(manifest, rss_duration_s):
+        return None
     return text
+
+
+def _cached_result_passes_current_checks(
+    manifest: dict[str, Any], rss_duration_s: int | None
+) -> bool:
+    """Re-run today's duration and word-rate rules on a stored manifest. A
+    malformed manifest is a failure."""
+    decoded_s = manifest.get("decoded_duration_s")
+    pieces = manifest.get("pieces")
+    if isinstance(decoded_s, bool) or not isinstance(decoded_s, int | float):
+        return False
+    if not isinstance(pieces, list) or not pieces:
+        return False
+    try:
+        _check_duration(float(decoded_s), rss_duration_s)
+        for i, piece in enumerate(pieces):
+            piece_s = float(piece["end_s"]) - float(piece["start_s"])
+            if piece_s <= 0 or not isinstance(piece["text"], str):
+                return False
+            if _piece_rate_error(i, len(piece["text"].split()), piece_s):
+                return False
+    except TranscriptionError:
+        return False
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _check_duration(decoded_s: float, rss_duration_s: int | None) -> bool:
@@ -592,6 +623,7 @@ def transcribe_episode(
         carry_context=carry_context,
         prompt_inputs_sha=inputs_sha,
         policy_sha=policy_sha,
+        rss_duration_s=rss_duration_s,
     )
     if reused is not None:
         logger.info("reusing transcript already in %s", work_dir)
@@ -641,6 +673,12 @@ def transcribe_episode(
         key = _checkpoint_key(audio_sha, start, end, policy_sha, prompt)
         cp_path = _checkpoint_path(work_dir, i)
         cp = _load_checkpoint(cp_path, key)
+        if cp is not None and _piece_rate_error(
+            i, len(cp["text"].split()), (end - start) / PCM_BYTES_PER_SECOND
+        ):
+            # Stored text that fails today's rules is a miss, not a reuse: ask
+            # again (and refuse if the fresh answer fails too).
+            cp = None
         if cp is not None:
             result = PieceResult(
                 cp["text"],

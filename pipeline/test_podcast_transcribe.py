@@ -258,6 +258,51 @@ def test_reuse_requires_both_files_and_matching_identity(
     assert len(again.calls) >= 2
 
 
+def test_cached_transcript_is_rechecked_against_the_current_duration(
+    audio, tmp_path, monkeypatch
+) -> None:
+    """Reuse used to return before any validation: a 180 s transcript cached
+    under a matching RSS duration was served for a 4800 s episode."""
+    monkeypatch.setattr(pt, "decode_to_pcm_with_log", lambda p: (_pcm(180), ""))
+    _run(audio, tmp_path, FakeTranscriber(words_per_piece=400), rss_duration_s=180)
+    again = FakeTranscriber(words_per_piece=400)
+    with pytest.raises(pt.TranscriptionError, match="duration"):
+        _run(audio, tmp_path, again, rss_duration_s=4800)
+    assert again.calls == []
+    assert not (tmp_path / "transcript.txt").exists()  # stale cache dropped
+
+
+def test_cached_transcript_failing_current_word_rate_rules_is_recomputed(
+    audio, tmp_path, monkeypatch
+) -> None:
+    _run(audio, tmp_path, FakeTranscriber())  # 150 wpm pieces
+    shutil.rmtree(tmp_path / "pieces")
+    monkeypatch.setattr(pt, "MIN_WORDS_PER_MIN", 200)  # now too sparse
+    again = FakeTranscriber()
+    with pytest.raises(pt.TranscriptionError, match="words/min"):
+        _run(audio, tmp_path, again)
+    assert len(again.calls) == 1  # not served from cache; recomputed, then refused
+
+
+def test_cached_transcript_failing_a_lowered_ceiling_is_recomputed(
+    audio, tmp_path, monkeypatch
+) -> None:
+    _run(audio, tmp_path, FakeTranscriber())
+    shutil.rmtree(tmp_path / "pieces")
+    monkeypatch.setattr(pt, "MAX_WORDS_PER_MIN", 100)
+    again = FakeTranscriber()
+    with pytest.raises(pt.TranscriptionError, match="words/min"):
+        _run(audio, tmp_path, again)
+    assert len(again.calls) == 1
+
+
+def test_still_valid_cached_transcript_is_reused_after_checks(audio, tmp_path) -> None:
+    _run(audio, tmp_path, FakeTranscriber())
+    again = FakeTranscriber()
+    _run(audio, tmp_path, again, rss_duration_s=1500)
+    assert again.calls == []
+
+
 def test_corrupt_manifest_retranscribes(audio, tmp_path) -> None:
     _run(audio, tmp_path, FakeTranscriber())
     shutil.rmtree(tmp_path / "pieces")
@@ -681,6 +726,19 @@ def test_description_change_retranscribes_despite_checkpoints(audio, tmp_path) -
     again = FakeTranscriber()
     _run(audio, tmp_path, again, description="new guest")
     assert len(again.calls) == 3  # the prompt text changed, so every key did
+
+
+def test_checkpoint_failing_the_current_word_rate_floor_is_a_miss(
+    audio, tmp_path, monkeypatch
+) -> None:
+    _run(audio, tmp_path, FakeTranscriber())
+    (tmp_path / "transcript.txt").unlink()
+    (tmp_path / "transcript.json").unlink()
+    monkeypatch.setattr(pt, "MIN_WORDS_PER_MIN", 200)  # cached 150 wpm now fails
+    again = FakeTranscriber()
+    with pytest.raises(pt.TranscriptionError, match="words/min"):
+        _run(audio, tmp_path, again)
+    assert len(again.calls) == 1  # piece 0 was re-asked, not served from disk
 
 
 def test_corrupt_checkpoint_is_a_miss(audio, tmp_path) -> None:
