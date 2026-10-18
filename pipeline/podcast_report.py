@@ -132,7 +132,7 @@ def item_metadata(source: PodcastSource, item: PodcastItem) -> dict[str, Any]:
     }
 
 
-def _sha256_file(path: Path) -> str:
+def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as fh:
         for block in iter(lambda: fh.read(1 << 20), b""):
@@ -254,7 +254,7 @@ def run_episode_to_script(
                     "url": item.enclosure_url,
                     "downloaded_at": datetime.now(UTC).isoformat(),
                     "bytes": size,
-                    "sha256": _sha256_file(audio_path),
+                    "sha256": sha256_file(audio_path),
                 },
                 indent=2,
             ),

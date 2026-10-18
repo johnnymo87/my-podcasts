@@ -15,6 +15,11 @@ The parent and the child talk through files in the work dir, written atomically:
 Same shape as ``pipeline/tts/gemini_phase.py`` (the idea is copied, its private
 names are not imported). The parent trusts nothing the child says: an ok result
 is checked against ``script.txt`` on disk.
+
+Two honest limits. A killed child can orphan an in-flight ``ffmpeg`` for a
+moment; it dies on ``EPIPE`` once the child's pipes close. And the child's
+watchdog starts only after the interpreter has imported this module and its
+imports, so a hang *there* is bounded by the parent's kill alone.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ import json
 import logging
 import multiprocessing
 import os
+import re
 import sys
 import threading
 import time
@@ -35,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.podcast_feed import PodcastItem
+from pipeline.podcast_report import item_metadata, sha256_file
 from pipeline.podcast_sources import PodcastSource, get_podcast_source
 from pipeline.podcast_transcribe import TranscriptionError
 from pipeline.report_engine import persist_raw_output
@@ -57,6 +64,11 @@ POLL_SECONDS = 0.5  # parent: how often to look for the result
 REAP_TIMEOUT_SECONDS = 5.0  # parent: join() after kill()
 WATCHDOG_POLL_SECONDS = 0.5
 WATCHDOG_GRACE_SECONDS = 30.0  # child: past the deadline before it exits itself
+DETAIL_MAX_CHARS = 500
+
+# A URL's query string: audioboom's CDN links are signed, and a failure message
+# (DownloadError, httpx errors) quotes the URL it failed on.
+_URL_QUERY_RE = re.compile(r"(https?://[^\s'\"<>)\]?#]*)[?#][^\s'\"<>)\]]*")
 
 _hard_exit = os._exit
 
@@ -74,6 +86,18 @@ class ChildOutcome:
     elapsed_s: float
 
 
+def scrub_detail(text: object) -> str:
+    """``text`` with URL query strings removed, capped at ``DETAIL_MAX_CHARS``.
+
+    Scrubs before capping, so a cut can never leave half a secret behind. The
+    detail ends up in ``podcast_episodes.last_error``, logs and alerts.
+    """
+    scrubbed = _URL_QUERY_RE.sub(r"\1", str(text))
+    if len(scrubbed) > DETAIL_MAX_CHARS:
+        scrubbed = scrubbed[: DETAIL_MAX_CHARS - 1] + "\u2026"
+    return scrubbed
+
+
 # --- atomic files ----------------------------------------------------------------
 
 
@@ -83,13 +107,16 @@ def _write_json(path: Path, obj: Any) -> None:
 
 def _read_json_file(path: Path) -> Any | None:
     """The parsed file, or None if there is none. A file that exists but does
-    not parse raises ``ValueError``: the writer is atomic, so that is not a
-    half-written file but a bad one."""
+    not parse raises ``ValueError`` (also when it nests too deeply to parse):
+    the writer is atomic, so that is not a half-written file but a bad one."""
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
         return None
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except RecursionError as exc:
+        raise ValueError("JSON nested too deeply") from exc
 
 
 # --- the child ---------------------------------------------------------------------
@@ -128,14 +155,6 @@ def _load_job(source_key: str, work_dir: Path) -> tuple[PodcastSource, PodcastIt
     return source, item
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as fh:
-        for block in iter(lambda: fh.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def _child_body(
     source_key: str, work_dir: Path | str, runner: Callable[..., Any]
 ) -> None:
@@ -149,7 +168,10 @@ def _child_body(
 
     def on_stage(name: str) -> None:
         last_stage[0] = name
-        _write_json(work_dir / STAGE_NAME, {"stage": name})
+        try:  # advisory: a stage file we cannot write must not fail the episode
+            _write_json(work_dir / STAGE_NAME, {"stage": name})
+        except OSError as exc:
+            logger.warning("could not record stage %r: %r", name, exc)
 
     def failed(stage: str, reason: str, code: int | None, detail: str) -> None:
         _write_json(
@@ -159,7 +181,7 @@ def _child_body(
                 "stage": stage,
                 "reason": reason,
                 "code": code,
-                "detail": detail,
+                "detail": scrub_detail(detail),
             },
         )
 
@@ -174,7 +196,7 @@ def _child_body(
         script_path = Path(res.script_path)
         payload = {
             "ok": True,
-            "script_sha256": _sha256_file(script_path),
+            "script_sha256": sha256_file(script_path),
             "piece_count": res.piece_count,
             "input_tokens": res.input_tokens,
             "output_tokens": res.output_tokens,
@@ -250,8 +272,10 @@ def _child_main(
 ) -> None:
     """Spawn target. Module-level, with only small picklable arguments.
 
-    Starts the watchdog first (so a hung bootstrap or import is bounded too),
-    runs the bootstrap, configures logging, resolves the runner and runs
+    Starts the watchdog first (so a hung bootstrap or runner import is bounded
+    too; the interpreter's own imports of this module happened before this and
+    are bounded only by the parent's kill), runs the bootstrap, configures
+    logging, resolves the runner and runs
     ``_child_body``, then exits with ``os._exit`` from a ``finally``: code 0
     once a result is on disk, 1 if not even a failure result could be written
     (the parent then reports ``child_no_result``), 3 from the watchdog.
@@ -275,7 +299,7 @@ def _child_main(
                         "stage": "child",
                         "reason": type(exc).__name__,
                         "code": None,
-                        "detail": str(exc),
+                        "detail": scrub_detail(exc),
                     },
                 )
                 code = 0
@@ -428,16 +452,16 @@ def run_episode_in_child(
     One absolute ``time.monotonic()`` deadline; the child honours nothing of it
     but its watchdog, and this function enforces it with ``kill()``. So it
     returns within ``deadline_s`` + one poll + ONE bounded reap. The child is
-    dead on return or raise; ``KeyboardInterrupt``/``SystemExit`` kill it and
-    propagate.
+    dead on return or raise. Always returns an outcome, whatever the child or
+    the setup does; only ``KeyboardInterrupt``/``SystemExit`` propagate (after
+    killing the child).
 
     ``_runner`` (``"module:attr"``) and ``_bootstrap`` are test seams: see
     ``_podcast_child_testing``.
     """
-    from pipeline.podcast_report import item_metadata
-
     t0 = time.monotonic()
     deadline = t0 + deadline_s
+    spawned = False
 
     def outcome(
         ok: bool,
@@ -453,34 +477,38 @@ def run_episode_in_child(
             stage=stage or _read_stage(work_dir) or "child",
             reason=reason,
             code=code,
-            detail=detail,
+            detail=scrub_detail(detail),
             result=result,
             elapsed_s=time.monotonic() - t0,
         )
 
-    try:
-        work_dir.mkdir(parents=True, exist_ok=True)
-        (work_dir / RESULT_NAME).unlink(missing_ok=True)
-        (work_dir / STAGE_NAME).unlink(missing_ok=True)
-        _write_json(work_dir / JOB_NAME, item_metadata(source, item))
-    except OSError as exc:
-        return outcome(False, type(exc).__name__, str(exc), stage="child")
-
-    args = (
-        source.key,
-        str(work_dir),
-        deadline,
-        os.getpid(),
-        _runner,
-        _bootstrap,
-    )
     proc: Any = None
     reaper: _Reaper | None = None
     try:
         try:
+            work_dir.mkdir(parents=True, exist_ok=True)
+            (work_dir / RESULT_NAME).unlink(missing_ok=True)
+            (work_dir / STAGE_NAME).unlink(missing_ok=True)
+            _write_json(work_dir / JOB_NAME, item_metadata(source, item))
+        except OSError as exc:
+            return outcome(False, type(exc).__name__, str(exc), stage="child")
+
+        args = (
+            source.key,
+            str(work_dir),
+            deadline,
+            os.getpid(),
+            _runner,
+            _bootstrap,
+        )
+        try:
             proc = _make_process(args)
+            # If start() fails after the fork, the half-started child is not
+            # reaped here (we hold no usable handle) and may linger as a zombie
+            # until this process exits; its own watchdog ends the process.
             proc.start()
             reaper = _Reaper(proc)  # only a started process can be joined
+            spawned = True
         except Exception as exc:  # noqa: BLE001
             return outcome(False, "spawn_failed", f"{type(exc).__name__}: {exc}")
 
@@ -506,6 +534,26 @@ def run_episode_in_child(
             stage=text("stage", "child"),
             code=code if _is_int(code) else None,
         )
+    except Exception as exc:  # noqa: BLE001 -- misbehavior is an outcome, not a crash
+        return outcome(
+            False,
+            type(exc).__name__,
+            str(exc),
+            stage=None if spawned else "child",
+        )
     finally:
-        if reaper is not None and not reaper.reap():
-            logger.error("podcast child pid %s could not be killed", proc.pid)
+        if reaper is not None:
+            try:
+                dead = reaper.reap()
+            except Exception as exc:  # noqa: BLE001 -- never mask the real outcome
+                print(
+                    f"podcast-child: reaping the child failed: {exc!r}", file=sys.stderr
+                )
+                dead = False
+            if dead:
+                try:
+                    proc.close()  # releases the sentinel fd
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                logger.error("podcast child pid %s could not be killed", proc.pid)

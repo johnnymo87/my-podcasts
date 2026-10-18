@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -169,3 +172,56 @@ def test_a_rerun_in_the_same_work_dir_ignores_the_previous_result(
     # not mistake them for its own.
     out = _run(source, item, work, "blocking_runner", deadline_s=blocked_deadline_s)
     assert (out.ok, out.reason) == (False, "deadline")
+
+
+HELPER = (
+    "import sys; from pipeline._podcast_child_testing import parent_main; "
+    "parent_main(*sys.argv[1:])"
+)
+PID_WAIT_S = 60.0
+ORPHAN_EXIT_S = 10.0
+
+
+def test_child_exits_on_its_own_when_the_parent_is_sigkilled(tmp_path):
+    work = tmp_path / "w"
+    err_path = tmp_path / "helper.err"
+
+    def helper_err() -> str:
+        return err_path.read_text(errors="replace") or "(empty)"
+
+    err = err_path.open("wb")
+    helper = subprocess.Popen(
+        [sys.executable, "-c", HELPER, str(work), "300"],
+        cwd=Path(__file__).parent.parent,
+        stdout=subprocess.DEVNULL,
+        stderr=err,
+    )
+    pid = None
+    try:
+        try:
+            pid = wait_for_pid(work / "entered.pid", PID_WAIT_S)
+        except TimeoutError:
+            pytest.fail(
+                f"child never reached the runner (helper exit {helper.poll()}); "
+                f"helper stderr:\n{helper_err()}"
+            )
+        assert not pid_gone(pid) and pid != helper.pid, helper_err()
+        helper.send_signal(signal.SIGKILL)
+        helper.wait(timeout=10)
+        killed_at = time.monotonic()
+        # The watchdog polls every 0.5 s, so this takes about a second on an
+        # idle host. The bound is a generous ceiling, not a speed claim.
+        while not pid_gone(pid):
+            if time.monotonic() - killed_at >= ORPHAN_EXIT_S:
+                pytest.fail(
+                    f"orphaned child {pid} alive {ORPHAN_EXIT_S:.0f} s after its "
+                    f"parent was killed; helper stderr:\n{helper_err()}"
+                )
+            time.sleep(0.05)
+    finally:
+        if helper.poll() is None:
+            helper.kill()
+            helper.wait(timeout=10)
+        err.close()
+        if pid is not None and not pid_gone(pid):
+            os.kill(pid, signal.SIGKILL)

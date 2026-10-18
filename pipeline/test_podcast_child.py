@@ -189,7 +189,9 @@ def test_watchdog_exits_after_deadline_plus_grace():
     now = {"t": 0.0}
 
     def clock():
-        now["t"] += pc.WATCHDOG_GRACE_SECONDS  # 10 s deadline passes on the 11th poll
+        # Each call advances one grace period: the first poll is still inside
+        # deadline + grace, the second is past it.
+        now["t"] += pc.WATCHDOG_GRACE_SECONDS
         return now["t"]
 
     pc._watchdog_loop(
@@ -241,6 +243,7 @@ class FakeProc:
         self.start_exc = start_exc
         self.exitcode = exitcode
         self.killed = False
+        self.closed = False
         self.pid = 4242
 
     def start(self):
@@ -257,6 +260,9 @@ class FakeProc:
     def kill(self):
         self.killed = True
         self.alive = False
+
+    def close(self):
+        self.closed = True
 
 
 def _patch_proc(monkeypatch, proc):
@@ -435,3 +441,180 @@ def test_not_ok_result_keeps_stage_reason_code(monkeypatch, tmp_path, source, it
         None,
         "owned by another",
     )
+
+
+# --- never raises for misbehavior ----------------------------------------------
+
+
+def test_setup_failure_other_than_oserror_is_an_outcome(
+    monkeypatch, tmp_path, source, item
+):
+    def bad(*a, **k):
+        raise TypeError("not JSON serializable")
+
+    monkeypatch.setattr(pc, "item_metadata", bad)
+    out = pc.run_episode_in_child(source, item, tmp_path / "w", deadline_s=5.0)
+    assert (out.ok, out.reason, out.stage) == (False, "TypeError", "child")
+    assert "serializable" in out.detail
+
+
+def test_a_misbehaving_process_object_is_an_outcome(
+    monkeypatch, tmp_path, source, item
+):
+    class Broken(FakeProc):
+        def join(self, timeout=None):
+            raise RuntimeError("join exploded")
+
+    proc = Broken()
+    _patch_proc(monkeypatch, proc)
+    out = pc.run_episode_in_child(source, item, tmp_path / "w", deadline_s=5.0)
+    assert (out.ok, out.reason) == (False, "RuntimeError")
+    assert proc.killed  # the (also failing) reap still tried
+
+
+def test_reap_failure_never_masks_the_outcome(monkeypatch, tmp_path, source, item):
+    work = tmp_path / "w"
+
+    class Stubborn(FakeProc):
+        def kill(self):
+            raise OSError("cannot kill")
+
+    proc = Stubborn(alive=True)
+    _patch_proc(monkeypatch, proc)
+
+    def land():
+        (work / pc.RESULT_NAME).write_text(
+            json.dumps({"ok": False, "stage": "write", "reason": "X", "code": None})
+        )
+
+    proc.on_join = land
+    out = pc.run_episode_in_child(source, item, work, deadline_s=5.0)
+    assert (out.ok, out.reason, out.stage) == (False, "X", "write")
+    assert not proc.closed  # a process that is not known dead is not closed
+
+
+def test_a_reaped_child_is_closed(monkeypatch, tmp_path, source, item):
+    proc = FakeProc(alive=False, exitcode=1)
+    _patch_proc(monkeypatch, proc)
+    pc.run_episode_in_child(source, item, tmp_path / "w", deadline_s=5.0)
+    assert proc.closed
+
+
+def test_a_deeply_nested_result_is_invalid_not_a_crash(
+    monkeypatch, tmp_path, source, item
+):
+    work = tmp_path / "w"
+    proc = FakeProc()
+    _patch_proc(monkeypatch, proc)
+    proc.on_join = lambda: (work / pc.RESULT_NAME).write_text("[" * 500_000)
+    out = pc.run_episode_in_child(source, item, work, deadline_s=5.0)
+    assert (out.ok, out.reason) == (False, "invalid_result")
+
+
+def test_a_deeply_nested_stage_file_is_ignored(monkeypatch, tmp_path, source, item):
+    work = tmp_path / "w"
+    proc = FakeProc()
+    _patch_proc(monkeypatch, proc)
+    proc.on_join = lambda: (work / pc.STAGE_NAME).write_text("[" * 500_000)
+    out = pc.run_episode_in_child(source, item, work, deadline_s=0.0)
+    assert (out.reason, out.stage) == ("deadline", "child")
+
+
+def test_a_deeply_nested_job_is_bad_job(work):
+    (work / pc.JOB_NAME).write_text("[" * 500_000)
+    pc._child_body("argument", work, lambda *a, **k: None)
+    res = _read(work, pc.RESULT_NAME)
+    assert (res["stage"], res["reason"]) == ("job", "bad_job")
+
+
+def test_an_unwritable_stage_file_does_not_fail_the_episode(
+    monkeypatch, work, source, item
+):
+    real = pc._write_json
+
+    def flaky(path, obj):
+        if Path(path).name == pc.STAGE_NAME:
+            raise OSError("disk hiccup")
+        real(path, obj)
+
+    monkeypatch.setattr(pc, "_write_json", flaky)
+
+    def runner(src, it, wd, *, on_stage=None):
+        on_stage("claim")
+        (wd / "script.txt").write_text(SCRIPT_TEXT, encoding="utf-8")
+        return StubResult(script_path=wd / "script.txt")
+
+    pc._child_body("argument", work, runner)
+    assert _read(work, pc.RESULT_NAME)["ok"] is True
+
+
+# --- detail is scrubbed and capped -----------------------------------------------
+
+SIGNED = "https://x.example/a.mp3?sig=SECRET&exp=1"
+
+
+def test_scrub_detail_strips_query_strings_and_caps():
+    out = pc.scrub_detail(f"download failed: ConnectError for {SIGNED} (retry)")
+    assert "SECRET" not in out and "sig=" not in out
+    assert "https://x.example/a.mp3" in out and "(retry)" in out
+    assert "SECRET" not in pc.scrub_detail(f"see '{SIGNED}' and <{SIGNED}>")
+    assert "SECRET" not in pc.scrub_detail("https://x.example/a.mp3#frag?sig=SECRET")
+    assert pc.scrub_detail("no url here") == "no url here"
+    long = pc.scrub_detail("x" * 5000)
+    assert len(long) == pc.DETAIL_MAX_CHARS
+
+
+def test_scrub_happens_before_the_cap_cuts(work):
+    # A secret that straddles the cap boundary must not survive as a fragment.
+    pad = "x" * (pc.DETAIL_MAX_CHARS - 20)
+    text = f"{pad} https://x.example/a.mp3?sig=SECRETSECRETSECRET"
+    assert "SECRET" not in pc.scrub_detail(text)
+
+
+def test_child_failure_detail_never_carries_a_signed_url(work):
+    from pipeline.podcast_download import DownloadError
+
+    def runner(src, it, wd, *, on_stage=None):
+        on_stage("download")
+        raise DownloadError(f"download failed: ConnectError: {SIGNED}")
+
+    pc._child_body("argument", work, runner)
+    res = _read(work, pc.RESULT_NAME)
+    assert res["reason"] == "DownloadError"
+    assert "SECRET" not in res["detail"] and "https://x.example/a.mp3" in res["detail"]
+
+
+def test_parent_scrubs_and_caps_a_detail_the_child_did_not(
+    monkeypatch, tmp_path, source, item
+):
+    work = tmp_path / "w"
+    proc = FakeProc()
+    _patch_proc(monkeypatch, proc)
+
+    def land():
+        (work / pc.RESULT_NAME).write_text(
+            json.dumps(
+                {
+                    "ok": False,
+                    "stage": "download",
+                    "reason": "X",
+                    "code": None,
+                    "detail": f"{SIGNED} " + "y" * 3000,
+                }
+            )
+        )
+
+    proc.on_join = land
+    out = pc.run_episode_in_child(source, item, work, deadline_s=5.0)
+    assert "SECRET" not in out.detail and len(out.detail) <= pc.DETAIL_MAX_CHARS
+
+
+def test_parent_side_exception_text_is_scrubbed_too(
+    monkeypatch, tmp_path, source, item
+):
+    def bad(*a, **k):
+        raise TypeError(f"oops {SIGNED}")
+
+    monkeypatch.setattr(pc, "item_metadata", bad)
+    out = pc.run_episode_in_child(source, item, tmp_path / "w", deadline_s=5.0)
+    assert "SECRET" not in out.detail

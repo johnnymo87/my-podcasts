@@ -81,3 +81,36 @@ def mismatch_runner(source, item, work_dir, *, on_stage=None):
     other = Path(work_dir) / "other-script.txt"
     persist_raw_output(other, "A different script.\n")
     return StubResult(script_path=other)
+
+
+def parent_main(work_dir: str, deadline_s: str) -> None:
+    """Entry point of the helper parent in the parent-death test.
+
+    Runs a real child whose runner blocks (leaving its pid in
+    ``work_dir/entered.pid``). The test then SIGKILLs this process and checks
+    that the orphaned child's watchdog ends it. Never returns in the test.
+    """
+    from datetime import UTC, datetime
+
+    from pipeline import podcast_child
+    from pipeline.podcast_feed import PodcastItem
+    from pipeline.podcast_sources import get_podcast_source
+    from pipeline.tts._phase_testing import deny_network
+
+    item = PodcastItem(
+        guid="g",
+        title="t",
+        link="https://x.example/p",
+        pub_date=datetime(2026, 10, 15, tzinfo=UTC),
+        duration_s=100,
+        enclosure_url="https://x.example/a.mp3",
+        description="d",
+    )
+    podcast_child.run_episode_in_child(
+        get_podcast_source("argument"),
+        item,
+        Path(work_dir),
+        deadline_s=float(deadline_s),
+        _runner="pipeline._podcast_child_testing:blocking_runner",
+        _bootstrap=deny_network,
+    )
