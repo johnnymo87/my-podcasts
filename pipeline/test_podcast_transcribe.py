@@ -447,13 +447,54 @@ def test_short_tail_piece_exempt_from_word_floor(audio, tmp_path, monkeypatch) -
     assert last["end_s"] - last["start_s"] < pt.MIN_CHECKED_PIECE_S
 
 
-def test_short_tail_piece_exempt_from_ceiling(audio, tmp_path, monkeypatch) -> None:
+def _tail_run(audio, tmp_path, monkeypatch, tail_text: str):
     total = _short_tail_pcm_len()
     monkeypatch.setattr(pt, "decode_to_pcm_with_log", lambda p: (_pcm(total), ""))
-    # 1650 words per piece: 165 wpm for a 10-min piece, ~2000+ wpm for the tail.
-    _run(audio, tmp_path, FakeTranscriber(), rss_duration_s=total)
+    inner = FakeTranscriber()
+    n_pieces = len(
+        pt.split_pcm(
+            _pcm(total), target_s=pt.PIECE_TARGET_S, search_s=pt.PIECE_SEARCH_S
+        )
+    )
+
+    def fake(audio_bytes, prompt):
+        if f"piece {n_pieces} of {n_pieces}" in prompt:
+            return pt.PieceResult(tail_text, "STOP", None, None)
+        return inner(audio_bytes, prompt)
+
+    return _run(audio, tmp_path, fake, rss_duration_s=total)
+
+
+def test_short_tail_piece_is_not_exempt_from_ceiling(
+    audio, tmp_path, monkeypatch
+) -> None:
+    runaway = "Jerusalem Demsas: " + "loop " * 10_000  # ~88 s tail
+    with pytest.raises(pt.TranscriptionError, match="words/min") as ei:
+        _tail_run(audio, tmp_path, monkeypatch, runaway)
+    assert ei.value.reason == "asr_runaway"
+    assert not (tmp_path / "transcript.txt").exists()
+
+
+def test_normal_short_tail_is_accepted(audio, tmp_path, monkeypatch) -> None:
+    _tail_run(audio, tmp_path, monkeypatch, "Jerusalem Demsas: " + "word " * 28)
     last = _manifest(tmp_path)["pieces"][-1]
-    assert last["words_per_min"] > pt.MAX_WORDS_PER_MIN
+    assert last["words"] == 30
+    assert last["end_s"] - last["start_s"] < pt.MIN_CHECKED_PIECE_S
+
+
+def test_ceiling_has_an_absolute_cushion_for_short_pieces() -> None:
+    # 400 wpm * minutes + 60 words: 30 words in 20 s is fine (193 allowed) ...
+    assert pt._piece_rate_error(0, 30, 20.0) is None
+    # ... the cushion itself is accepted, one word more is not.
+    assert pt._piece_rate_error(0, 60 + 400, 60.0) is None
+    err = pt._piece_rate_error(0, 60 + 400 + 1, 60.0)
+    assert err is not None and err.reason == "asr_runaway"
+    # a very short piece cannot be flagged by the rate alone
+    assert pt._piece_rate_error(0, 40, 1.0) is None
+    # the floor still has its own 120 s exemption
+    assert pt._piece_rate_error(0, 0, 119.0) is None
+    floor = pt._piece_rate_error(0, 10, 120.0)
+    assert floor is not None and floor.reason == "asr_incomplete"
 
 
 def test_word_rate_ceiling(audio, tmp_path) -> None:

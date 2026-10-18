@@ -51,10 +51,13 @@ MIN_WORDS_PER_MIN = 80
 # Looping or hallucinated output can still end with STOP; conversational speech
 # is ~150-200 wpm, so 400 is a runaway signal, not a tight bound.
 MAX_WORDS_PER_MIN = 400
-# The rate checks only apply to pieces at least this long: a 20-60 s outro or
-# music tail legitimately has few (or, with a long reading, many) words/min and
-# must not abort a 90-minute run.
+# Only the FLOOR is skipped for pieces shorter than this: a 20-60 s outro or
+# music tail legitimately has few words/min and must not abort a 90-minute run.
+# The ceiling applies to every piece (a runaway tail is still a runaway).
 MIN_CHECKED_PIECE_S = 120.0
+# Absolute slack added to the ceiling, so a very short piece is not flagged by a
+# rate computed over a few seconds: allowed = MAX_WORDS_PER_MIN * minutes + this.
+MAX_WORDS_CUSHION = 60
 MAX_ATTEMPTS = 3
 RETRY_BACKOFF_S = (5.0, 20.0)
 # Generation settings. The SDK config (``_generation_config``) and the policy
@@ -480,6 +483,31 @@ def _check_duration(decoded_s: float, rss_duration_s: int | None) -> bool:
     return False
 
 
+def _piece_rate_error(
+    index: int, words: int, piece_s: float
+) -> TranscriptionError | None:
+    """The word-rate refusal for one piece, or None when it is acceptable. The
+    floor needs a piece of ``MIN_CHECKED_PIECE_S``; the ceiling has no length
+    exemption, only the ``MAX_WORDS_CUSHION`` allowance."""
+    minutes = piece_s / 60
+    if piece_s >= MIN_CHECKED_PIECE_S and words / minutes < MIN_WORDS_PER_MIN:
+        return TranscriptionError(
+            f"piece {index}: only {words} words in {minutes:.1f} min "
+            f"({words / minutes:.0f} words/min < {MIN_WORDS_PER_MIN}); transcript "
+            "is likely incomplete",
+            reason="asr_incomplete",
+        )
+    if words > MAX_WORDS_PER_MIN * minutes + MAX_WORDS_CUSHION:
+        return TranscriptionError(
+            f"piece {index}: {words} words in {minutes:.1f} min "
+            f"({words / minutes:.0f} words/min > {MAX_WORDS_PER_MIN} + "
+            f"{MAX_WORDS_CUSHION}-word cushion); output is likely looping or "
+            "hallucinated",
+            reason="asr_runaway",
+        )
+    return None
+
+
 def _checkpoint_path(work_dir: Path, index: int) -> Path:
     return work_dir / "pieces" / f"{index:04d}.json"
 
@@ -642,21 +670,9 @@ def transcribe_episode(
         words = len(text.split())
         piece_s = (end - start) / PCM_BYTES_PER_SECOND
         wpm = words / (piece_s / 60)
-        if piece_s >= MIN_CHECKED_PIECE_S:
-            if wpm < MIN_WORDS_PER_MIN:
-                raise TranscriptionError(
-                    f"piece {i}: only {words} words in {piece_s / 60:.1f} min "
-                    f"({wpm:.0f} words/min < {MIN_WORDS_PER_MIN}); transcript is "
-                    "likely incomplete",
-                    reason="asr_incomplete",
-                )
-            if wpm > MAX_WORDS_PER_MIN:
-                raise TranscriptionError(
-                    f"piece {i}: {words} words in {piece_s / 60:.1f} min "
-                    f"({wpm:.0f} words/min > {MAX_WORDS_PER_MIN}); output is "
-                    "likely looping or hallucinated",
-                    reason="asr_runaway",
-                )
+        rate_error = _piece_rate_error(i, words, piece_s)
+        if rate_error is not None:
+            raise rate_error
         if cp is None:
             _atomic_write(
                 cp_path,
