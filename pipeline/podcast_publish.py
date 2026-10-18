@@ -9,6 +9,7 @@ row is already committed, in which case only the feeds are (re)uploaded.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,17 +34,32 @@ CATEGORY = "News"
 _SUMMARY_FALLBACK = "An AI-generated briefing of this episode."
 
 
+_RULE_LINE = re.compile(r"\s*([-*_])(?:\s*\1){2,}\s*")
+
+
+def _clean_summary(text: str) -> str:
+    """Drop lines ``extract_summary`` would treat as the end of the section
+    (headings and horizontal rules), so a model-written summary cannot
+    truncate itself in the stored episode."""
+    kept = [
+        line
+        for line in text.splitlines()
+        if not _RULE_LINE.fullmatch(line) and not line.lstrip().startswith("#")
+    ]
+    return "\n".join(kept).strip()
+
+
 def _show_notes(source: PodcastSource, item: PodcastItem, work_dir: Path) -> str:
     summary = ""
     summary_path = work_dir / SUMMARY_NAME
     if summary_path.exists():
-        summary = summary_path.read_text(encoding="utf-8").strip()
+        summary = _clean_summary(summary_path.read_text(encoding="utf-8"))
     disclosure = (
         f"Unofficial AI-generated briefing of this episode of {source.name}, "
         "produced from the public audio."
     )
     if item.link:
-        disclosure += f" Original episode: {item.link}"
+        disclosure += f" [Original episode]({item.link})"
     # The rule ends the summary section: ``extract_summary`` reads up to the
     # next heading or ``---``, and the disclosure is not part of the summary.
     return (
@@ -58,6 +74,9 @@ def publish_podcast_episode(
     ``"reconciled"`` (the episode was already committed; only feeds re-sent).
 
     Raises ``RuntimeError`` on identity drift, before any TTS.
+
+    Note: after a ``reset`` of an already-published episode, the next run
+    reconciles and keeps the existing audio (by design); it never re-renders.
     """
     source = get_podcast_source(row["source"])
     item = item_from_row(row)

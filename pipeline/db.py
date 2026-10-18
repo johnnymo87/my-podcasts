@@ -372,23 +372,9 @@ class StateStore:
     def list_episodes(self, feed_slug: str | None = None) -> list[Episode]:
         if feed_slug:
             rows = self._conn.execute(
-                """
+                f"""
                 SELECT
-                    id,
-                    title,
-                    slug,
-                    pub_date,
-                    r2_key,
-                    feed_slug,
-                    category,
-                    source_tag,
-                    preset_name,
-                    source_url,
-                    size_bytes,
-                    duration_seconds,
-                    summary,
-                    articles_json,
-                    show_notes_html
+{_EPISODE_COLUMNS}
                 FROM episodes
                 WHERE feed_slug = ?
                 ORDER BY created_at DESC
@@ -397,23 +383,9 @@ class StateStore:
             ).fetchall()
         else:
             rows = self._conn.execute(
-                """
+                f"""
                 SELECT
-                    id,
-                    title,
-                    slug,
-                    pub_date,
-                    r2_key,
-                    feed_slug,
-                    category,
-                    source_tag,
-                    preset_name,
-                    source_url,
-                    size_bytes,
-                    duration_seconds,
-                    summary,
-                    articles_json,
-                    show_notes_html
+{_EPISODE_COLUMNS}
                 FROM episodes
                 ORDER BY created_at DESC
                 """

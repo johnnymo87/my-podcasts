@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from pipeline import feed as feed_mod
 from pipeline.db import StateStore
 from pipeline.podcast_feed import PodcastItem
 from pipeline.podcast_jobs import admit_item
@@ -97,7 +98,7 @@ def test_show_notes_content(tmp_path, store, fake_tts_render):
         "## Episode Summary\n\nA tight summary.\n\n---\n\n"
         "Unofficial AI-generated briefing of this episode of The Argument, "
         "produced from the public audio. "
-        f"Original episode: {ITEM.link}\n"
+        f"[Original episode]({ITEM.link})\n"
     )
     assert not list(work.glob("*.tmp"))
 
@@ -108,6 +109,26 @@ def test_show_notes_fallback_without_summary_file(tmp_path, store, fake_tts_rend
     [ep] = store.list_episodes(feed_slug="yglesias")
     assert ep.summary  # the fallback line, not None
     assert "## Episode Summary" in (work / "show_notes.md").read_text()
+
+
+def test_summary_headings_and_rules_cannot_truncate_it(
+    tmp_path, store, fake_tts_render
+):
+    row, work = _setup(
+        tmp_path,
+        store,
+        summary="# Heading\nFirst point.\n---\n***\n ___ \n## Sub\nSecond point.\n",
+    )
+    publish_podcast_episode(row, work, store=store, r2_client=FakeR2())
+    [ep] = store.list_episodes(feed_slug="yglesias")
+    assert ep.summary == "First point.\nSecond point."
+
+
+def test_summary_of_only_rules_falls_back(tmp_path, store, fake_tts_render):
+    row, work = _setup(tmp_path, store, summary="---\n# x\n")
+    publish_podcast_episode(row, work, store=store, r2_client=FakeR2())
+    [ep] = store.list_episodes(feed_slug="yglesias")
+    assert ep.summary == "An AI-generated briefing of this episode."
 
 
 def test_no_link_publishes_without_source_url(tmp_path, store, fake_tts_render):
@@ -156,7 +177,7 @@ def test_failure_after_db_commit_retry_reconciles_without_tts(
 ):
     row, work = _setup(tmp_path, store)
     r2 = FakeR2()
-    real = __import__("pipeline.feed", fromlist=["x"]).regenerate_and_upload_feed
+    real = feed_mod.regenerate_and_upload_feed
     calls = {"n": 0}
 
     def flaky_regen(s, r):
