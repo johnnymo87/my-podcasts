@@ -163,6 +163,53 @@ POST:
 {body}
 """
 
+# The Argument, built from our own ASR of the free public audio (the official
+# transcript is paid-only). Separate constant from _YGLESIAS_TEMPLATE on purpose:
+# that one describes a Slow Boring email post; this one must tell the writer the
+# transcript is machine-made, speaker names may be "Unknown speaker", and
+# sponsor reads are marked. Deliberately NOT registered in TRANSCRIPT_FEEDS --
+# that registry is the email path's, and this prompt must never reach it.
+#
+# Bump AUDIO_REPORT_PROMPT_VERSION on any edit to the template or to
+# build_audio_report_instruction: podcast_writer folds it into the raw-output
+# reuse key, so a stale reply is never replayed against a changed prompt.
+AUDIO_REPORT_PROMPT_VERSION = "1"
+_ARGUMENT_AUDIO_TEMPLATE = """\
+You are writing a spoken briefing about an episode of The Argument, a
+debate-and-conversation podcast with Jerusalem Demsas and Matt Yglesias. Your
+listener does NOT want to hear the transcript read aloud — they want a clear,
+structured report on what was said.
+
+Episode title: {title}
+Episode description: {description}
+
+The transcript below is an automatic transcription of the audio. Speaker
+labels are names where the transcriber could identify the voice, and
+"Unknown speaker A/B" where it could not. When a claim comes from an unknown
+speaker, do not assign it to a named participant — describe it without a name
+("one participant argued...", "the other pushed back..."). Skip everything
+between [SPONSOR] and [/SPONSOR]; never mention advertisements.
+
+Produce a 5–10 minute spoken briefing (roughly 800–1500 words) covering:
+
+- Who participated (hosts and any guests, with affiliations if stated).
+- What topics and questions were debated, in the order that best
+  illuminates the conversation.
+- The key claims, arguments, and evidence each participant offered,
+  with attribution where the transcript supports it.
+- Where they disagreed and where they found common ground.
+- Concrete details, numbers, and examples that gave the conversation weight.
+
+Write for the ear: plain spoken English, no markdown, no bullet points, no
+headers. Do not editorialize beyond what the participants said, and do not
+invent facts. Transcription errors are possible: if a word or name looks
+garbled, leave it out rather than guess.
+
+TRANSCRIPT:
+
+{transcript}
+"""
+
 TRANSCRIPT_FEEDS: dict[str, str] = {
     "chinatalk": _CHINATALK_TEMPLATE,
     "yglesias": _YGLESIAS_TEMPLATE,
@@ -182,6 +229,25 @@ def build_report_prompt(*, body: str, subject: str, feed_slug: str) -> str:
     except KeyError:
         raise ValueError(f"No transcript prompt for feed: {feed_slug!r}") from None
     return template.format(subject=subject, body=body)
+
+
+def build_audio_report_instruction(
+    *, transcript: str, title: str, description: str
+) -> str:
+    """Full model instruction for an audio-derived report on The Argument.
+
+    The transcript is a ``str.format`` *argument*, never part of the template,
+    so braces inside it are inert.
+    """
+    prompt = _ARGUMENT_AUDIO_TEMPLATE.format(
+        title=title, description=description, transcript=transcript
+    )
+    return (
+        "Read the following transcript and produce the spoken briefing. "
+        "First write a 2-3 sentence summary wrapped in <summary>...</summary> "
+        "tags. Then write the full spoken script wrapped in "
+        "<script>...</script> tags. Output nothing outside these tags.\n\n" + prompt
+    )
 
 
 def generate_report(*, body: str, subject: str, feed_slug: str) -> ReportOutput:
