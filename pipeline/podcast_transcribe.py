@@ -23,11 +23,14 @@ import os
 import re
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
+from google.genai import errors as genai_errors
 from google.genai import types
 
 from pipeline.tts import asr as _asr
@@ -37,8 +40,21 @@ from pipeline.tts.segment import decode_to_pcm_with_log, split_pcm
 
 PIECE_PROMPT_VERSION = "1"
 ASR_MODEL = "gemini-3.8-flash"
+# A sanity ceiling, not a tuned limit: Gemini's inline request cap is ~20 MB
+# including base64 inflation (~1.33x), and a 640 s piece at 64 kbps is ~5 MB, so
+# anything near 15 MB means the encode went wrong.
 MAX_PIECE_BYTES = 15 * 1024 * 1024
 MIN_WORDS_PER_MIN = 80
+# Looping or hallucinated output can still end with STOP; conversational speech
+# is ~150-200 wpm, so 400 is a runaway signal, not a tight bound.
+MAX_WORDS_PER_MIN = 400
+# The rate checks only apply to pieces at least this long: a 20-60 s outro or
+# music tail legitimately has few (or, with a long reading, many) words/min and
+# must not abort a 90-minute run.
+MIN_CHECKED_PIECE_S = 120.0
+MAX_ATTEMPTS = 3
+RETRY_BACKOFF_S = (5.0, 20.0)
+THINKING_LEVEL = "LOW"
 PIECE_TARGET_S = 600.0
 PIECE_SEARCH_S = 20.0
 CONTEXT_LINES = 20
@@ -53,7 +69,29 @@ MANIFEST_NAME = "transcript.json"
 
 
 class TranscriptionError(RuntimeError):
-    pass
+    """``reason`` is the structured class (``asr_timeout``, ``asr_blocked``,
+    ``asr_error``, ``asr_empty``, ``asr_incomplete``, ...); ``code`` is the HTTP
+    status when the failure was an API error. Retry decisions use these, never
+    the message text. Without an explicit reason, an ``asr_*:`` message prefix
+    supplies it."""
+
+    def __init__(
+        self, message: str, *, reason: str | None = None, code: int | None = None
+    ) -> None:
+        super().__init__(message)
+        if reason is None:
+            head = message.split(":", 1)[0]
+            reason = head if head.startswith("asr_") else "error"
+        self.reason = reason
+        self.code = code
+
+
+def _is_retryable(exc: TranscriptionError) -> bool:
+    if exc.reason in ("asr_timeout", _asr.ASR_BLOCKED):
+        return True
+    if exc.reason == "asr_error":
+        return exc.code is None or exc.code == 429 or exc.code >= 500
+    return False
 
 
 @dataclass(frozen=True)
@@ -121,11 +159,21 @@ over from earlier pieces below. Otherwise label it "Unknown speaker A",
 "Unknown speaker B", and keep those labels consistent within this piece. Never
 guess who is speaking from the opinions expressed.
 
+The first and last words of this piece may be cut off mid-word; transcribe only
+what is audible.
+
 Wrap advertisements and sponsor reads in [SPONSOR] ... [/SPONSOR] on their own
 lines. No timestamps, headings, or commentary.
 {context_block}"""
 
-_SPEAKER_RE = re.compile(r"^([A-Za-z][^:\[\]\n]{0,58}):\s")
+# A speaker label: optional markdown emphasis around "Name", then a colon.
+_LABEL_RE = re.compile(r"^[*_\s]*([^:\n\[\]]{1,60}?)[*_\s]*:[*_]*\s")
+_UNKNOWN_LABEL_RE = re.compile(
+    r"^([*_\s]*)Unknown speaker\s+\w+([*_\s]*:)", re.IGNORECASE
+)
+_NAME_PARTICLES = frozenset(
+    {"de", "van", "von", "der", "den", "da", "di", "del", "la", "le", "bin", "al", "el"}
+)
 
 
 def build_piece_prompt(
@@ -146,40 +194,63 @@ def build_piece_prompt(
     )
 
 
-def _speakers_in(text: str) -> list[str]:
-    """Named speakers, in order of first appearance; sponsor reads and
-    ``Unknown speaker *`` labels are not speakers."""
+def _looks_like_name(name: str) -> bool:
+    """1-4 capitalized tokens, optionally with one lowercase particle between
+    them ("Ludwig van Beethoven"). Rejects "And here's the thing" and friends,
+    which a bare ``text: text`` pattern would happily call a speaker."""
+    tokens = name.split()
+    if not 1 <= len(tokens) <= 4:
+        return False
+    particles = 0
+    for i, tok in enumerate(tokens):
+        if tok[0].isupper():
+            continue
+        if tok in _NAME_PARTICLES and 0 < i < len(tokens) - 1:
+            particles += 1
+            continue
+        return False
+    return particles <= 1 and not name.lower().startswith("unknown speaker")
+
+
+def _speakers_in(text: str, sponsor_open: bool) -> tuple[list[str], bool]:
+    """Named speakers in ``text`` in order of first appearance, plus whether a
+    ``[SPONSOR]`` block is still open at its end (a read can span pieces).
+    Sponsor reads and ``Unknown speaker *`` labels are not speakers."""
     seen: list[str] = []
-    in_sponsor = False
     for line in text.splitlines():
         if "[SPONSOR]" in line:
-            in_sponsor = "[/SPONSOR]" not in line
+            sponsor_open = "[/SPONSOR]" not in line
             continue
         if "[/SPONSOR]" in line:
-            in_sponsor = False
+            sponsor_open = False
             continue
-        if in_sponsor:
+        if sponsor_open:
             continue
-        m = _SPEAKER_RE.match(line)
+        m = _LABEL_RE.match(line)
         if not m:
             continue
-        name = m.group(1).strip()
-        if name.lower().startswith("unknown speaker") or len(name.split()) > 5:
-            continue
-        if name not in seen:
+        name = m.group(1).strip("*_ \t")
+        if _looks_like_name(name) and name not in seen:
             seen.append(name)
-    return seen
+    return seen, sponsor_open
 
 
 def _context_block(previous_text: str, speakers: list[str]) -> str:
     lines = [ln for ln in previous_text.splitlines() if ln.strip()]
-    tail = "\n".join(lines[-CONTEXT_LINES:])
-    return (
+    # "Unknown speaker A" is only meaningful inside one piece; show the labels as
+    # unidentified so the model does not continue them into the next piece.
+    tail = "\n".join(
+        _UNKNOWN_LABEL_RE.sub(r"\1[unidentified speaker]\2", ln)
+        for ln in lines[-CONTEXT_LINES:]
+    )
+    block = (
         "Context from the end of the previous piece (do not repeat it; use it "
         "to keep speaker names consistent):\n"
-        f"{tail}\n"
-        f"Speakers identified so far: {', '.join(speakers)}"
+        f"{tail}"
     )
+    if speakers:
+        block += f"\nSpeakers identified so far: {', '.join(speakers)}"
+    return block
 
 
 # --- Gemini -------------------------------------------------------------------
@@ -241,8 +312,22 @@ class GeminiPieceTranscriber:
                     ),
                 ),
             )
-        except Exception as exc:  # any SDK/transport failure = no transcript
-            raise TranscriptionError(f"asr_error: {exc!r}") from exc
+        except (httpx.TimeoutException, TimeoutError) as exc:
+            raise TranscriptionError(
+                f"asr_timeout: {type(exc).__name__}: {exc}", reason="asr_timeout"
+            ) from exc
+        except genai_errors.APIError as exc:
+            code = _int_or_none(getattr(exc, "code", None))
+            status = getattr(exc, "status", None)
+            raise TranscriptionError(
+                f"asr_error: HTTP {code} {status}: {type(exc).__name__}: {exc}",
+                reason="asr_error",
+                code=code,
+            ) from exc
+        except Exception as exc:  # any other SDK/transport failure
+            raise TranscriptionError(
+                f"asr_error: {type(exc).__name__}: {exc}", reason="asr_error"
+            ) from exc
 
         if not resp.candidates:
             feedback = getattr(resp, "prompt_feedback", None)
@@ -250,14 +335,23 @@ class GeminiPieceTranscriber:
             detail = "no candidates"
             if block is not None:
                 detail += f" (block_reason={getattr(block, 'name', block)})"
-            raise TranscriptionError(f"asr_empty: {detail}")
+            # Only a retryable block (OTHER) is asr_blocked; the rule lives in
+            # pipeline.tts.asr so the two cannot drift.
+            reason = (
+                _asr.ASR_BLOCKED if _asr._is_retryable_block(block) else "asr_empty"
+            )
+            raise TranscriptionError(f"{reason}: {detail}", reason=reason)
         finish = resp.candidates[0].finish_reason
         finish_name = finish.name if finish is not None else "NONE"
         if finish_name != "STOP":
-            raise TranscriptionError(f"asr_incomplete: finish_reason={finish_name}")
-        text = resp.text or ""
+            raise TranscriptionError(
+                f"asr_incomplete: finish_reason={finish_name}", reason="asr_incomplete"
+            )
+        text = resp.text or ""  # excludes thought parts; None if no text parts
         if not text.strip():
-            raise TranscriptionError("asr_empty: blank transcript")
+            raise TranscriptionError(
+                "asr_empty: no transcript text in response", reason="asr_empty"
+            )
         usage = getattr(resp, "usage_metadata", None)
         return PieceResult(
             text=text,
@@ -289,12 +383,34 @@ def _atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+def _prompt_inputs_sha(hosts: tuple[str, ...], description: str) -> str:
+    """Everything besides the audio, model and version that shapes the prompts
+    and the piece boundaries: a change to any of it must not reuse a transcript."""
+    payload = {
+        "hosts": list(hosts),
+        "description": description,
+        "template": _PIECE_PROMPT,
+        "target_s": PIECE_TARGET_S,
+        "search_s": PIECE_SEARCH_S,
+        "context_lines": CONTEXT_LINES,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "thinking_level": THINKING_LEVEL,
+    }
+    return _sha256_text(json.dumps(payload, sort_keys=True))
+
+
 def _load_reusable(
-    work_dir: Path, *, audio_sha: str, model: str, carry_context: bool
+    work_dir: Path,
+    *,
+    audio_sha: str,
+    model: str,
+    carry_context: bool,
+    prompt_inputs_sha: str,
 ) -> str | None:
     """The stored transcript, iff BOTH files exist and the manifest matches this
-    audio, prompt version, model and carry_context, and transcript.txt is the
-    text the manifest recorded. Anything else is a miss (re-transcribe)."""
+    audio, prompt version, model, carry_context and prompt inputs, and
+    transcript.txt is the text the manifest recorded. Anything else is a miss
+    (re-transcribe)."""
     txt_path = work_dir / TRANSCRIPT_NAME
     manifest_path = work_dir / MANIFEST_NAME
     if not (txt_path.is_file() and manifest_path.is_file()):
@@ -311,6 +427,7 @@ def _load_reusable(
         or manifest.get("prompt_version") != PIECE_PROMPT_VERSION
         or manifest.get("model") != model
         or manifest.get("carry_context") != carry_context
+        or manifest.get("prompt_inputs_sha256") != prompt_inputs_sha
         or manifest.get("transcript_sha256") != _sha256_text(text)
     ):
         return None
@@ -333,6 +450,57 @@ def _check_duration(decoded_s: float, rss_duration_s: int | None) -> bool:
     return False
 
 
+def _checkpoint_path(work_dir: Path, index: int) -> Path:
+    return work_dir / "pieces" / f"{index:04d}.json"
+
+
+def _checkpoint_key(
+    audio_sha: str, start: int, end: int, model: str, prompt: str
+) -> str:
+    """Identity of one piece's transcription. The full prompt is in it, and the
+    prompt carries the previous piece's tail, so a checkpoint is only reused
+    when everything upstream of it is identical too."""
+    return _sha256_text(json.dumps([audio_sha, start, end, model, prompt]))
+
+
+def _load_checkpoint(path: Path, key: str) -> dict[str, Any] | None:
+    try:
+        cp = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cp, dict) or cp.get("key") != key:
+        return None
+    if not isinstance(cp.get("text"), str) or not isinstance(cp.get("mp3_sha256"), str):
+        return None
+    if cp.get("finish_reason") != "STOP" or not isinstance(cp.get("bytes"), int):
+        return None
+    return cp
+
+
+def _transcribe_with_retry(
+    transcriber: Callable[[bytes, str], PieceResult],
+    mp3: bytes,
+    prompt: str,
+    *,
+    index: int,
+    sleep: Callable[[float], None],
+) -> tuple[PieceResult, int]:
+    """Up to ``MAX_ATTEMPTS`` tries for retryable failures; returns the result and
+    the number of attempts used. Non-retryable failures raise at once."""
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return transcriber(mp3, prompt), attempt
+        except TranscriptionError as exc:
+            if not _is_retryable(exc) or attempt >= MAX_ATTEMPTS:
+                suffix = f" (after {attempt} attempts)" if attempt > 1 else ""
+                raise TranscriptionError(
+                    f"piece {index}: {exc}{suffix}", reason=exc.reason, code=exc.code
+                ) from exc
+            sleep(RETRY_BACKOFF_S[min(attempt, len(RETRY_BACKOFF_S)) - 1])
+
+
 def transcribe_episode(
     audio_path: Path,
     work_dir: Path,
@@ -342,19 +510,27 @@ def transcribe_episode(
     hosts: tuple[str, ...],
     transcriber: Callable[[bytes, str], PieceResult],
     carry_context: bool = True,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> str:
     """Transcribe ``audio_path``; write ``transcript.txt`` + ``transcript.json``.
 
     Pieces run sequentially (later prompts depend on earlier output when
-    ``carry_context``). Raises ``TranscriptionError`` on any failure, leaving
-    neither output file behind.
+    ``carry_context``). Each accepted piece is checkpointed under
+    ``work_dir/pieces/`` so a rerun after a failure does not repeat the paid
+    work. Raises ``TranscriptionError`` on any failure, leaving neither final
+    output file behind.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     audio_sha = _sha256_file(audio_path)
     model = str(getattr(transcriber, "model", "unknown"))
+    inputs_sha = _prompt_inputs_sha(hosts, description)
 
     reused = _load_reusable(
-        work_dir, audio_sha=audio_sha, model=model, carry_context=carry_context
+        work_dir,
+        audio_sha=audio_sha,
+        model=model,
+        carry_context=carry_context,
+        prompt_inputs_sha=inputs_sha,
     )
     if reused is not None:
         return reused
@@ -385,15 +561,10 @@ def transcribe_episode(
     count = len(ranges)
     pieces: list[dict[str, Any]] = []
     texts: list[str] = []
-    speakers: list[str] = []
+    speakers: list[str] = list(hosts)
+    sponsor_open = False
     previous = ""
     for i, (start, end) in enumerate(ranges):
-        mp3 = encode_piece(pcm[start:end])
-        if len(mp3) > MAX_PIECE_BYTES:
-            raise TranscriptionError(
-                f"piece {i}: encoded size {len(mp3)} bytes exceeds "
-                f"{MAX_PIECE_BYTES} bytes"
-            )
         context = (
             _context_block(previous, speakers) if (carry_context and i > 0) else None
         )
@@ -404,24 +575,71 @@ def transcribe_episode(
             description=description,
             context=context,
         )
-        try:
-            result = transcriber(mp3, prompt)
-        except TranscriptionError as exc:
-            raise TranscriptionError(f"piece {i}: {exc}") from exc
+        key = _checkpoint_key(audio_sha, start, end, model, prompt)
+        cp_path = _checkpoint_path(work_dir, i)
+        cp = _load_checkpoint(cp_path, key)
+        if cp is not None:
+            result = PieceResult(
+                cp["text"],
+                cp["finish_reason"],
+                _int_or_none(cp.get("input_tokens")),
+                _int_or_none(cp.get("output_tokens")),
+            )
+            mp3_sha, mp3_bytes = cp["mp3_sha256"], cp["bytes"]
+            attempts = _int_or_none(cp.get("attempts")) or 1
+        else:
+            mp3 = encode_piece(pcm[start:end])
+            if len(mp3) > MAX_PIECE_BYTES:
+                raise TranscriptionError(
+                    f"piece {i}: encoded size {len(mp3)} bytes exceeds "
+                    f"{MAX_PIECE_BYTES} bytes"
+                )
+            result, attempts = _transcribe_with_retry(
+                transcriber, mp3, prompt, index=i, sleep=sleep
+            )
+            mp3_sha, mp3_bytes = hashlib.sha256(mp3).hexdigest(), len(mp3)
         if result.finish_reason != "STOP":
             raise TranscriptionError(
-                f"piece {i}: asr_incomplete: finish_reason={result.finish_reason}"
+                f"piece {i}: asr_incomplete: finish_reason={result.finish_reason}",
+                reason="asr_incomplete",
             )
         text = result.text.strip()
         words = len(text.split())
-        minutes = (end - start) / PCM_BYTES_PER_SECOND / 60
-        floor = MIN_WORDS_PER_MIN * minutes
-        if words < floor:
-            raise TranscriptionError(
-                f"piece {i}: only {words} words in {minutes:.1f} min "
-                f"(floor {floor:.0f}); transcript is likely incomplete"
+        piece_s = (end - start) / PCM_BYTES_PER_SECOND
+        wpm = words / (piece_s / 60)
+        if piece_s >= MIN_CHECKED_PIECE_S:
+            if wpm < MIN_WORDS_PER_MIN:
+                raise TranscriptionError(
+                    f"piece {i}: only {words} words in {piece_s / 60:.1f} min "
+                    f"({wpm:.0f} words/min < {MIN_WORDS_PER_MIN}); transcript is "
+                    "likely incomplete",
+                    reason="asr_incomplete",
+                )
+            if wpm > MAX_WORDS_PER_MIN:
+                raise TranscriptionError(
+                    f"piece {i}: {words} words in {piece_s / 60:.1f} min "
+                    f"({wpm:.0f} words/min > {MAX_WORDS_PER_MIN}); output is "
+                    "likely looping or hallucinated",
+                    reason="asr_runaway",
+                )
+        if cp is None:
+            _atomic_write(
+                cp_path,
+                json.dumps(
+                    {
+                        "key": key,
+                        "text": text,
+                        "finish_reason": result.finish_reason,
+                        "input_tokens": result.input_tokens,
+                        "output_tokens": result.output_tokens,
+                        "attempts": attempts,
+                        "mp3_sha256": mp3_sha,
+                        "bytes": mp3_bytes,
+                    }
+                ),
             )
-        for name in _speakers_in(text):
+        names, sponsor_open = _speakers_in(text, sponsor_open)
+        for name in names:
             if name not in speakers:
                 speakers.append(name)
         previous = text
@@ -431,12 +649,15 @@ def transcribe_episode(
                 "index": i,
                 "start_s": start / PCM_BYTES_PER_SECOND,
                 "end_s": end / PCM_BYTES_PER_SECOND,
-                "mp3_sha256": hashlib.sha256(mp3).hexdigest(),
-                "bytes": len(mp3),
+                "mp3_sha256": mp3_sha,
+                "bytes": mp3_bytes,
                 "finish_reason": result.finish_reason,
                 "input_tokens": result.input_tokens,
                 "output_tokens": result.output_tokens,
                 "words": words,
+                "words_per_min": wpm,
+                "attempts": attempts,
+                "from_checkpoint": cp is not None,
                 "text": text,
             }
         )
@@ -449,6 +670,7 @@ def transcribe_episode(
         "duration_check_skipped": skipped,
         "ffmpeg_warnings": ffmpeg_warnings,
         "prompt_version": PIECE_PROMPT_VERSION,
+        "prompt_inputs_sha256": inputs_sha,
         "model": model,
         "carry_context": carry_context,
         "transcript_sha256": _sha256_text(transcript),
