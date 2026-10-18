@@ -57,7 +57,13 @@ MAX_WORDS_PER_MIN = 400
 MIN_CHECKED_PIECE_S = 120.0
 MAX_ATTEMPTS = 3
 RETRY_BACKOFF_S = (5.0, 20.0)
-THINKING_LEVEL = "LOW"
+# Generation settings. The SDK config (``_generation_config``) and the policy
+# digest (``transcription_policy_digest``) both read these, so they cannot drift.
+TEMPERATURE = 0
+THINKING_LEVEL = "LOW"  # a ``types.ThinkingLevel`` member name
+# Encoding policy for each piece (``encode_piece``).
+ENCODE_BITRATE = "64k"
+ENCODE_CHANNELS = 1
 PIECE_TARGET_S = 600.0
 PIECE_SEARCH_S = 20.0
 CONTEXT_LINES = 20
@@ -109,7 +115,8 @@ class PieceResult:
 
 
 def encode_piece(pcm: bytes) -> bytes:
-    """Encode 24 kHz mono s16le PCM to a 64 kbps mono mp3 (ffmpeg, via pipes)."""
+    """Encode 24 kHz mono s16le PCM to a small mp3 (ffmpeg, via pipes); the
+    bitrate and channel count are ``ENCODE_BITRATE``/``ENCODE_CHANNELS``."""
     cmd = [
         "ffmpeg",
         "-v",
@@ -119,11 +126,11 @@ def encode_piece(pcm: bytes) -> bytes:
         "-ar",
         str(PCM_SAMPLE_RATE),
         "-ac",
-        "1",
+        str(ENCODE_CHANNELS),
         "-i",
         "pipe:0",
         "-b:a",
-        "64k",
+        ENCODE_BITRATE,
         "-f",
         "mp3",
         "pipe:1",
@@ -263,6 +270,16 @@ def _int_or_none(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _generation_config() -> types.GenerateContentConfig:
+    return types.GenerateContentConfig(
+        temperature=TEMPERATURE,
+        max_output_tokens=MAX_OUTPUT_TOKENS,
+        thinking_config=types.ThinkingConfig(
+            thinking_level=types.ThinkingLevel[THINKING_LEVEL]
+        ),
+    )
+
+
 class GeminiPieceTranscriber:
     """Callable ``(audio_mp3_bytes, prompt) -> PieceResult``. Client is lazy."""
 
@@ -307,13 +324,7 @@ class GeminiPieceTranscriber:
                     types.Part.from_bytes(data=audio, mime_type="audio/mpeg"),
                     prompt,
                 ],
-                config=types.GenerateContentConfig(
-                    temperature=0,
-                    max_output_tokens=MAX_OUTPUT_TOKENS,
-                    thinking_config=types.ThinkingConfig(
-                        thinking_level=types.ThinkingLevel.LOW
-                    ),
-                ),
+                config=_generation_config(),
             )
         except (httpx.TimeoutException, TimeoutError) as exc:
             raise TranscriptionError(
@@ -386,19 +397,32 @@ def _atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def _prompt_inputs_sha(hosts: tuple[str, ...], description: str) -> str:
-    """Everything besides the audio, model and version that shapes the prompts
-    and the piece boundaries: a change to any of it must not reuse a transcript."""
+def transcription_policy_digest(model: str) -> str:
+    """One digest of everything about *how* audio becomes text that is not the
+    audio or the per-episode prompt inputs: prompt version and template, model,
+    the generation settings the SDK is sent, the piece encoding, and how the
+    audio is split. It keys both the piece checkpoints and the whole-transcript
+    reuse, so a change to any of it reuses nothing already paid for."""
     payload = {
-        "hosts": list(hosts),
-        "description": description,
+        "prompt_version": PIECE_PROMPT_VERSION,
         "template": _PIECE_PROMPT,
+        "model": model,
+        "temperature": TEMPERATURE,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "thinking_level": THINKING_LEVEL,
+        "encode_bitrate": ENCODE_BITRATE,
+        "encode_channels": ENCODE_CHANNELS,
+        "encode_sample_rate": PCM_SAMPLE_RATE,
         "target_s": PIECE_TARGET_S,
         "search_s": PIECE_SEARCH_S,
         "context_lines": CONTEXT_LINES,
-        "max_output_tokens": MAX_OUTPUT_TOKENS,
-        "thinking_level": THINKING_LEVEL,
     }
+    return _sha256_text(json.dumps(payload, sort_keys=True))
+
+
+def _prompt_inputs_sha(hosts: tuple[str, ...], description: str) -> str:
+    """The per-episode text that is rendered into every piece prompt."""
+    payload = {"hosts": list(hosts), "description": description}
     return _sha256_text(json.dumps(payload, sort_keys=True))
 
 
@@ -409,9 +433,11 @@ def _load_reusable(
     model: str,
     carry_context: bool,
     prompt_inputs_sha: str,
+    policy_sha: str,
 ) -> str | None:
     """The stored transcript, iff BOTH files exist and the manifest matches this
-    audio, prompt version, model, carry_context and prompt inputs, and
+    audio, prompt version, model, carry_context, prompt inputs and
+    transcription policy digest, and
     transcript.txt is the text the manifest recorded. Anything else is a miss
     (re-transcribe)."""
     txt_path = work_dir / TRANSCRIPT_NAME
@@ -431,6 +457,7 @@ def _load_reusable(
         or manifest.get("model") != model
         or manifest.get("carry_context") != carry_context
         or manifest.get("prompt_inputs_sha256") != prompt_inputs_sha
+        or manifest.get("policy_sha256") != policy_sha
         or manifest.get("transcript_sha256") != _sha256_text(text)
     ):
         return None
@@ -458,12 +485,13 @@ def _checkpoint_path(work_dir: Path, index: int) -> Path:
 
 
 def _checkpoint_key(
-    audio_sha: str, start: int, end: int, model: str, prompt: str
+    audio_sha: str, start: int, end: int, policy_sha: str, prompt: str
 ) -> str:
     """Identity of one piece's transcription. The full prompt is in it, and the
     prompt carries the previous piece's tail, so a checkpoint is only reused
-    when everything upstream of it is identical too."""
-    return _sha256_text(json.dumps([audio_sha, start, end, model, prompt]))
+    when everything upstream of it is identical too. ``policy_sha`` is
+    ``transcription_policy_digest`` (model, settings, encoding, version)."""
+    return _sha256_text(json.dumps([audio_sha, start, end, policy_sha, prompt]))
 
 
 def _load_checkpoint(path: Path, key: str) -> dict[str, Any] | None:
@@ -527,6 +555,7 @@ def transcribe_episode(
     audio_sha = _sha256_file(audio_path)
     model = str(getattr(transcriber, "model", "unknown"))
     inputs_sha = _prompt_inputs_sha(hosts, description)
+    policy_sha = transcription_policy_digest(model)
 
     reused = _load_reusable(
         work_dir,
@@ -534,6 +563,7 @@ def transcribe_episode(
         model=model,
         carry_context=carry_context,
         prompt_inputs_sha=inputs_sha,
+        policy_sha=policy_sha,
     )
     if reused is not None:
         logger.info("reusing transcript already in %s", work_dir)
@@ -580,7 +610,7 @@ def transcribe_episode(
             description=description,
             context=context,
         )
-        key = _checkpoint_key(audio_sha, start, end, model, prompt)
+        key = _checkpoint_key(audio_sha, start, end, policy_sha, prompt)
         cp_path = _checkpoint_path(work_dir, i)
         cp = _load_checkpoint(cp_path, key)
         if cp is not None:
@@ -684,6 +714,7 @@ def transcribe_episode(
         "ffmpeg_warnings": ffmpeg_warnings,
         "prompt_version": PIECE_PROMPT_VERSION,
         "prompt_inputs_sha256": inputs_sha,
+        "policy_sha256": policy_sha,
         "model": model,
         "carry_context": carry_context,
         "transcript_sha256": _sha256_text(transcript),

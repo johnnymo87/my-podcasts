@@ -213,6 +213,7 @@ def test_reuse_skips_asr(audio, tmp_path) -> None:
         "model",
         "carry_context",
         "prompt_inputs",
+        "policy",
         "description_changed",
         "hosts_changed",
         "manifest_missing",
@@ -239,8 +240,9 @@ def test_reuse_requires_both_files_and_matching_identity(
         kw["hosts"] = ("Someone Else",)
     if mutate == "audio_changed":
         audio.write_bytes(b"other-mp3")
-    elif mutate in ("prompt_version", "model", "prompt_inputs"):
-        m["prompt_inputs_sha256" if mutate == "prompt_inputs" else mutate] = "different"
+    elif mutate in ("prompt_version", "model", "prompt_inputs", "policy"):
+        key = {"prompt_inputs": "prompt_inputs_sha256", "policy": "policy_sha256"}
+        m[key.get(mutate, mutate)] = "different"
         manifest_path.write_text(json.dumps(m))
     elif mutate == "carry_context":
         m["carry_context"] = False
@@ -586,6 +588,53 @@ def test_checkpoint_invalidated_by_model_or_audio(audio, tmp_path) -> None:
     assert len(other_audio.calls) == 3
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("PIECE_PROMPT_VERSION", "2"),
+        ("MAX_OUTPUT_TOKENS", 8192),
+        ("THINKING_LEVEL", "HIGH"),
+        ("TEMPERATURE", 0.5),
+        ("ENCODE_BITRATE", "96k"),
+        ("PIECE_TARGET_S", 590.0),
+    ],
+)
+def test_policy_change_invalidates_checkpoints_and_transcript(
+    audio, tmp_path, monkeypatch, name, value
+) -> None:
+    """Every generation/encoding/splitting knob is in one digest that keys both
+    the checkpoints and the whole-transcript reuse: change one and nothing
+    already paid for is silently reused."""
+    _run(audio, tmp_path, FakeTranscriber())
+    monkeypatch.setattr(pt, name, value)
+    again = FakeTranscriber()
+    _run(audio, tmp_path, again)
+    pieces = _manifest(tmp_path)["pieces"]
+    assert len(again.calls) == len(pieces) >= 2  # every piece paid for again
+    assert not any(p["from_checkpoint"] for p in pieces)
+
+
+def test_policy_digest_covers_the_generation_settings(monkeypatch) -> None:
+    base = pt.transcription_policy_digest("m")
+    assert pt.transcription_policy_digest("m") == base
+    assert pt.transcription_policy_digest("other") != base
+    for name, value in [
+        ("PIECE_PROMPT_VERSION", "2"),
+        ("MAX_OUTPUT_TOKENS", 1),
+        ("THINKING_LEVEL", "HIGH"),
+        ("TEMPERATURE", 1),
+        ("ENCODE_BITRATE", "32k"),
+        ("ENCODE_CHANNELS", 2),
+        ("PIECE_TARGET_S", 1.0),
+        ("PIECE_SEARCH_S", 1.0),
+        ("CONTEXT_LINES", 1),
+        ("_PIECE_PROMPT", pt._PIECE_PROMPT + " changed"),
+    ]:
+        with monkeypatch.context() as mp:
+            mp.setattr(pt, name, value)
+            assert pt.transcription_policy_digest("m") != base, name
+
+
 def test_description_change_retranscribes_despite_checkpoints(audio, tmp_path) -> None:
     _run(audio, tmp_path, FakeTranscriber())
     again = FakeTranscriber()
@@ -790,6 +839,20 @@ def test_gemini_transcriber_success_and_call_shape(monkeypatch) -> None:
     assert cfg.max_output_tokens == 16384
     assert cfg.thinking_config.thinking_level.name == "LOW"
     assert seen["contents"][1] == "prompt"
+
+
+def test_gemini_config_is_derived_from_the_policy_constants(monkeypatch) -> None:
+    """The SDK config and the policy digest read the same constants, so a knob
+    cannot change what is sent without also changing what is cached under."""
+    monkeypatch.setattr(pt, "TEMPERATURE", 0.25)
+    monkeypatch.setattr(pt, "MAX_OUTPUT_TOKENS", 1234)
+    monkeypatch.setattr(pt, "THINKING_LEVEL", "HIGH")
+    seen: dict = {}
+    _call(monkeypatch, _resp(_text("Jerusalem Demsas: hi")), seen)
+    cfg = seen["config"]
+    assert cfg.temperature == 0.25
+    assert cfg.max_output_tokens == 1234
+    assert cfg.thinking_config.thinking_level.name == "HIGH"
 
 
 def test_gemini_transcriber_usage_absent_is_none(monkeypatch) -> None:
