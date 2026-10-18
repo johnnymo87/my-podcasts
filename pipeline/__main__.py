@@ -1802,5 +1802,98 @@ def sync_sources_command() -> None:
             click.echo(f"  {name}: FAILED - {e}", err=True)
 
 
+@click.group("podcast-report")
+def podcast_report_group() -> None:
+    """Audio-derived podcast reports (The Argument)."""
+
+
+@podcast_report_group.command("dry-run")
+@click.option("--source", "source_key", required=True, type=str, help="Source key.")
+@click.option("--guid", required=True, type=str, help="RSS item GUID.")
+@click.option(
+    "--rss-file",
+    "rss_file",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Read the feed from this file instead of fetching it.",
+)
+@click.option(
+    "--work-dir",
+    "work_dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Work dir (default: /persist/my-podcasts/podcast-work/dry-run/<hash>).",
+)
+@click.option(
+    "--no-carry-context",
+    "no_carry_context",
+    is_flag=True,
+    default=False,
+    help="Do not feed each piece the tail of the previous one.",
+)
+def podcast_report_dry_run_command(
+    source_key: str,
+    guid: str,
+    rss_file: Path | None,
+    work_dir: Path | None,
+    no_carry_context: bool,
+) -> None:
+    """Download, transcribe and write one episode into a work dir.
+
+    Publishes nothing: touches no DB, no R2, no feed.
+    """
+    import httpx
+
+    from pipeline import podcast_report
+    from pipeline.podcast_sources import get_podcast_source
+
+    try:
+        source = get_podcast_source(source_key)
+    except KeyError:
+        raise click.ClickException(f"unknown podcast source {source_key!r}") from None
+
+    # Fail before any network or paid work.
+    if not os.environ.get("GEMINI_API_KEY"):
+        raise click.ClickException("GEMINI_API_KEY is not set; transcription needs it.")
+
+    try:
+        if rss_file is not None:
+            rss_xml = rss_file.read_text(encoding="utf-8")
+        else:
+            rss_xml = podcast_report.fetch_feed_xml(source.rss_url)
+        item = podcast_report.find_item(rss_xml, guid)
+    except (podcast_report.ItemNotFoundError, httpx.HTTPError, OSError) as exc:
+        raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
+
+    if work_dir is None:
+        work_dir = podcast_report.default_work_dir(guid)
+    click.echo(f"Episode: {item.title} ({item.pub_date.date().isoformat()})")
+    click.echo(f"Work dir: {work_dir}")
+
+    try:
+        result = podcast_report.run_dry_run(
+            source, item, work_dir, carry_context=not no_carry_context
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
+
+    click.echo(f"Transcript: {result.transcript_path}")
+    click.echo(f"Script: {result.script_path}")
+    if result.summary_path is not None:
+        click.echo(f"Summary: {result.summary_path}")
+    click.echo(f"Script words: {result.script_words}")
+    click.echo(
+        f"Pieces: {result.piece_count}, tokens in/out: "
+        f"{result.input_tokens}/{result.output_tokens}"
+    )
+    click.echo(
+        f"Wall time: download {result.download_s:.1f}s, "
+        f"transcribe {result.transcribe_s:.1f}s, write {result.write_s:.1f}s"
+    )
+
+
+cli.add_command(podcast_report_group)
+
+
 if __name__ == "__main__":
     cli()  # type: ignore[call-arg]
