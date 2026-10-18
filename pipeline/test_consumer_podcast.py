@@ -35,7 +35,7 @@ def calls(monkeypatch):
 
     def fake_discover(store, *, now, **kw):
         rec["discover"].append(now)
-        return {"the-argument": 0}
+        return {"argument": 0}
 
     def fake_execute(store, r2, **kw):
         rec["execute"].append(1)
@@ -127,7 +127,7 @@ def _in_progress_store(tmp_path, failure_counts):
     now = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
     for i, fc in enumerate(failure_counts):
         store.admit_podcast_episode(
-            source="the-argument",
+            source="argument",
             guid=f"g{i}",
             item_json="{}",
             pub_date=f"2026-10-1{i}T00:00:00+00:00",
@@ -137,7 +137,7 @@ def _in_progress_store(tmp_path, failure_counts):
             admitted_via="poll",
             now=now,
         )
-        assert store.claim_podcast_episode("the-argument", f"g{i}")
+        assert store.claim_podcast_episode("argument", f"g{i}")
         store._conn.execute(
             "UPDATE podcast_episodes SET failure_count = ? WHERE guid = ?",
             (fc, f"g{i}"),
@@ -161,9 +161,9 @@ def test_recovery_alerts_only_for_errored_rows(tmp_path, monkeypatch, capsys):
     assert "Report: title 1" in text
     assert "title 0" not in text
     out = capsys.readouterr().out
-    assert "the-argument/g0" in out  # printed, not alerted
-    assert store.get_podcast_episode("the-argument", "g0")["status"] == "pending"
-    assert store.get_podcast_episode("the-argument", "g1")["status"] == "errored"
+    assert "argument/g0" in out  # printed, not alerted
+    assert store.get_podcast_episode("argument", "g0")["status"] == "pending"
+    assert store.get_podcast_episode("argument", "g1")["status"] == "errored"
 
 
 def test_recovery_no_rows_is_silent(tmp_path, monkeypatch, capsys):

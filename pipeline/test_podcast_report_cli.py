@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -531,3 +533,241 @@ def test_dry_run_quiets_the_http_loggers(monkeypatch, tmp_path, calls):
     assert _run(tmp_path).exit_code == 0
     assert logging.getLogger("httpx").level == logging.WARNING
     assert logging.getLogger("httpcore").level == logging.WARNING
+
+
+# --- enqueue / reset / list -------------------------------------------------
+
+FEED_XML = FIXTURE.read_text(encoding="utf-8")
+NOW = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture
+def queue_cli(monkeypatch):
+    """Patch the feed fetch and the clock; forbid R2 and the pipeline itself.
+
+    ``MY_PODCASTS_STATE_DB`` is already redirected to tmp_path by conftest, so
+    the real ``StateStore`` runs against a throwaway DB.
+    """
+    state = {"fetch": lambda url: FEED_XML, "fetched": []}
+
+    def fetch(url):
+        state["fetched"].append(url)
+        return state["fetch"](url)
+
+    def boom(*a, **k):
+        raise AssertionError("the queue commands must not run the pipeline or use R2")
+
+    monkeypatch.setattr(podcast_report, "fetch_feed_xml", fetch)
+    monkeypatch.setattr(main_mod, "_podcast_now", lambda: NOW)
+    monkeypatch.setattr(main_mod, "R2Client", boom)
+    monkeypatch.setattr("pipeline.r2.R2Client", boom)
+    monkeypatch.setattr(podcast_report, "run_episode_to_script", boom)
+    return state
+
+
+def _q(*args):
+    return CliRunner().invoke(main_mod.cli, ["podcast-report", *args])
+
+
+def _store():
+    return main_mod.StateStore(main_mod._default_state_db_path())
+
+
+def test_enqueue_admits_a_pending_row(queue_cli):
+    result = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 0, result.output
+    assert f"enqueued argument/{GUID} as " in result.output
+    assert '"Report: 2026-10-15 - ' in result.output
+    store = _store()
+    try:
+        row = store.get_podcast_episode("argument", GUID)
+    finally:
+        store.close()
+    assert row["status"] == "pending"
+    assert row["admitted_via"] == "enqueue"
+
+
+def test_enqueue_bypasses_since_cutoff(queue_cli):
+    # The Jan 1 item predates the source's `since`; discovery would skip it.
+    old = "Buzzsprout-12345"
+    result = _q("enqueue", "--source", "argument", "--guid", old)
+    assert result.exit_code == 0, result.output
+    assert "enqueued" in result.output
+
+
+def test_enqueue_twice_reports_already_pending(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    result = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 0, result.output
+    assert "already pending" in result.output
+    assert "reset" not in result.output
+
+
+def test_enqueue_errored_row_points_at_reset(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    store = _store()
+    try:
+        store._conn.execute("UPDATE podcast_episodes SET status = 'errored'")
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 0, result.output
+    assert "already errored" in result.output
+    assert "podcast-report reset" in result.output
+
+
+def test_enqueue_unknown_guid_exits_1(queue_cli):
+    result = _q("enqueue", "--source", "argument", "--guid", "nope")
+    assert result.exit_code == 1
+    assert "not found" in result.output
+    store = _store()
+    try:
+        assert store.list_podcast_episodes() == []
+    finally:
+        store.close()
+
+
+def test_enqueue_unknown_source_exits_1(queue_cli):
+    result = _q("enqueue", "--source", "nope", "--guid", GUID)
+    assert result.exit_code == 1
+    assert "unknown podcast source" in result.output
+    assert queue_cli["fetched"] == []
+
+
+def test_enqueue_future_item_exits_1(monkeypatch, queue_cli):
+    monkeypatch.setattr(
+        main_mod, "_podcast_now", lambda: datetime(2026, 10, 14, tzinfo=UTC)
+    )
+    result = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 1
+    assert "future-dated" in result.output
+    store = _store()
+    try:
+        assert store.list_podcast_episodes() == []
+    finally:
+        store.close()
+
+
+def test_enqueue_fetch_error_exits_1(queue_cli):
+    def down(url):
+        raise httpx.ConnectError("no route")
+
+    queue_cli["fetch"] = down
+    result = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 1
+    assert "ConnectError" in result.output
+
+
+def test_enqueue_r2_key_collision_exits_1(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    # Same title and date under a different guid -> same R2 key.
+    clash = FEED_XML.replace(OTHER_GUID, "audioboom-clash").replace(
+        "Thu, 08 Oct 2026 07:00:00 +0000", "Thu, 15 Oct 2026 07:00:00 +0000"
+    )
+    first_title = re.search(r"<title>([^<]*)</title>", FEED_XML.split("<item>")[1])
+    second = clash.split("<item>")
+    assert first_title is not None
+    # Rewrite the second item's title to equal the first's.
+    second[2] = re.sub(
+        r"<title>[^<]*</title>",
+        f"<title>{first_title.group(1)}</title>",
+        second[2],
+        count=1,
+    )
+    queue_cli["fetch"] = lambda url: "<item>".join(second)
+    result = _q("enqueue", "--source", "argument", "--guid", "audioboom-clash")
+    assert result.exit_code == 1, result.output
+    assert "collides" in result.output
+
+
+def test_reset_errored_row(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    store = _store()
+    try:
+        store._conn.execute(
+            "UPDATE podcast_episodes SET status = 'errored', failure_count = 4, "
+            "last_error = 'boom'"
+        )
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("reset", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 0, result.output
+    assert f"reset argument/{GUID} (was errored)" in result.output
+    store = _store()
+    try:
+        row = store.get_podcast_episode("argument", GUID)
+    finally:
+        store.close()
+    assert (row["status"], row["failure_count"], row["last_error"]) == (
+        "pending",
+        0,
+        None,
+    )
+
+
+@pytest.mark.parametrize("status", ["completed", "in_progress"])
+def test_reset_refuses_completed_and_in_progress(queue_cli, status):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    store = _store()
+    try:
+        store._conn.execute("UPDATE podcast_episodes SET status = ?", (status,))
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("reset", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 1
+    assert status in result.output
+    store = _store()
+    try:
+        assert store.get_podcast_episode("argument", GUID)["status"] == status
+    finally:
+        store.close()
+
+
+def test_reset_unknown_row_exits_1(queue_cli):
+    result = _q("reset", "--source", "argument", "--guid", "nope")
+    assert result.exit_code == 1
+    assert "no podcast episode" in result.output
+
+
+def test_list_empty(queue_cli):
+    result = _q("list")
+    assert result.exit_code == 0
+    assert "No podcast episodes" in result.output
+
+
+def test_list_shows_rows_and_truncates_error(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    _q("enqueue", "--source", "argument", "--guid", OTHER_GUID)
+    store = _store()
+    try:
+        store._conn.execute(
+            "UPDATE podcast_episodes SET status = 'errored', failure_count = 4, "
+            "last_error = ? WHERE guid = ?",
+            ("x" * 300 + "\nsecond line", GUID),
+        )
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("list")
+    assert result.exit_code == 0, result.output
+    lines = result.output.strip().splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("errored\t2026-10-15\tfailures=4\tReport: ")
+    assert lines[0].endswith("\t" + "x" * 120)
+    assert lines[1].startswith("pending\t2026-10-08\tfailures=0\t")
+    assert _q("list", "--source", "argument").output == result.output
+    assert "No podcast episodes" in _q("list", "--source", "other").output
+
+
+def test_queue_commands_never_touch_r2_or_pipeline(queue_cli):
+    # The fixture's boom() would raise if any command reached R2 or ran the
+    # pipeline; exercise all three.
+    for args in (
+        ("enqueue", "--source", "argument", "--guid", GUID),
+        ("list",),
+        ("reset", "--source", "argument", "--guid", GUID),
+    ):
+        assert not isinstance(_q(*args).exception, AssertionError)
