@@ -1855,6 +1855,7 @@ def podcast_report_dry_run_command(
     import requests
 
     from pipeline import podcast_report
+    from pipeline.podcast_child import scrub_detail
     from pipeline.podcast_sources import get_podcast_source
 
     try:
@@ -1886,7 +1887,9 @@ def podcast_report_dry_run_command(
             rss_xml = podcast_report.fetch_feed_xml(source.rss_url)
         item = podcast_report.find_item(rss_xml, guid)
     except (podcast_report.ItemNotFoundError, httpx.HTTPError, OSError) as exc:
-        raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
+        raise click.ClickException(
+            f"{type(exc).__name__}: {scrub_detail(exc)}"
+        ) from exc
 
     if work_dir is None:
         work_dir = podcast_report.default_work_dir(source.key, guid)
@@ -1902,7 +1905,10 @@ def podcast_report_dry_run_command(
             progress=click.echo,
         )
     except (RuntimeError, requests.RequestException, httpx.HTTPError, OSError) as exc:
-        raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
+        # Download errors quote the (signed) URL they failed on.
+        raise click.ClickException(
+            f"{type(exc).__name__}: {scrub_detail(exc)}"
+        ) from exc
 
     click.echo(f"Transcript: {result.transcript_path}")
     click.echo(f"Script: {result.script_path}")

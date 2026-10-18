@@ -299,7 +299,9 @@ def run_episode_to_script(
     _claim_work_dir(source, item, work_dir)
 
     stage("download")
-    say(f"Downloading {item.enclosure_url} ...")
+    # Names the episode, not the URL: audioboom's enclosure links are signed and
+    # this line reaches a terminal and any captured log.
+    say(f"Downloading {source.key}/{item.guid} ...")
     t0 = time.monotonic()
     audio_path = work_dir / AUDIO_NAME
     fresh = not audio_path.exists() or audio_path.stat().st_size == 0

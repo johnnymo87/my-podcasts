@@ -841,3 +841,116 @@ def test_reset_completed_does_not_suggest_restarting(queue_cli):
     result = _q("reset", "--source", "argument", "--guid", GUID)
     assert result.exit_code == 1
     assert "restart" not in result.output
+
+
+# --- signed URLs stay out of the output -----------------------------------------
+
+SIGNED = "https://cdn.example/posts/8964415.mp3?sig=SECRET&exp=1"
+
+
+def _signed_feed(tmp_path) -> Path:
+    xml = FIXTURE.read_text(encoding="utf-8")
+    original = re.search(r'<enclosure url="([^"]+)"', xml).group(1)
+    path = tmp_path / "signed.xml"
+    path.write_text(xml.replace(original, SIGNED.replace("&", "&amp;")))
+    return path
+
+
+def _run_signed(tmp_path, rss: Path):
+    return CliRunner().invoke(
+        main_mod.cli,
+        [
+            "podcast-report",
+            "dry-run",
+            "--source",
+            "argument",
+            "--guid",
+            GUID,
+            "--rss-file",
+            str(rss),
+            "--work-dir",
+            str(tmp_path / "work"),
+        ],
+    )
+
+
+def test_dry_run_success_output_has_no_signed_url(monkeypatch, tmp_path, calls):
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+    result = _run_signed(tmp_path, _signed_feed(tmp_path))
+    assert result.exit_code == 0, result.output
+    ((url, _dest),) = calls["download"]
+    assert url == SIGNED  # the download really used the signed URL
+    assert "SECRET" not in result.output
+    assert "sig=" not in result.output
+    assert f"argument/{GUID}" in result.output  # names the episode instead
+
+
+def test_progress_line_names_the_source_and_guid_not_the_url(tmp_path, calls):
+    from pipeline.podcast_feed import parse_podcast_feed
+    from pipeline.podcast_sources import get_podcast_source
+
+    item = next(
+        i
+        for i in parse_podcast_feed(_signed_feed(tmp_path).read_text())
+        if i.guid == GUID
+    )
+    assert item.enclosure_url == SIGNED
+    lines: list[str] = []
+    podcast_report.run_episode_to_script(
+        get_podcast_source("argument"),
+        item,
+        tmp_path / "w",
+        progress=lines.append,
+        transcriber_factory=FakeTranscriber,
+    )
+    assert lines[0] == f"Downloading argument/{GUID} ..."
+    assert not any("SECRET" in line or "sig=" in line for line in lines)
+
+
+def test_dry_run_download_failure_output_has_no_signed_url(
+    monkeypatch, tmp_path, calls
+):
+    from pipeline.podcast_download import DownloadError
+
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+
+    def failing_download(url, dest, **kw):
+        raise DownloadError(f"HTTP 403 for {url}")
+
+    monkeypatch.setattr(podcast_report, "download_enclosure", failing_download)
+    result = _run_signed(tmp_path, _signed_feed(tmp_path))
+    assert result.exit_code == 1
+    assert "DownloadError: HTTP 403 for https://cdn.example/posts/8964415.mp3" in (
+        result.output
+    )
+    assert "SECRET" not in result.output
+    assert "sig=" not in result.output
+
+
+def test_dry_run_httpx_failure_output_has_no_signed_url(monkeypatch, tmp_path, calls):
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+
+    def failing_download(url, dest, **kw):
+        raise httpx.ConnectError(f"All connection attempts failed for {url}")
+
+    monkeypatch.setattr(podcast_report, "download_enclosure", failing_download)
+    result = _run_signed(tmp_path, _signed_feed(tmp_path))
+    assert result.exit_code == 1
+    assert "ConnectError" in result.output
+    assert "SECRET" not in result.output
+
+
+def test_dry_run_feed_fetch_failure_is_scrubbed_too(monkeypatch, tmp_path, calls):
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+
+    def failing_fetch(url, **kw):
+        raise httpx.ConnectError(f"boom for {url}?token=SECRET")
+
+    monkeypatch.setattr(podcast_report, "fetch_feed_xml", failing_fetch)
+    result = CliRunner().invoke(
+        main_mod.cli,
+        ["podcast-report", "dry-run", "--source", "argument", "--guid", GUID],
+    )
+    assert result.exit_code == 1
+    assert "ConnectError" in result.output
+    assert "SECRET" not in result.output
