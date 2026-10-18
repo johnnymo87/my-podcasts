@@ -16,6 +16,12 @@ from google.genai import types
 from pipeline import podcast_transcribe as pt
 
 
+NAMES_LABEL = (
+    "Names already used for voices in earlier pieces "
+    "(match by voice, not by this list alone)"
+)
+
+
 @lru_cache(maxsize=4)
 def _pcm(seconds: int) -> bytes:
     # 24 kHz s16 mono; 1 s blocks, loud except every 7th (quiet) so split_pcm
@@ -325,7 +331,7 @@ def test_context_carried_into_later_prompts(audio, tmp_path) -> None:
     _run(audio, tmp_path, fake, hosts=("Jerusalem Demsas",))
     assert "piece0" not in fake.calls[0]
     assert "piece0" in fake.calls[1]
-    assert "Speakers identified so far: Jerusalem Demsas" in fake.calls[1]
+    assert f"{NAMES_LABEL}: Jerusalem Demsas" in fake.calls[1]
 
 
 def test_context_not_carried_when_disabled(audio, tmp_path) -> None:
@@ -425,6 +431,22 @@ def test_prompt_content_rules() -> None:
     assert "Context from the end" not in p
 
 
+def test_prompt_attribution_rules_do_not_lean_on_a_carried_list() -> None:
+    p = pt.build_piece_prompt(
+        index=1, count=3, hosts=("Matt Yglesias",), description="", context="ctx"
+    )
+    flat = " ".join(p.split())
+    assert "speaker list carried" not in flat
+    for rule in (
+        "self-introduction",
+        "addressed by name",
+        "clearly the same voice as a named speaker in the context lines",
+    ):
+        assert rule in flat
+    # Hosts are possible participants, never a licence to attribute.
+    assert "Hosts: Matt Yglesias" in p
+
+
 def test_context_block_last_20_lines_and_speakers_exclude_unknown(
     audio, tmp_path
 ) -> None:
@@ -445,11 +467,11 @@ def test_context_block_last_20_lines_and_speakers_exclude_unknown(
     seq = Seq()
     _run(audio, tmp_path, seq)
     ctx = seq.prompts[1]
-    assert "Speakers identified so far: Matt Yglesias" in ctx
-    tail = ctx.split("consistent):\n")[1].split("\nSpeakers identified so far:")[0]
+    assert f"{NAMES_LABEL}: Matt Yglesias" in ctx
+    tail = ctx.split("consistent):\n")[1].split(f"\n{NAMES_LABEL}:")[0]
     assert len(tail.splitlines()) == 20
     assert "line0-0" not in ctx  # an early line is not in the last 20
-    speakers = ctx.split("Speakers identified so far:")[1]
+    speakers = ctx.split(f"{NAMES_LABEL}:")[1]
     assert "Unknown speaker" not in speakers
     assert "Brand" not in speakers  # sponsor-read speakers are not speakers
     assert "Unknown speaker" not in tail
@@ -786,31 +808,53 @@ def test_speakers_sponsor_state_crosses_pieces() -> None:
     assert names == ["Jerusalem Demsas"] and open_after is False
 
 
-def test_hosts_seed_speakers_and_empty_list_omitted(audio, tmp_path) -> None:
-    class NoLabels:
+def test_hosts_are_not_presented_as_identified_speakers(audio, tmp_path) -> None:
+    """Hosts are possible participants (the "Hosts:" line), not voices already
+    matched: a piece that only produced Unknown speaker turns identified nobody,
+    so the next prompt must carry no names list at all."""
+
+    class OnlyUnknown:
         def __init__(self):
             self.prompts = []
 
         def __call__(self, a, prompt):
             self.prompts.append(prompt)
-            return pt.PieceResult(("mumble " * 1500).strip(), "STOP", None, None)
+            lines = [f"Unknown speaker A: {'mumble ' * 40}" for _ in range(40)]
+            return pt.PieceResult("\n".join(lines), "STOP", None, None)
 
-    seeded = NoLabels()
-    _run(audio, tmp_path, seeded, hosts=("Matt Yglesias",))
-    assert "Speakers identified so far: Matt Yglesias" in seeded.prompts[1]
-    shutil.rmtree(tmp_path / "pieces")
-    (tmp_path / "transcript.txt").unlink()
-    bare = NoLabels()
-    _run(audio, tmp_path, bare)
-    assert "Speakers identified so far" not in bare.prompts[1]
-    assert "Context from the end" in bare.prompts[1]
+    fake = OnlyUnknown()
+    _run(audio, tmp_path, fake, hosts=("Matt Yglesias", "Jerusalem Demsas"))
+    assert "Hosts: Matt Yglesias, Jerusalem Demsas." in fake.prompts[1]
+    assert "Context from the end" in fake.prompts[1]
+    assert NAMES_LABEL not in fake.prompts[1]
+    assert "Names already used" not in fake.prompts[1]
+    context = fake.prompts[1].split("Context from the end")[1]
+    assert "Matt Yglesias" not in context and "Jerusalem Demsas" not in context
+
+
+def test_names_list_holds_only_names_seen_in_earlier_output(audio, tmp_path) -> None:
+    class Labelled:
+        def __init__(self):
+            self.prompts = []
+
+        def __call__(self, a, prompt):
+            i = len(self.prompts)
+            self.prompts.append(prompt)
+            who = "Ezra Klein" if i == 0 else "Unknown speaker A"
+            return pt.PieceResult(f"{who}: {'word ' * 1500}", "STOP", None, None)
+
+    fake = Labelled()
+    _run(audio, tmp_path, fake, hosts=("Matt Yglesias",))
+    assert f"{NAMES_LABEL}: Ezra Klein" in fake.prompts[1]
+    assert "Matt Yglesias" not in fake.prompts[1].split(NAMES_LABEL)[1]
+    assert "Ezra Klein, Ezra Klein" not in fake.prompts[2]
 
 
 def test_prompt_mentions_cut_off_words() -> None:
     p = pt.build_piece_prompt(index=0, count=1, hosts=(), description="", context=None)
     flat = " ".join(p.split())
     assert "may be cut off mid-word; transcribe only what is audible" in flat
-    assert p.index("Never\nguess") < p.index("cut off")
+    assert flat.index("Never guess") < flat.index("cut off")
 
 
 # --- end to end with real ffmpeg ---------------------------------------------------

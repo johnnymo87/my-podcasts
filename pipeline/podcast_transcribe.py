@@ -167,10 +167,11 @@ Output one speaker turn per line, formatted as "Speaker Name: words spoken".
 Hosts: {hosts}. Episode description (may name guests): {description}
 
 Attribute a turn to a named person ONLY when the voice has been identified by a
-self-introduction, by being addressed by name, or by the speaker list carried
-over from earlier pieces below. Otherwise label it "Unknown speaker A",
-"Unknown speaker B", and keep those labels consistent within this piece. Never
-guess who is speaking from the opinions expressed.
+self-introduction, by being addressed by name, or because it is clearly the same
+voice as a named speaker in the context lines below (if any). The hosts listed
+above are possible participants, not identified voices. Otherwise label it
+"Unknown speaker A", "Unknown speaker B", and keep those labels consistent
+within this piece. Never guess who is speaking from the opinions expressed.
 
 The first and last words of this piece may be cut off mid-word; transcribe only
 what is audible.
@@ -262,7 +263,10 @@ def _context_block(previous_text: str, speakers: list[str]) -> str:
         f"{tail}"
     )
     if speakers:
-        block += f"\nSpeakers identified so far: {', '.join(speakers)}"
+        block += (
+            "\nNames already used for voices in earlier pieces (match by voice, "
+            f"not by this list alone): {', '.join(speakers)}"
+        )
     return block
 
 
@@ -655,7 +659,7 @@ def transcribe_episode(
     count = len(ranges)
     pieces: list[dict[str, Any]] = []
     texts: list[str] = []
-    speakers: list[str] = list(hosts)
+    speakers: list[str] = []  # names seen in earlier output; hosts are not seeded
     sponsor_open = False
     previous = ""
     for i, (start, end) in enumerate(ranges):
