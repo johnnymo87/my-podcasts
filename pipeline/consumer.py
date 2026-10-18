@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import requests
 
+from pipeline import podcast_executor, podcast_poller
 from pipeline.article_resolver import OPEN_ACCESS_HEADING as _OPEN_ACCESS_HEADING
 from pipeline.fp_collector import _slugify, collect_fp_artifacts
 from pipeline.fp_editor import FPResearchPlan
@@ -27,6 +28,13 @@ if TYPE_CHECKING:
 
 _BLOG_POLL_INTERVAL = 6 * 3600  # 6 hours
 _last_blog_poll = 0.0
+
+_PODCAST_POLL_INTERVAL = 6 * 3600  # podcast discovery, separate from the blog poll
+# time.monotonic() at the last discovery ATTEMPT. None (not 0.0) means "never":
+# monotonic time is only guaranteed to count from an arbitrary point, and on a
+# freshly booted host 0.0 + 6 h would not have elapsed yet, so the first
+# discovery would be deferred for hours.
+_last_podcast_poll: float | None = None
 
 RUNDOWN_SCRIPT_ARCHIVE_DIR = Path("/persist/my-podcasts/scripts/the-rundown")
 FP_DIGEST_SCRIPT_ARCHIVE_DIR = Path("/persist/my-podcasts/scripts/fp-digest")
@@ -424,12 +432,80 @@ def _assemble_writer_inputs(
     return sections, writer_inputs
 
 
+def _recover_podcast_episodes(store: StateStore) -> None:
+    """Re-queue podcast jobs a previous consumer left ``in_progress``.
+
+    An interruption counts as a failure, so a row can exhaust its budget here
+    (it comes back ``errored``): that needs the same one alert any other
+    exhaustion gets. Never raises (except KeyboardInterrupt/SystemExit).
+    """
+    try:
+        recovered = store.recover_interrupted_podcast_episodes()
+    except Exception as exc:
+        print(f"Error recovering interrupted podcast episodes: {exc}")
+        return
+    for row in recovered:
+        try:
+            label = f"{row['source']}/{row['guid']}"
+            if row["status"] == "errored":
+                print(
+                    f"Interrupted podcast episode {label} exhausted its retry "
+                    f"budget (#{row['failure_count']}); marked errored"
+                )
+                from pipeline.alerts import send_alert
+
+                sent = send_alert(
+                    f"Podcast report {row['display_title']} gave up after "
+                    f"{row['failure_count']} failure(s). Last error: "
+                    f"interrupted: consumer stopped mid-run",
+                    severity="error",
+                )
+                print(f"Podcast recovery alert sent={sent}")
+            else:
+                print(
+                    f"Re-queued interrupted podcast episode {label} "
+                    f"(failure #{row['failure_count']})"
+                )
+        except Exception as exc:
+            print(f"Error reporting recovered podcast episode: {exc}")
+
+
+def _podcast_tick(store: StateStore, r2_client: R2Client, now_monotonic: float) -> None:
+    """One loop iteration of podcast work: discovery when due, then one job.
+
+    Discovery and the executor are isolated from each other and from the loop:
+    nothing here raises except KeyboardInterrupt/SystemExit. The discovery clock
+    advances after an ATTEMPT, successful or not, so a broken discovery retries
+    on the 6-hour cadence rather than refetching a failing feed every 10 s
+    (``discover`` keeps its own failure count and alert).
+    """
+    global _last_podcast_poll  # noqa: PLW0603
+    if (
+        _last_podcast_poll is None
+        or now_monotonic - _last_podcast_poll >= _PODCAST_POLL_INTERVAL
+    ):
+        try:
+            results = podcast_poller.discover(store, now=datetime.now(UTC))
+            admitted = {k: v for k, v in results.items() if v}
+            if admitted:
+                print(f"Podcast discovery admitted: {admitted}")
+        except Exception as exc:
+            print(f"Error in podcast discovery: {exc}")
+        _last_podcast_poll = now_monotonic
+
+    try:
+        podcast_executor.run_one_podcast_episode(store, r2_client)
+    except Exception as exc:
+        print(f"Error running podcast episode: {exc}")
+
+
 def consume_forever(
     store: StateStore,
     r2_client: R2Client,
     poll_interval: int = 10,
 ) -> None:
     consumer = CloudflareQueueConsumer()
+    _recover_podcast_episodes(store)
 
     while True:
         try:
@@ -808,6 +884,8 @@ def consume_forever(
                 _last_blog_poll = now
         except Exception as exc:
             print(f"Error polling blog sources: {exc}")
+
+        _podcast_tick(store, r2_client, time.monotonic())
 
         if not messages:
             time.sleep(poll_interval)
