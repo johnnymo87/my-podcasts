@@ -163,6 +163,70 @@ POST:
 {body}
 """
 
+# The Argument, built from our own ASR of the free public audio (the official
+# transcript is paid-only). Separate constant from _YGLESIAS_TEMPLATE on purpose:
+# that one describes a Slow Boring email post; this one must tell the writer the
+# transcript is machine-made, speaker names may be "Unknown speaker", and
+# sponsor reads are marked. Deliberately NOT registered in TRANSCRIPT_FEEDS --
+# that registry is the email path's, and this prompt must never reach it.
+#
+# AUDIO_REPORT_PROMPT_VERSION is a human label for prompt revisions. Raw-output
+# reuse does not depend on bumping it: podcast_writer keys on a hash of the full
+# built instruction, so any edit invalidates a stale reply.
+AUDIO_REPORT_PROMPT_VERSION = "1"
+_ARGUMENT_AUDIO_TEMPLATE = """\
+You are writing a spoken briefing about an episode of The Argument, a
+debate-and-conversation podcast with {hosts}. Your
+listener does NOT want to hear the transcript read aloud — they want a clear,
+structured report on what was said.
+
+Episode title: {title}
+Episode description: {description}
+
+The transcript below is an automatic transcription of the audio. Speaker
+labels are names where the transcriber could identify the voice, and
+"Unknown speaker A" / "Unknown speaker B" where it could not. Those unknown
+labels restart in each stretch of the transcript (roughly every ten minutes),
+so "Unknown speaker A" in one stretch is NOT the same person as "Unknown
+speaker A" in another. Never treat an unknown label as a single person across
+the transcript.
+
+Attribute a claim to someone only by name, and only when the transcript names
+the speaker. Otherwise use neutral phrasing ("a participant raised...",
+"another countered..."). Never build a "one participant... the other..."
+pairing, and never construct a through-line or a running argument out of
+unknown-speaker labels.
+
+Skip everything between [SPONSOR] and [/SPONSOR]; never mention
+advertisements. If a [SPONSOR] block is never closed, treat everything up to
+the clear return to the conversation as an ad. Likewise do not cover the
+show's housekeeping: subscribe, rate-and-review, and premium or membership
+plugs.
+
+Transcription can misspell names. Where a name is spelled differently in the
+transcript and in the episode description above, prefer the description's
+spelling.
+
+Produce a 5–10 minute spoken briefing (roughly 800–1500 words) covering:
+
+- Who participated (hosts and any guests, with affiliations if stated).
+- What topics and questions were debated, in the order that best
+  illuminates the conversation.
+- The key claims, arguments, and evidence each participant offered,
+  with attribution where the transcript supports it.
+- Where they disagreed and where they found common ground.
+- Concrete details, numbers, and examples that gave the conversation weight.
+
+Write for the ear: plain spoken English, no markdown, no bullet points, no
+headers. Do not editorialize beyond what the participants said, and do not
+invent facts. Transcription errors are possible: if a word or name looks
+garbled, leave it out rather than guess.
+
+TRANSCRIPT:
+
+{transcript}
+"""
+
 TRANSCRIPT_FEEDS: dict[str, str] = {
     "chinatalk": _CHINATALK_TEMPLATE,
     "yglesias": _YGLESIAS_TEMPLATE,
@@ -182,6 +246,37 @@ def build_report_prompt(*, body: str, subject: str, feed_slug: str) -> str:
     except KeyError:
         raise ValueError(f"No transcript prompt for feed: {feed_slug!r}") from None
     return template.format(subject=subject, body=body)
+
+
+def _join_names(names: tuple[str, ...]) -> str:
+    """``("A",)`` -> "A"; ``("A", "B")`` -> "A and B"; three -> "A, B and C"."""
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def build_audio_report_instruction(
+    *, transcript: str, title: str, description: str, hosts: tuple[str, ...]
+) -> str:
+    """Full model instruction for an audio-derived report on The Argument.
+
+    The transcript is a ``str.format`` *argument*, never part of the template,
+    so braces inside it are inert. ``hosts`` must be non-empty.
+    """
+    if not hosts:
+        raise ValueError("hosts must name at least one host")
+    prompt = _ARGUMENT_AUDIO_TEMPLATE.format(
+        title=title,
+        description=description,
+        hosts=_join_names(hosts),
+        transcript=transcript,
+    )
+    return (
+        "Read the following transcript and produce the spoken briefing. "
+        "First write a 2-3 sentence summary wrapped in <summary>...</summary> "
+        "tags. Then write the full spoken script wrapped in "
+        "<script>...</script> tags. Output nothing outside these tags.\n\n" + prompt
+    )
 
 
 def generate_report(*, body: str, subject: str, feed_slug: str) -> ReportOutput:

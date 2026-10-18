@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:dc="http://purl.org/dc/elements/1.1/">
+<channel>
+<title>The Argument</title>
+<item>
+  <title>Canceling (and un-canceling) historic heroes</title>
+  <link>https://audioboom.com/posts/8964415</link>
+  <enclosure url="https://pscrb.fm/rss/p/dts.podtrac.com/redirect.mp3/audioboom.com/posts/8964415.mp3?modified=1792013674&amp;sid=5173020&amp;source=rss" length="0" type="audio/mpeg" />
+  <itunes:duration>4807</itunes:duration>
+  <description><![CDATA[<div><p>Jerusalem Demsas and Matt Yglesias debate which historical figures deserve to be canceled.</p><p>(0:00) Who deserves to be canceled?<br>(1:30) Why Matt wants more statues</p></div>]]></description>
+  <pubDate>Thu, 15 Oct 2026 07:00:00 +0000</pubDate>
+  <guid isPermaLink="false">audioboom-01a13c3d-ae49-7326-a550-f82c9eff9be1</guid>
+</item>
+<item>
+  <title>Trump, Xi, and the race for superintelligence</title>
+  <link>https://audioboom.com/posts/8960000</link>
+  <enclosure url="https://audioboom.com/posts/8960000.mp3?source=rss" length="0" type="audio/mpeg" />
+  <itunes:duration>5152</itunes:duration>
+  <description><![CDATA[<p>ChinaTalk's Jordan Schneider joins Jerusalem Demsas and Matt Yglesias.</p>]]></description>
+  <pubDate>Thu, 08 Oct 2026 07:00:00 +0000</pubDate>
+  <guid isPermaLink="false">audioboom-0000aaaa-bbbb-cccc-dddd-eeeeffff0000</guid>
+</item>
+<item>
+  <title>An older episode</title>
+  <link>https://audioboom.com/posts/1</link>
+  <enclosure url="https://audioboom.com/posts/1.mp3" length="12345" type="audio/mpeg" />
+  <itunes:duration>01:01:05</itunes:duration>
+  <description>Plain text description.</description>
+  <pubDate>Thu, 01 Jan 2026 07:00:00 +0000</pubDate>
+  <guid isPermaLink="false">Buzzsprout-12345</guid>
+</item>
+</channel>
+</rss>

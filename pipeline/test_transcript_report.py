@@ -159,3 +159,88 @@ def test_generate_report_refuses_output_with_no_script_tag(
         generate_report(body="b", subject="s", feed_slug="chinatalk")
 
     mock_delete.assert_called_once_with("ses_x")
+
+
+# --- Audio report (The Argument, from our own ASR of the public audio) -----
+
+_HOSTS = ("Jerusalem Demsas", "Matt Yglesias")
+
+
+def _audio(**kw):
+    from pipeline import transcript_report as tr
+
+    args = {
+        "transcript": "Jerusalem Demsas: hi",
+        "title": "T",
+        "description": "D",
+        "hosts": _HOSTS,
+    } | kw
+    return tr.build_audio_report_instruction(**args)
+
+
+def test_email_yglesias_prompt_unchanged() -> None:
+    p = build_report_prompt(body="B", subject="S", feed_slug="yglesias")
+    assert "It ran in" in p and "Slow Boring" in p
+
+
+def test_audio_instruction_is_its_own_prompt() -> None:
+    ins = _audio()
+    assert "Slow Boring" not in ins
+    assert "[SPONSOR]" in ins
+    assert "Unknown speaker" in ins
+    assert "<script>" in ins and "<summary>" in ins
+    assert "Episode title: T" in ins and "Episode description: D" in ins
+    assert ins.rstrip().endswith("Jerusalem Demsas: hi")
+
+
+def test_audio_instruction_survives_braces_in_transcript() -> None:
+    ins = _audio(transcript="a {b} c", title="{t}", description="{d}")
+    assert ins.rstrip().endswith("a {b} c")
+    assert "Episode title: {t}" in ins
+
+
+def test_audio_prompt_not_registered_for_email() -> None:
+    from pipeline import transcript_report as tr
+
+    assert tr._ARGUMENT_AUDIO_TEMPLATE not in TRANSCRIPT_FEEDS.values()
+
+
+@pytest.mark.parametrize(
+    ("hosts", "rendered"),
+    [
+        (("A",), "with A."),
+        (("A", "B"), "with A and B."),
+        (("A", "B", "C"), "with A, B and C."),
+    ],
+)
+def test_audio_instruction_renders_hosts(hosts, rendered) -> None:
+    ins = _audio(hosts=hosts)
+    assert "The Argument" in ins
+    assert rendered in ins
+
+
+def test_audio_instruction_hosts_are_not_hardcoded() -> None:
+    ins = _audio(hosts=("Pat Example", "Sam Sample"), transcript="x")
+    assert "Pat Example and Sam Sample" in ins
+    assert "Demsas" not in ins and "Yglesias" not in ins
+
+
+def test_audio_instruction_requires_hosts() -> None:
+    with pytest.raises(ValueError):
+        _audio(hosts=())
+
+
+def test_audio_prompt_unknown_speaker_labels_are_not_a_through_line() -> None:
+    ins = _audio()
+    assert "restart" in ins
+    assert "same person" in ins
+    assert "one participant argued" not in ins
+    assert "the other pushed back" not in ins
+    assert "a participant raised" in ins
+
+
+def test_audio_prompt_sponsor_housekeeping_and_spelling_rules() -> None:
+    ins = _audio()
+    assert "never closed" in ins
+    assert "subscribe" in ins and "premium" in ins
+    assert "spelling" in ins and "description" in ins
