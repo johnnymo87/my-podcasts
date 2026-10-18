@@ -278,6 +278,38 @@ def test_reset_refuses_completed_and_in_progress(store):
     assert store.get_podcast_episode("argument", "busy")["status"] == "in_progress"
 
 
+def test_reset_loses_a_race_with_a_claim_and_leaves_the_row_alone(store):
+    """The consumer claims the row between reset's SELECT and its UPDATE."""
+    _admit(store)
+    store.fail_podcast_episode("argument", "g1", "e", now=NOW)
+    real = store._conn
+
+    class RacingConn:
+        def __init__(self) -> None:
+            self.raced = False
+
+        def execute(self, sql, *args):
+            if sql.startswith("UPDATE podcast_episodes SET status = 'pending'"):
+                if not self.raced:
+                    self.raced = True
+                    real.execute("UPDATE podcast_episodes SET status = 'in_progress'")
+            return real.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+    store._conn = RacingConn()
+    try:
+        with pytest.raises(ValueError, match="in_progress"):
+            store.reset_podcast_episode("argument", "g1", now=NOW)
+    finally:
+        store._conn = real
+    row = store.get_podcast_episode("argument", "g1")
+    assert row["status"] == "in_progress"
+    assert row["failure_count"] == 1  # untouched, not zeroed
+    assert row["last_error"] == "e"
+
+
 def test_reset_unknown_raises_keyerror(store):
     with pytest.raises(KeyError):
         store.reset_podcast_episode("argument", "nope", now=NOW)
@@ -314,6 +346,7 @@ def test_recover_returns_row_summaries(store):
             "display_title": row["display_title"],
             "failure_count": 1,
             "status": "pending",
+            "last_error": "interrupted: consumer stopped mid-run",
         }
     ]
 

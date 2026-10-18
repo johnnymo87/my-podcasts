@@ -457,7 +457,7 @@ def _recover_podcast_episodes(store: StateStore) -> None:
                 sent = send_alert(
                     f"Podcast report {row['display_title']} gave up after "
                     f"{row['failure_count']} failure(s). Last error: "
-                    f"interrupted: consumer stopped mid-run",
+                    f"{row['last_error']}",
                     severity="error",
                 )
                 print(f"Podcast recovery alert sent={sent}")

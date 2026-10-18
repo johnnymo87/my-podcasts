@@ -160,10 +160,32 @@ def test_recovery_alerts_only_for_errored_rows(tmp_path, monkeypatch, capsys):
     assert severity == "error"
     assert "Report: title 1" in text
     assert "title 0" not in text
+    assert "interrupted: consumer stopped mid-run" in text  # the row's last_error
     out = capsys.readouterr().out
     assert "argument/g0" in out  # printed, not alerted
     assert store.get_podcast_episode("argument", "g0")["status"] == "pending"
     assert store.get_podcast_episode("argument", "g1")["status"] == "errored"
+
+
+def test_recovery_alert_quotes_the_rows_own_last_error(monkeypatch):
+    store = MagicMock()
+    store.recover_interrupted_podcast_episodes.return_value = [
+        {
+            "source": "argument",
+            "guid": "a",
+            "display_title": "A",
+            "failure_count": 4,
+            "status": "errored",
+            "last_error": "some distinct reason",
+        }
+    ]
+    sent = []
+    monkeypatch.setattr(
+        "pipeline.alerts.send_alert",
+        lambda text, severity="info": sent.append(text) or True,
+    )
+    _recover_podcast_episodes(store)
+    assert "Last error: some distinct reason" in sent[0]
 
 
 def test_recovery_no_rows_is_silent(tmp_path, monkeypatch, capsys):
@@ -191,6 +213,7 @@ def test_recovery_swallows_store_and_alert_errors(monkeypatch, capsys):
             "display_title": "A",
             "failure_count": 4,
             "status": "errored",
+            "last_error": "interrupted: consumer stopped mid-run",
         },
         {
             "source": "s",
@@ -198,6 +221,7 @@ def test_recovery_swallows_store_and_alert_errors(monkeypatch, capsys):
             "display_title": "B",
             "failure_count": 4,
             "status": "errored",
+            "last_error": "interrupted: consumer stopped mid-run",
         },
     ]
     sent = []

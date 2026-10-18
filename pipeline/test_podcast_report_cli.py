@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import xml.etree.ElementTree as ET
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -660,7 +661,8 @@ def test_enqueue_fetch_error_exits_1(queue_cli):
 
 
 def test_enqueue_r2_key_collision_exits_1(queue_cli):
-    _q("enqueue", "--source", "argument", "--guid", GUID)
+    first = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert first.exit_code == 0, first.output
     # Same title and date under a different guid -> same R2 key.
     clash = FEED_XML.replace(OTHER_GUID, "audioboom-clash").replace(
         "Thu, 08 Oct 2026 07:00:00 +0000", "Thu, 15 Oct 2026 07:00:00 +0000"
@@ -763,11 +765,90 @@ def test_list_shows_rows_and_truncates_error(queue_cli):
 
 
 def test_queue_commands_never_touch_r2_or_pipeline(queue_cli):
-    # The fixture's boom() would raise if any command reached R2 or ran the
-    # pipeline; exercise all three.
-    for args in (
-        ("enqueue", "--source", "argument", "--guid", GUID),
-        ("list",),
-        ("reset", "--source", "argument", "--guid", GUID),
+    # The fixture's boom() raises AssertionError if a command reaches R2 or
+    # runs the pipeline; CliRunner would surface that as result.exception.
+    for args, code in (
+        (("enqueue", "--source", "argument", "--guid", GUID), 0),
+        (("list",), 0),
+        (("reset", "--source", "argument", "--guid", GUID), 0),
     ):
-        assert not isinstance(_q(*args).exception, AssertionError)
+        result = _q(*args)
+        assert result.exit_code == code, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_enqueue_completed_row_reports_already_completed(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    store = _store()
+    try:
+        store._conn.execute("UPDATE podcast_episodes SET status = 'completed'")
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 0, result.output
+    assert "already completed" in result.output
+    assert "reset" not in result.output
+
+
+@pytest.mark.parametrize("body", ["<html><body>Bad gateway", "", "not xml at all"])
+def test_enqueue_unparseable_feed_exits_1_cleanly(queue_cli, body):
+    queue_cli["fetch"] = lambda url: body
+    result = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 1
+    assert "ParseError" in result.output
+    assert not isinstance(result.exception, ET.ParseError)
+    store = _store()
+    try:
+        assert store.list_podcast_episodes() == []
+    finally:
+        store.close()
+
+
+def test_reset_pending_row_makes_it_due_now(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    store = _store()
+    try:
+        store._conn.execute(
+            "UPDATE podcast_episodes SET failure_count = 2, last_error = 'e', "
+            "next_attempt_at = '2099-01-01T00:00:00+00:00'"
+        )
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("reset", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 0, result.output
+    assert f"reset argument/{GUID} (was pending)" in result.output
+    store = _store()
+    try:
+        row = store.get_podcast_episode("argument", GUID)
+    finally:
+        store.close()
+    assert row["failure_count"] == 0
+    assert datetime.fromisoformat(row["next_attempt_at"]) == NOW
+
+
+def test_reset_in_progress_hints_at_restarting_the_consumer(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    store = _store()
+    try:
+        store._conn.execute("UPDATE podcast_episodes SET status = 'in_progress'")
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("reset", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 1
+    assert "restart the consumer" in result.output
+
+
+def test_reset_completed_does_not_suggest_restarting(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    store = _store()
+    try:
+        store._conn.execute("UPDATE podcast_episodes SET status = 'completed'")
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("reset", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 1
+    assert "restart" not in result.output

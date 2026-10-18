@@ -923,12 +923,23 @@ class StateStore:
         prior = str(row["status"])
         if prior in ("completed", "in_progress"):
             raise ValueError(f"cannot reset a {prior} podcast episode")
-        self._conn.execute(
+        # The status guard is repeated in the UPDATE: the consumer can claim
+        # the row between the SELECT above and this write, and a reset must
+        # never clobber an in_progress (or completed) row.
+        cur = self._conn.execute(
             "UPDATE podcast_episodes SET status = 'pending', failure_count = 0, "
             "last_error = NULL, next_attempt_at = ?, updated_at = datetime('now') "
-            "WHERE source = ? AND guid = ?",
+            "WHERE source = ? AND guid = ? AND status IN ('pending', 'errored')",
             (_utc_iso(now), source, guid),
         )
+        if cur.rowcount == 0:
+            current = self._conn.execute(
+                "SELECT status FROM podcast_episodes WHERE source = ? AND guid = ?",
+                (source, guid),
+            ).fetchone()
+            if current is None:
+                raise KeyError((source, guid))
+            raise ValueError(f"cannot reset a {current['status']} podcast episode")
         self._conn.commit()
         return prior
 
@@ -943,7 +954,8 @@ class StateStore:
         ``next_attempt_at`` is kept, so a row that was already due runs at once.
 
         Returns one dict per recovered row (source, guid, display_title,
-        failure_count, status) so the caller can alert on newly errored ones.
+        failure_count, status, last_error) so the caller can alert on newly
+        errored ones.
         """
         rows = self._conn.execute(
             "SELECT source, guid, display_title, failure_count "
@@ -954,17 +966,12 @@ class StateStore:
         for row in rows:
             failure_count = int(row["failure_count"] or 0) + 1
             status = "errored" if failure_count >= PODCAST_MAX_FAILURES else "pending"
+            last_error = "interrupted: consumer stopped mid-run"
             self._conn.execute(
                 "UPDATE podcast_episodes SET status = ?, failure_count = ?, "
                 "last_error = ?, updated_at = datetime('now') "
                 "WHERE source = ? AND guid = ? AND status = 'in_progress'",
-                (
-                    status,
-                    failure_count,
-                    "interrupted: consumer stopped mid-run",
-                    row["source"],
-                    row["guid"],
-                ),
+                (status, failure_count, last_error, row["source"], row["guid"]),
             )
             recovered.append(
                 {
@@ -973,6 +980,7 @@ class StateStore:
                     "display_title": row["display_title"],
                     "failure_count": failure_count,
                     "status": status,
+                    "last_error": last_error,
                 }
             )
         self._conn.commit()

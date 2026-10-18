@@ -1943,6 +1943,7 @@ def podcast_report_enqueue_command(source_key: str, guid: str) -> None:
     nothing here touches R2.
     """
     import sqlite3
+    import xml.etree.ElementTree as ET
 
     import httpx
 
@@ -1959,7 +1960,13 @@ def podcast_report_enqueue_command(source_key: str, guid: str) -> None:
         item = podcast_report.find_item(
             podcast_report.fetch_feed_xml(source.rss_url), guid
         )
-    except (podcast_report.ItemNotFoundError, httpx.HTTPError, OSError) as exc:
+    except (
+        podcast_report.ItemNotFoundError,
+        httpx.HTTPError,
+        OSError,
+        ET.ParseError,  # not a ValueError: a 200 with an HTML/garbage body
+        ValueError,
+    ) as exc:
         raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
 
     store = StateStore(_default_state_db_path())
@@ -1971,6 +1978,9 @@ def podcast_report_enqueue_command(source_key: str, guid: str) -> None:
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
         except sqlite3.IntegrityError as exc:
+            # (source, guid) duplicates are handled inside admit_podcast_episode
+            # (admitted=False), so the only IntegrityError that reaches here is
+            # the UNIQUE r2_key: a different guid already owns this identity.
             raise click.ClickException(
                 f"cannot enqueue {source.key}/{guid}: its R2 key collides with "
                 f"another episode ({exc})"
@@ -1979,7 +1989,8 @@ def podcast_report_enqueue_command(source_key: str, guid: str) -> None:
     finally:
         store.close()
 
-    assert row is not None  # admitted just now, or already present
+    if row is None:  # admitted a moment ago; only a concurrent delete gets here
+        raise click.ClickException(f"{source.key}/{guid} vanished after admission")
     if admitted:
         click.echo(f'enqueued {source.key}/{guid} as "{row["display_title"]}"')
         return
@@ -2004,7 +2015,13 @@ def podcast_report_reset_command(source_key: str, guid: str) -> None:
                 f"no podcast episode {source_key}/{guid} in the queue"
             ) from None
         except ValueError as exc:
-            raise click.ClickException(f"{source_key}/{guid}: {exc}") from exc
+            hint = ""
+            if "in_progress" in str(exc):
+                hint = (
+                    " (the consumer is running it; if it is not -- e.g. a failure "
+                    "could not be recorded -- restart the consumer to re-queue it)"
+                )
+            raise click.ClickException(f"{source_key}/{guid}: {exc}{hint}") from exc
     finally:
         store.close()
     click.echo(f"reset {source_key}/{guid} (was {prior})")
