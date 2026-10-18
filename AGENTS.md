@@ -17,7 +17,7 @@ Quick start and navigation for humans and coding agents.
 6. Subscription URLs:
    - Main: `https://podcast.mohrbacher.dev/feed.xml`
    - Levine: `https://podcast.mohrbacher.dev/feeds/levine.xml`
-   - Yglesias: `https://podcast.mohrbacher.dev/feeds/yglesias.xml`
+   - Yglesias: `https://podcast.mohrbacher.dev/feeds/yglesias.xml` (email posts; also the audio-derived "Report:" episodes of The Argument)
    - Silver Bulletin: `https://podcast.mohrbacher.dev/feeds/silver.xml`
    - The Rundown: `https://podcast.mohrbacher.dev/feeds/the-rundown.xml` (created on first episode)
    - FP Digest: `https://podcast.mohrbacher.dev/feeds/fp-digest.xml`
@@ -71,6 +71,7 @@ Quick start and navigation for humans and coding agents.
 - Transcript report path (chinatalk, yglesias, silver): `pipeline/transcript_detect.py` (shared detector), `pipeline/transcript_report.py` (prompt registry + gate, called from `pipeline/processor.py`)
 - Shared opencode-serve report mechanics: `pipeline/report_engine.py` (session lifecycle, `<script>`/`<summary>` extraction, publish-boundary refusals) — the **only** implementation, used by `transcript_report.py`, `report_writer.py`, `rundown_writer.py`, and `fp_writer.py`. Split into `fetch_report_text` (session lifecycle) and `parse_report` (extraction + every refusal), with `run_report_prompt` as their composition; the daily writers compose the halves themselves so they can persist raw model output between the two
 - TTS renderer: `pipeline/tts/` (`render_episode`: chunk → OpenAI PCM → one mp3 encode; per-feed voice lives only in `FEED_VOICES` in `pipeline/tts/config.py`; `render_episode` renders a Gemini primary through `pipeline/tts/gemini_phase.py` (a killable child process: synth + per-chunk ASR verification, falling back to whole-episode OpenAI on any problem); **The Rundown, FP Digest and Levine render Gemini `gemini-3.8-flash-lite-tts`** (Kore, Alnilam, Enceladus; each falls back to its old OpenAI voice: nova, onyx, ash; T6 `my-podcasts-9p3.7`, T7 `9p3.8`), every other feed is still OpenAI; completed-render cache `/persist/my-podcasts/tts-cache/`, per-attempt manifests `/persist/my-podcasts/tts-renders/<feed>/`). Design: `docs/plans/2026-09-30-gemini-tts-design.md`. Operator notes: `pipeline/AGENTS.md` ("TTS renderer"); verifier: `pipeline/tts/verify.py` (+ `normalize.py`, `asr.py`, `segment.py`; CLI `tts-verify`); local voice audition: `pipeline/tts/audition.py` (CLI `tts-audition`, never publishes)
+- Podcast audio reports (The Argument, from the public audio): `pipeline/podcast_sources.py` (source registry), `podcast_feed.py` (RSS parse), `podcast_download.py`, `podcast_transcribe.py` (Gemini ASR in ~10-min pieces), `podcast_writer.py`, `podcast_report.py` (`run_episode_to_script`), `podcast_child.py` (killable child), `podcast_jobs.py` (identity + admission), `podcast_publish.py`, `podcast_poller.py` (discovery), `podcast_executor.py`; queue state in `pipeline/db.py` (`podcast_episodes`); CLI `podcast-report`. See "Podcast Audio Reports (The Argument)"
 - One-off episodes (source adapters): `pipeline/sources.py` (adapter registry + dispatch), `pipeline/document.py` (`Document` model), `pipeline/substack.py` (Substack API ingest + HTML normalization), `pipeline/arxiv.py` (arXiv paper adapter), `pipeline/report_writer.py` (style-keyed report writer)
 
 ## Where To Start
@@ -527,7 +528,7 @@ cheap insurance, not a measured need.
 
 Several newsletters occasionally ship the verbatim transcript of a podcast conversation as the email body — 60-80 minutes of narration nobody asked for. For a *confirmed* transcript, the pipeline replaces the TTS body with an AI-written spoken briefing about the conversation and prefixes the episode title with "Report: ". Essays are read normally.
 
-**Registered feeds:** `chinatalk`, `yglesias` (Matt Yglesias's *The Argument* with Jerusalem Demsas, including one-off live events with guests), and `silver` (Silver Bulletin conversations between Nate Silver's team and a guest). Registering a feed is a one-line addition to `TRANSCRIPT_FEEDS` in `pipeline/transcript_report.py` plus a prompt constant — there is no per-feed module.
+**Registered feeds:** `chinatalk`, `yglesias` (Matt Yglesias's *The Argument* with Jerusalem Demsas, including one-off live events with guests), and `silver` (Silver Bulletin conversations between Nate Silver's team and a guest). Registering a feed is a one-line addition to `TRANSCRIPT_FEEDS` in `pipeline/transcript_report.py` plus a prompt constant — there is no per-feed module. **The `yglesias` email path is dormant for The Argument** since Slow Boring stopped cross-posting after 2026-09-24; its reports now come from the audio path (see "Podcast Audio Reports (The Argument)"). The registration stays for any live-event transcript that still arrives by email.
 
 **Detection:** `pipeline/transcript_detect.looks_like_transcript` — deterministic and content-only. It counts line-start speaker labels and fires only when at least two distinct speakers each take five or more turns. No LLM call, so detection never depends on a remote API: the previous Gemini classifier silently returned NO during a 2026-05-26 endpoint outage and shipped an 80-minute transcript as a literal read. It also survives Substack footer/boilerplate changes, which a marker-based detector did not (it missed yglesias live-event posts entirely).
 
@@ -548,6 +549,75 @@ Several newsletters occasionally ship the verbatim transcript of a podcast conve
 **Silver detector evidence.** The false-positive cost here is silent and severe — a real essay replaced by an AI summary and shipped with no alarm — so detector safety on `silver` was measured rather than assumed. All 57 archived Silver Bulletin emails were replayed from R2 through the real email path (`EmailProcessor` → `SubstackAdapter.clean_body` → the detector): **4 transcripts, 53 essays, zero false positives.** The archive includes the shapes most likely to misfire — the SBSQ subscriber-questions mailbag (the speaker-turn regex does match a bare `Q:`), poll and ranking tables (`Texas:`, `Ohio:`), and multi-part posts (`Part II:`) — and none fired. Three of those real bodies are pinned as fixtures in `pipeline/fixtures/silver_*.txt`. Note that a Silver transcript post opens with the author's own essay at 4-11% of the body, so one report covers the whole post; and that the 2026-04-29 transcript has no Nate Silver in it, which is why the prompt takes participants from the transcript.
 
 **Design doc:** `docs/plans/2026-08-18-silver-transcript-report-design.md`.
+
+## Podcast Audio Reports (The Argument)
+
+Turns each new episode of *The Argument* into a "Report: ..." spoken briefing on the `yglesias` feed, **from the public audio**. Fully automated; the consumer discovers, runs and publishes. Design: `docs/plans/2026-10-18-argument-audio-report-design.md`; plans: `docs/plans/2026-10-18-argument-audio-report.md` (Phase 1, pure pipeline + pilot) and `...-phase2.md` (queue, executor, CLI); pilot measurements: `docs/plans/2026-10-18-argument-audio-report-pilot.md`.
+
+**Why.** Slow Boring stopped cross-posting The Argument's transcripts after 2026-09-24, so the email transcript path (see "Transcript Report Path") went quiet. The official transcript is paid-only and is deliberately not bypassed. The audio is public: `https://audioboom.com/channels/5173020.rss`. Output goes to the existing feed `https://podcast.mohrbacher.dev/feeds/yglesias.xml`; there is no new subscription URL.
+
+**Flow.**
+1. **Discovery**, every 6 hours inside the consumer (`podcast_poller.discover`, its own clock, not `_last_blog_poll`): fetch the RSS, admit every item with `since <= pub_date <= now` (`PodcastSource.since` = 2026-10-16, so nothing older is auto-admitted) as a `pending` row in `podcast_episodes`. Keyed by RSS **guid**, never the enclosure URL (audioboom's carries mutable tracking params). A future-dated item is refused.
+2. **Executor**, once per consumer loop iteration (`_podcast_tick` → `podcast_executor.run_one_podcast_episode`): picks the oldest-published `pending` row whose `next_attempt_at` has arrived, claims it (`in_progress`), and runs a **killable `spawn` child** (`podcast_child`) that does download → Gemini transcription in ~10-minute pieces → report writer (`opencode-serve`), under one **25-minute wall-clock deadline** (`CHILD_DEADLINE_S = 1500`; pilot: ~4.5 min for an 80-85 min episode). The deadline is a `kill()` from the parent because the Gemini SDK and opencode can both trickle bytes forever.
+3. **TTS + publish run in the parent** (`podcast_publish`; voice from `FEED_VOICES["yglesias"]`, OpenAI). `publish_script` is not idempotent, so publish **reconciles**: if the frozen `r2_key` already has an `episodes` row, only the feeds are regenerated/uploaded (no TTS). Identity (title, date, slug, `r2_key`) is computed once at admission and stored on the row; publish recomputes it and refuses to proceed on any difference (`identity drift`).
+4. On success the row is `completed`, `stats_json` is filled, and `audio.mp3` is deleted.
+
+**Modules.**
+- `pipeline/podcast_sources.py` — `PodcastSource` registry (`argument`: feed `yglesias`, hosts, `since`)
+- `pipeline/podcast_feed.py` — RSS → `PodcastItem` (guid, title, link, `pub_date`, duration, enclosure, description); `eligible_items`
+- `pipeline/podcast_download.py` — enclosure download (skips an existing `audio.mp3`)
+- `pipeline/podcast_transcribe.py` — ffmpeg decode, ~600 s pieces, Gemini (`gemini-3.8-flash`) speaker-labelled ASR, per-piece checkpoints, duration/words-per-minute refusals
+- `pipeline/podcast_writer.py` — writer via `report_engine` (`fetch_report_text` + `parse_report`); raw reply persisted atomically, keyed by a hash of the full instruction; prompt in `transcript_report.py` (`build_audio_report_instruction`)
+- `pipeline/podcast_report.py` — `run_episode_to_script` (one episode into a work dir), `dry-run` helpers
+- `pipeline/podcast_child.py` — killable child + `scrub_detail` (strips URL query strings from anything stored or alerted)
+- `pipeline/podcast_jobs.py` — `podcast_identity`, `admit_item`, `work_dir_for`, `item_from_row`
+- `pipeline/podcast_publish.py` — reconciling publish, show notes
+- `pipeline/podcast_poller.py` — discovery + health alerts; `pipeline/podcast_executor.py` — one-job executor, stats, alerts
+- `pipeline/db.py` — `podcast_episodes`, `podcast_source_health` and the `*_podcast_*` methods; `pipeline/consumer.py` — `_podcast_tick`, `_recover_podcast_episodes`; `pipeline/__main__.py` — `podcast-report` group
+
+**State: `podcast_episodes`.** One row per `(source, guid)`; `r2_key` is `UNIQUE`. Columns: `item_json` (frozen admission metadata), `pub_date`, `display_title` (`Report: <UTC date> - The Argument - <title>`), `episode_slug`, `r2_key`, `admitted_via` (`poll`/`enqueue`), `status`, `failure_count`, `last_error` (scrubbed, ≤500 chars), `next_attempt_at`, `stats_json`. Statuses: `pending` (eligible when `next_attempt_at <= now`), `in_progress` (the consumer has it), `completed` (published), `errored` (budget spent or terminal failure; nothing picks it up until `reset`). `podcast_source_health` holds the discovery failure streak. Query it with Python, because the `sqlite3` CLI is not installed:
+
+```bash
+uv run python -c "
+import sqlite3
+c = sqlite3.connect('/persist/my-podcasts/state.sqlite3'); c.row_factory = sqlite3.Row
+for r in c.execute('select status, failure_count, next_attempt_at, pub_date, display_title, last_error, stats_json from podcast_episodes order by pub_date desc'):
+    print(dict(r))
+print([dict(r) for r in c.execute('select * from podcast_source_health')])
+"
+```
+
+**CLI** (`uv run python -m pipeline podcast-report ...`). Only `dry-run` does any work itself; `enqueue`/`reset` write job rows and the consumer executes them.
+- `dry-run --source argument --guid <GUID> [--rss-file F] [--work-dir D] [--no-carry-context]` — download, transcribe and write into a work dir (default `/persist/my-podcasts/podcast-work/dry-run/<source>/<hash>`); publishes nothing, touches no DB/R2/feed. Needs `GEMINI_API_KEY` and a live opencode serve (checked first). Reruns reuse `audio.mp3` and checkpoints; leave `audio.mp3` in place, because the host inserts ads dynamically and a fresh download is different audio that misses every checkpoint.
+- `enqueue --source argument --guid <GUID>` — backfill: admits regardless of `since`, refuses a future-dated item or an `r2_key` collision, no-ops (prints the current status) on an existing row.
+- `reset --source argument --guid <GUID>` — `pending`/`errored` → `pending`, `failure_count = 0`, due now. Refuses `completed` and `in_progress`.
+- `list [--source argument]` — status, date, failures, title, last error; newest episode first.
+
+```bash
+uv run python -m pipeline podcast-report enqueue --source argument --guid audioboom-01a0f39d-75cf-79af-9db5-6192b276aebd
+uv run python -m pipeline podcast-report list --source argument
+uv run python -m pipeline podcast-report reset --source argument --guid <GUID>
+```
+
+**Work dirs.** Production: `/persist/my-podcasts/podcast-work/<source>/<sha256(guid)[:16]>/`; dry runs: `.../podcast-work/dry-run/<source>/<hash>/`. A work dir is bound to one guid by `item.json` (a different guid in the same dir is refused: stage `claim`). Files: `item.json` (written once), `job.json` (parent → child), `acquisition.json` (`{url, downloaded_at, bytes, sha256}` of the actual download), `audio.mp3` (deleted on completion), `transcript.txt`/`transcript.json` (manifest with durations and per-piece tokens), `pieces/NNNN.json` (checkpoints), `raw_writer_output-<key>.txt` (+ `.rejected.txt` when the parser refused it), `script.txt`, `summary.txt`, `show_notes.md`, `child_stage.json`/`child_result.json`. A retry re-runs the child against the same dir, so only the failed stage is re-paid.
+
+**Retry and terminal policy.** Every failure counts against one budget: 6 h backoff, the 4th failure → `errored` plus one give-up alert. **Terminal at once** (first failure → `errored`): stage `claim` (work dir owned by another episode — a bug) and a Gemini `TranscriptionError` with HTTP 400 (invalid request/key). A consumer restart that interrupts a running job also counts as a failure (`recover_interrupted_podcast_episodes`, `last_error` "interrupted: ..."; the 4th makes it `errored` and alerts), so **restart the consumer between runs when you can**: check `podcast-report list` for `in_progress` first. A killed or stuck child is a failure like any other (`reason` `deadline`, `child_no_result`, ...).
+
+**Alerts** (Telegram General via `alerts.send_alert`): give-up (retry budget spent, including via restart recovery); discovery failed 4 consecutive ticks (fetch/parse error or a feed parsing to zero items; one alert per streak, re-armed by a success); `r2_key` collision at discovery (once per process; a restart re-alerts once); duration headroom (`info`, see below); and `could not record failure ... row stuck in_progress` when the database refuses the failure itself (the row is re-queued by the next consumer start).
+
+**Duration delta.** The check refuses audio whose decoded length differs from the RSS duration by more than `max(120 s, 8% of RSS)` (`podcast_transcribe._check_duration`). The decoded audio is routinely *longer* because of dynamic ad insertion (CDN URL says `media_type=dynamic`): pilot +141 s and +161 s on 4807 s / 5152 s episodes, ~40% of the allowance. On completion `stats_json` records `decoded_duration_s`, `rss_duration_s`, `decoded_minus_rss_s`, `allowed_s`, `pieces`, `input_tokens`, `output_tokens`, `child_elapsed_s` and `publish` (`published`/`reconciled`); past 75% of the allowance an `info` alert fires. That is the early warning before refusals begin; refusals start at 100%.
+
+**Operator cautions.**
+- **A running job blocks the single-threaded consumer** for up to ~30 minutes (25 min child deadline plus TTS + publish). Email ingest, The Rundown and FP Digest wait; they are not lost. A queue-pull failure (`Queue pull failed`) `continue`s the loop before `_podcast_tick`, so podcast work is skipped for that iteration.
+- **Cost:** about $0.20-0.40 per episode for Gemini ASR, plus TTS.
+- **Never run the executor by hand**; `enqueue` only admits. Same single-executor rule as "Daily Job Execution Model".
+
+**Accepted gaps.**
+- If Slow Boring resumes cross-posting transcripts, both paths fire and the feed gets two "Report:" items for one episode.
+- Sponsor reads are marked by the transcriber and skipped by the writer; a missed ad read can leak a sentence into a script.
+- Episode `<pubDate>` is publish time (what `publish_script` does for every feed); the title carries the original date. Backfills therefore appear as new items.
+- Re-publishing is unsupported: `reset` refuses a `completed` row. A row that is `pending`/`errored` although its episode is already live (completion could not be recorded) reconciles on the next run and keeps the existing audio; it never re-renders.
+- Raw transcripts never leave the host: only the AI briefing is published, with show notes saying it is an unofficial briefing and linking the original episode.
 
 ## Landing the Plane (Session Completion)
 

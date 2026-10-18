@@ -61,6 +61,14 @@ Work in `/home/dev/projects/my-podcasts/.worktrees/argument-audio-report`.
   binding decisions); executing via SDD in worktree
   `.worktrees/argument-audio-phase2`, branch `argument-audio-phase2` (stacked
   on `argument-audio-report`, PR #37 awaiting owner merge).
+- **Status (latest): Phase 2 Tasks 8-15 implemented and reviewed** (spec + quality
+  review per task) in worktree `.worktrees/argument-audio-phase2`, branch
+  `argument-audio-phase2`; see `git log` for the head. Docs landed in Task 15
+  (root `AGENTS.md` "Podcast Audio Reports (The Argument)", `pipeline/AGENTS.md`).
+  **Next:** Task 16 per the Phase 2 plan: pre-PR adversarial review of the diff,
+  PR (base `argument-audio-report` until #37 merges, then rebase onto main), then
+  ship with owner OK (consumer restart, backfill the four GUIDs below, delete the
+  R2 previews, confirm the Thursday 2026-10-22 unattended run).
 - Phase 2 notes from reviews: key state by `(source.key, guid)`; record
   acquisition (URL, time, audio sha) separately from immutable admission
   metadata in item.json; executor must wrap `run_episode_to_script` in the
