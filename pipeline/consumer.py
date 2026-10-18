@@ -452,13 +452,13 @@ def _recover_podcast_episodes(store: StateStore) -> None:
                     f"Interrupted podcast episode {label} exhausted its retry "
                     f"budget (#{row['failure_count']}); marked errored"
                 )
-                from pipeline.alerts import send_alert
+                from pipeline.alerts import send_alert_bounded
 
-                sent = send_alert(
+                sent = send_alert_bounded(
                     f"Podcast report {row['display_title']} gave up after "
                     f"{row['failure_count']} failure(s). Last error: "
                     f"{row['last_error']}",
-                    severity="error",
+                    "error",
                 )
                 print(f"Podcast recovery alert sent={sent}")
             else:

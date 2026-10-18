@@ -268,3 +268,36 @@ def test_consume_forever_recovers_once_before_first_pull(monkeypatch, calls):
     # The tick ran after the first iteration's work (discovery + executor).
     assert len(calls["discover"]) == 1
     assert len(calls["execute"]) == 1
+
+
+def test_a_hanging_recovery_alert_cannot_stall_startup(monkeypatch):
+    import threading
+    import time
+
+    from pipeline import alerts as alerts_mod
+
+    monkeypatch.setattr(alerts_mod, "BOUNDED_ALERT_TIMEOUT_S", 0.2)
+    release = threading.Event()
+    store = MagicMock()
+    store.recover_interrupted_podcast_episodes.return_value = [
+        {
+            "source": "argument",
+            "guid": "a",
+            "display_title": "A",
+            "failure_count": 4,
+            "status": "errored",
+            "last_error": "interrupted: consumer stopped mid-run",
+        }
+    ]
+
+    def hung(text, severity="info"):
+        release.wait(30)
+        return True
+
+    monkeypatch.setattr("pipeline.alerts.send_alert", hung)
+    try:
+        t0 = time.monotonic()
+        _recover_podcast_episodes(store)
+        assert time.monotonic() - t0 < 5.0
+    finally:
+        release.set()

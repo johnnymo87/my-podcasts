@@ -732,3 +732,29 @@ def test_now_defaults_to_the_wall_clock(store, work_root):
         work_root=work_root,
     )
     assert result == f"argument/{item.guid}: published"
+
+
+def test_a_hanging_alert_cannot_stall_the_executor(store, work_root, monkeypatch):
+    import threading
+    import time
+
+    from pipeline import alerts as alerts_mod
+
+    monkeypatch.setattr(alerts_mod, "BOUNDED_ALERT_TIMEOUT_S", 0.2)
+    release = threading.Event()
+
+    def hung(text, severity="info"):
+        release.wait(30)
+        return True
+
+    item = _admit(store)
+    child = FakeChild(work_root, _bad(stage="claim", reason="WorkDirOwned"))
+    try:
+        t0 = time.monotonic()
+        result = _run(store, work_root, child, Publish(), hung)
+        assert time.monotonic() - t0 < 5.0
+    finally:
+        release.set()
+    # The give-up alert timed out; the row transition happened regardless.
+    assert result == f"argument/{item.guid}: errored (1)"
+    assert store.get_podcast_episode("argument", item.guid)["status"] == "errored"

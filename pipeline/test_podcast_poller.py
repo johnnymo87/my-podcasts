@@ -329,3 +329,40 @@ def test_health_recording_failing_on_success_path_is_contained(store):
 def test_discover_never_raises_for_a_source(store):
     wrapped = _HealthRaises(store)
     discover(wrapped, now=NOW, fetch=_raising, alert=Alerts(), sources=[SOURCE])
+
+
+def test_a_hanging_alert_cannot_stall_discovery(store, monkeypatch):
+    import threading
+    import time
+
+    from pipeline import alerts as alerts_mod
+
+    monkeypatch.setattr(alerts_mod, "BOUNDED_ALERT_TIMEOUT_S", 0.2)
+    release = threading.Event()
+
+    def hung(text, severity="info"):
+        release.wait(30)
+        return True
+
+    good = dataclasses.replace(
+        SOURCE, key="good", rss_url="https://good.example/rss", feed_slug="other"
+    )
+
+    def fetch(url: str) -> str:
+        if "good" in url:
+            return FEED_XML
+        raise ConnectionError("down")
+
+    try:
+        t0 = time.monotonic()
+        for _ in range(PODCAST_HEALTH_ALERT_AFTER):
+            counts = discover(
+                store, now=NOW, fetch=fetch, alert=hung, sources=[SOURCE, good]
+            )
+        assert time.monotonic() - t0 < 5.0
+    finally:
+        release.set()
+    assert counts["good"] == 0  # already admitted on the first tick
+    assert store.get_podcast_health("argument")["consecutive_failures"] == (
+        PODCAST_HEALTH_ALERT_AFTER
+    )

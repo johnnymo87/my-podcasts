@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable
 from datetime import datetime
 
 from pipeline import podcast_report
-from pipeline.alerts import send_alert
+from pipeline.alerts import send_alert, send_alert_bounded
 from pipeline.podcast_child import scrub_detail
 from pipeline.podcast_feed import eligible_items, parse_podcast_feed
 from pipeline.podcast_jobs import admit_item
@@ -30,15 +30,6 @@ logger = logging.getLogger(__name__)
 # same alert would repeat every 6-hour tick. Cleared by a consumer restart,
 # which re-alerts once: acceptable, and better than silence after a restart.
 _ALERTED_COLLISIONS: set[tuple[str, str]] = set()
-
-
-def _safe_alert(alert: Callable[..., bool], text: str, severity: str) -> bool:
-    """Send an alert; an alert that cannot be sent must not abort discovery."""
-    try:
-        return bool(alert(text, severity=severity))
-    except Exception:  # noqa: BLE001
-        logger.exception("podcast discovery: alert sender raised; text was: %s", text)
-        return False
 
 
 def _tick(
@@ -118,11 +109,11 @@ def discover(
             )
             continue
         if error is not None and should_alert:
-            sent = _safe_alert(
-                alert,
+            sent = send_alert_bounded(
                 f"Podcast discovery for {source.name} failed {count} times "
                 f"in a row: {error}",
                 "error",
+                sender=alert,
             )
             logger.error(
                 "podcast discovery for %s: health alert sent=%s", source.key, sent
@@ -134,11 +125,11 @@ def discover(
             logger.info("podcast discovery: %s/%s still collides (already alerted)", *c)
     if new:
         _ALERTED_COLLISIONS.update(new)
-        sent = _safe_alert(
-            alert,
+        sent = send_alert_bounded(
             "Podcast discovery: r2_key collision, episode(s) not admitted: "
             + ", ".join(f"{s}/{g}" for s, g in new),
             "error",
+            sender=alert,
         )
         logger.error("podcast discovery: collision alert sent=%s", sent)
     return results

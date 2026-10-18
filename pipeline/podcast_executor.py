@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline import podcast_child, podcast_publish
-from pipeline.alerts import send_alert
+from pipeline.alerts import send_alert, send_alert_bounded
 from pipeline.podcast_child import scrub_detail
 from pipeline.podcast_jobs import PODCAST_WORK_ROOT, item_from_row, work_dir_for
 from pipeline.podcast_report import AUDIO_NAME, EPISODE_AUDIO_NAME
@@ -41,15 +41,6 @@ logger = logging.getLogger(__name__)
 # beyond this fraction we are close enough to a refusal to say so.
 HEADROOM_WARN_FRACTION = 0.75
 TERMINAL_HTTP_CODE = 400  # Gemini reports an invalid request/key as 400
-
-
-def _safe_alert(alert: Callable[..., bool], text: str, severity: str) -> bool:
-    """An alert that cannot be sent must never change a job's outcome."""
-    try:
-        return bool(alert(text, severity=severity))
-    except Exception:  # noqa: BLE001
-        logger.exception("podcast executor: alert sender raised; text was: %s", text)
-        return False
 
 
 def _num(value: object) -> float | int | None:
@@ -175,11 +166,11 @@ def run_one_podcast_episode(
             )
         except Exception:  # noqa: BLE001 -- see the docstring
             logger.exception("%s: could not record failure %r", label, error)
-            sent = _safe_alert(
-                alert,
+            sent = send_alert_bounded(
                 f"could not record failure for {label}; row stuck in_progress "
                 f"until consumer restart: {error}",
                 "error",
+                sender=alert,
             )
             print(f"podcast-report {label}: failure not recorded, alert sent={sent}")
             return f"{label}: failure not recorded"
@@ -188,11 +179,11 @@ def run_one_podcast_episode(
         logger.warning("%s: %s: %s", label, verdict, error)
         print(f"podcast-report {label}: {verdict}: {error}")
         if retry.exhausted:
-            sent = _safe_alert(
-                alert,
+            sent = send_alert_bounded(
                 f"Podcast report {title} gave up after {retry.failure_count} "
                 f"failure(s). Last error: {error}",
                 "error",
+                sender=alert,
             )
             print(f"podcast-report {label}: give-up alert sent={sent}")
         return f"{label}: {verdict}"
@@ -244,14 +235,14 @@ def run_one_podcast_episode(
             logger.warning("%s: could not delete %s: %r", label, name, exc)
 
     if _headroom_used(stats):
-        sent = _safe_alert(
-            alert,
+        sent = send_alert_bounded(
             f"Podcast report {title}: decoded audio is "
             f"{stats['decoded_minus_rss_s']:+.0f}s from the RSS duration, "
             f"{abs(stats['decoded_minus_rss_s']) / stats['allowed_s']:.0%} of the "
             f"{stats['allowed_s']:.0f}s the duration check allows. Refusals "
             "start at 100%.",
             "info",
+            sender=alert,
         )
         print(f"podcast-report {label}: headroom alert sent={sent}")
 
