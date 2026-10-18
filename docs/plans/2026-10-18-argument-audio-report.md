@@ -45,8 +45,13 @@ Work in `/home/dev/projects/my-podcasts/.worktrees/argument-audio-report`.
   both dry runs succeeded (~4.5 min each); findings in
   `docs/plans/2026-10-18-argument-audio-report-pilot.md`; evidence in
   `/persist/my-podcasts/podcast-work/dry-run/argument/pilot-evidence/`.
-  **GATE: waiting on owner** (ear check, proceed/tune/hedge, script length,
-  PR now vs fold into Phase 2). Do not start Phase 2 before that answer.
+  **GATE PASSED 2026-10-18.** Owner listened to rendered previews (R2
+  `episodes/preview/argument-report-2026-10-{15,08}-1853dabc.mp3`, unlisted;
+  delete once Phase 2 ships): "they're great"; attribution "nothing seems
+  completely out of character" (owner did not compare against the original).
+  Decisions: **proceed to Phase 2 as designed** (named attribution as
+  produced); ~10-11 min length is fine; PR shape and preview cleanup left to
+  agent -> Phase 1 opened as its own PR, previews kept until ship.
   Phase 1 code diverged from the plan snippets in places (real module APIs win:
   `run_episode_to_script` in `pipeline/podcast_report.py`, policy digest,
   checkpoints in `work_dir/pieces/`, `.rejected.txt` raw replies, carried list
