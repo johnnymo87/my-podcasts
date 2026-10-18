@@ -1,0 +1,228 @@
+"""Run at most one due podcast-report job: child -> publish -> bookkeeping.
+
+The consumer is the only executor. ``run_one_podcast_episode`` never raises for
+a job failure: whatever the child, the publish, or the stats do, the outcome is
+a row transition (``completed``, or ``fail_podcast_episode``), one summary line
+in the journal, and, when the retry budget is spent, one alert attempt.
+``KeyboardInterrupt``/``SystemExit`` still propagate; the row is then left
+``in_progress`` and ``recover_interrupted_podcast_episodes`` re-queues it on the
+next consumer start.
+
+Error strings stored on the row and sent in alerts go through ``scrub_detail``
+so a signed enclosure URL can never reach ``last_error``, the journal, or
+Telegram.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from pipeline import podcast_child, podcast_publish
+from pipeline.alerts import send_alert
+from pipeline.podcast_child import scrub_detail
+from pipeline.podcast_jobs import PODCAST_WORK_ROOT, item_from_row, work_dir_for
+from pipeline.podcast_report import AUDIO_NAME
+from pipeline.podcast_sources import get_podcast_source
+from pipeline.podcast_transcribe import (
+    DURATION_TOLERANCE_FRACTION,
+    DURATION_TOLERANCE_MIN_S,
+    MANIFEST_NAME,
+)
+
+
+logger = logging.getLogger(__name__)
+
+# Dynamic ad insertion already uses ~40% of the allowed decoded-vs-RSS gap;
+# beyond this fraction we are close enough to a refusal to say so.
+HEADROOM_WARN_FRACTION = 0.75
+TERMINAL_HTTP_CODE = 400  # Gemini reports an invalid request/key as 400
+
+
+def _safe_alert(alert: Callable[..., bool], text: str, severity: str) -> bool:
+    """An alert that cannot be sent must never change a job's outcome."""
+    try:
+        return bool(alert(text, severity=severity))
+    except Exception:  # noqa: BLE001
+        logger.exception("podcast executor: alert sender raised; text was: %s", text)
+        return False
+
+
+def _num(value: object) -> float | int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+def _sum_tokens(pieces: list[Any], key: str) -> int | None:
+    """Total of ``key`` over ``pieces``; None if any piece's count is unknown."""
+    total = 0
+    for piece in pieces:
+        value = piece.get(key) if isinstance(piece, dict) else None
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        total += value
+    return total
+
+
+def _read_manifest(work_dir: Path) -> dict[str, Any]:
+    """The transcript manifest, or ``{}`` if it is missing or unreadable.
+    Stats never fail a job that has already been published."""
+    try:
+        manifest = json.loads((work_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return manifest if isinstance(manifest, dict) else {}
+
+
+def collect_stats(work_dir: Path, *, child_elapsed_s: float, mode: str) -> dict:
+    """Run statistics for ``stats_json``. Unknown values are ``None``."""
+    manifest = _read_manifest(work_dir)
+    decoded = _num(manifest.get("decoded_duration_s"))
+    rss = _num(manifest.get("rss_duration_s"))
+    pieces = manifest.get("pieces")
+    if not isinstance(pieces, list):
+        pieces = None
+
+    diff = allowed = None
+    if decoded is not None and rss is not None:
+        diff = round(decoded - rss, 3)
+        # Same formula as podcast_transcribe._check_duration.
+        allowed = max(DURATION_TOLERANCE_MIN_S, DURATION_TOLERANCE_FRACTION * rss)
+    return {
+        "decoded_duration_s": decoded,
+        "rss_duration_s": rss,
+        "decoded_minus_rss_s": diff,
+        "allowed_s": allowed,
+        "pieces": len(pieces) if pieces is not None else None,
+        "input_tokens": _sum_tokens(pieces, "input_tokens") if pieces else None,
+        "output_tokens": _sum_tokens(pieces, "output_tokens") if pieces else None,
+        "child_elapsed_s": round(child_elapsed_s, 3),
+        "publish": mode,
+    }
+
+
+def _headroom_used(stats: dict) -> bool:
+    """True when the decoded-vs-RSS gap is past the warning fraction of the
+    allowed tolerance. Magnitude, not sign: the refusal in
+    ``podcast_transcribe._check_duration`` is on ``abs()``, so a short decode
+    is just as close to it."""
+    diff, allowed = stats["decoded_minus_rss_s"], stats["allowed_s"]
+    if diff is None or allowed is None:
+        return False
+    return abs(diff) > HEADROOM_WARN_FRACTION * allowed
+
+
+def run_one_podcast_episode(
+    store,
+    r2_client,
+    *,
+    now: datetime | None = None,
+    run_child=podcast_child.run_episode_in_child,
+    publish=podcast_publish.publish_podcast_episode,
+    alert: Callable[..., bool] = send_alert,
+    work_root: Path = PODCAST_WORK_ROOT,
+) -> str | None:
+    """Run at most one due podcast job. Returns ``"<source>/<guid>: <outcome>"``
+    or None when nothing was run.
+
+    Outcomes: ``published`` / ``reconciled`` (completed), ``failed (n)`` (back
+    to pending), ``errored (n)`` (retry budget spent, or a terminal failure),
+    ``failure not recorded`` (the database refused the failure itself; the row
+    stays ``in_progress`` until the next consumer start re-queues it).
+    """
+    now = now or datetime.now(UTC)
+    row = store.next_due_podcast_episode(now)
+    if row is None:
+        return None
+    source_key, guid = row["source"], row["guid"]
+    if not store.claim_podcast_episode(source_key, guid):
+        return None  # someone else changed it between the select and the claim
+
+    label = f"{source_key}/{guid}"
+    title = row["display_title"]
+
+    def fail(error: str, *, terminal: bool = False) -> str:
+        error = scrub_detail(error)
+        try:
+            retry = store.fail_podcast_episode(
+                source_key, guid, error, now=now, terminal=terminal
+            )
+        except Exception:  # noqa: BLE001 -- see the docstring
+            logger.exception("%s: could not record failure %r", label, error)
+            return f"{label}: failure not recorded"
+        outcome = f"{'errored' if retry.status == 'errored' else 'failed'}"
+        outcome += f" ({retry.failure_count})"
+        logger.warning("%s: %s: %s", label, outcome, error)
+        print(f"podcast-report {label}: {outcome}: {error}")
+        if retry.exhausted:
+            sent = _safe_alert(
+                alert,
+                f"Podcast report {title} gave up after {retry.failure_count} "
+                f"failure(s). Last error: {error}",
+                "error",
+            )
+            print(f"podcast-report {label}: give-up alert sent={sent}")
+        return f"{label}: {outcome}"
+
+    try:
+        source = get_podcast_source(source_key)
+        item = item_from_row(row)
+        work_dir = work_dir_for(source_key, guid, work_root)
+    except Exception as exc:  # noqa: BLE001 -- a row we cannot even interpret
+        return fail(f"setup: {type(exc).__name__}: {exc}")
+
+    try:
+        outcome = run_child(source, item, work_dir)
+    except Exception as exc:  # noqa: BLE001 -- never raise for a job failure
+        return fail(f"child: {type(exc).__name__}: {exc}")
+
+    if not outcome.ok:
+        terminal = outcome.stage == "claim" or outcome.code == TERMINAL_HTTP_CODE
+        return fail(
+            f"{outcome.stage}: {outcome.reason}: {outcome.detail}", terminal=terminal
+        )
+
+    try:
+        mode = publish(row, work_dir, store=store, r2_client=r2_client)
+    except Exception as exc:  # noqa: BLE001
+        return fail(f"publish: {type(exc).__name__}: {exc}")
+
+    # Published. From here on nothing may undo that: stats are best-effort, and
+    # if recording completion itself fails the row goes back to pending so the
+    # next attempt reconciles (finds the episode committed, re-sends feeds only).
+    try:
+        stats = collect_stats(work_dir, child_elapsed_s=outcome.elapsed_s, mode=mode)
+        store.complete_podcast_episode(source_key, guid, stats=stats)
+    except Exception as exc:  # noqa: BLE001
+        return fail(f"complete: {type(exc).__name__}: {exc}")
+
+    try:
+        (work_dir / AUDIO_NAME).unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("%s: could not delete %s: %r", label, AUDIO_NAME, exc)
+
+    if _headroom_used(stats):
+        sent = _safe_alert(
+            alert,
+            f"Podcast report {title}: decoded audio is "
+            f"{stats['decoded_minus_rss_s']:+.0f}s from the RSS duration, "
+            f"{abs(stats['decoded_minus_rss_s']) / stats['allowed_s']:.0%} of the "
+            f"{stats['allowed_s']:.0f}s the duration check allows. Refusals "
+            "start at 100%.",
+            "info",
+        )
+        print(f"podcast-report {label}: headroom alert sent={sent}")
+
+    summary = (
+        f"podcast-report {label}: {mode} in {stats['child_elapsed_s']}s child time, "
+        f"{stats['pieces']} pieces, decoded-rss {stats['decoded_minus_rss_s']}s "
+        f"of {stats['allowed_s']}s allowed"
+    )
+    logger.info(summary)
+    print(summary)
+    return f"{label}: {mode}"
