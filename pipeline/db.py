@@ -742,26 +742,38 @@ class StateStore:
 
         Admission metadata is frozen: a repeat admit changes nothing. A
         *different* (source, guid) reusing an ``r2_key`` raises
-        ``sqlite3.IntegrityError`` and is deliberately not swallowed.
+        ``sqlite3.IntegrityError`` (after rolling back, so the write lock is
+        released) and is deliberately not swallowed.
+
+        ``pub_date`` must be an aware ISO-8601 string; it is normalized to the
+        same UTC form as every other timestamp so it orders correctly. A naive
+        or unparseable value raises ``ValueError``.
         """
-        cursor = self._conn.execute(
-            """INSERT INTO podcast_episodes
-               (source, guid, item_json, pub_date, display_title, episode_slug,
-                r2_key, admitted_via, status, next_attempt_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-               ON CONFLICT (source, guid) DO NOTHING""",
-            (
-                source,
-                guid,
-                item_json,
-                pub_date,
-                display_title,
-                episode_slug,
-                r2_key,
-                admitted_via,
-                _utc_iso(now),
-            ),
-        )
+        pub_date_iso = _utc_iso(datetime.fromisoformat(pub_date))
+        try:
+            cursor = self._conn.execute(
+                """INSERT INTO podcast_episodes
+                   (source, guid, item_json, pub_date, display_title,
+                    episode_slug, r2_key, admitted_via, status, next_attempt_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                   ON CONFLICT (source, guid) DO NOTHING""",
+                (
+                    source,
+                    guid,
+                    item_json,
+                    pub_date_iso,
+                    display_title,
+                    episode_slug,
+                    r2_key,
+                    admitted_via,
+                    _utc_iso(now),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            # The failed INSERT leaves an implicit transaction open, holding
+            # the write lock; without this a CLI writer would block on it.
+            self._conn.rollback()
+            raise
         self._conn.commit()
         return cursor.rowcount == 1
 
@@ -793,6 +805,12 @@ class StateStore:
                ORDER BY pub_date ASC, guid ASC
                LIMIT 1""",
             (_utc_iso(now),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_podcast_health(self, source: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM podcast_source_health WHERE source = ?", (source,)
         ).fetchone()
         return dict(row) if row is not None else None
 
@@ -834,13 +852,21 @@ class StateStore:
         The PODCAST_MAX_FAILURES-th failure, or any failure with
         ``terminal=True``, makes the row 'errored'; otherwise it returns to
         'pending' after PODCAST_RETRY_BACKOFF.
+
+        Precondition: the row is not ``completed``. A failure arriving for a
+        published episode raises ``ValueError`` and changes nothing, so a late
+        or duplicated failure can never resurrect it. An unknown row raises
+        ``KeyError``.
         """
         row = self._conn.execute(
-            "SELECT failure_count FROM podcast_episodes WHERE source = ? AND guid = ?",
+            "SELECT failure_count, status FROM podcast_episodes "
+            "WHERE source = ? AND guid = ?",
             (source, guid),
         ).fetchone()
         if row is None:
             raise KeyError((source, guid))
+        if row["status"] == "completed":
+            raise ValueError("cannot fail a completed podcast episode")
         failure_count = int(row["failure_count"] or 0) + 1
         if terminal or failure_count >= PODCAST_MAX_FAILURES:
             self._conn.execute(
@@ -916,6 +942,10 @@ class StateStore:
         ``should_alert`` is True exactly once per failure streak: when the
         count reaches PODCAST_HEALTH_ALERT_AFTER. A success resets the streak
         and re-arms the alert.
+
+        The alert is at-most-once: ``alerted`` is committed here, before the
+        caller sends anything, so a crash or failed send between the two loses
+        the alert rather than repeating it.
         """
         now_iso = _utc_iso(now)
         self._conn.execute(
@@ -937,14 +967,15 @@ class StateStore:
             (source,),
         ).fetchone()
         count = int(row["consecutive_failures"]) + 1
-        should_alert = count >= PODCAST_HEALTH_ALERT_AFTER and not row["alerted"]
+        reached = count >= PODCAST_HEALTH_ALERT_AFTER
+        should_alert = reached and not row["alerted"]
         self._conn.execute(
             "UPDATE podcast_source_health SET consecutive_failures = ?, "
             "last_error = ?, alerted = ? WHERE source = ?",
             (
                 count,
-                (error or "")[:500],
-                1 if (should_alert or row["alerted"]) else 0,
+                error[:500] if error is not None else None,
+                int(reached or bool(row["alerted"])),
                 source,
             ),
         )

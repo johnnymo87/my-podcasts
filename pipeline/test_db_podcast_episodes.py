@@ -356,9 +356,7 @@ def test_health_success_resets_and_rearms(store):
 def test_health_records_error_and_last_success(store):
     store.record_podcast_discovery("argument", ok=True, error=None, now=NOW)
     store.record_podcast_discovery("argument", ok=False, error="boom", now=NOW)
-    row = store._conn.execute(
-        "SELECT * FROM podcast_source_health WHERE source = 'argument'"
-    ).fetchone()
+    row = store.get_podcast_health("argument")
     assert row["consecutive_failures"] == 1
     assert row["last_error"] == "boom"
     assert datetime.fromisoformat(row["last_success_at"]) == NOW
@@ -418,3 +416,81 @@ def test_reopening_store_keeps_rows(tmp_path):
         assert second.get_podcast_episode("argument", "g1") is not None
     finally:
         second.close()
+
+
+def test_admit_integrity_error_rolls_back_and_releases_write_lock(tmp_path):
+    path = tmp_path / "lock.db"
+    store = StateStore(path)
+    try:
+        assert _admit(store, "g1") is True
+        with pytest.raises(sqlite3.IntegrityError):
+            _admit(store, "g2", r2_key="episodes/yglesias/g1.mp3")
+        assert not store._conn.in_transaction
+        other = sqlite3.connect(path, timeout=0.2)
+        try:
+            other.execute("CREATE TABLE probe (x)")
+            other.commit()
+        finally:
+            other.close()
+    finally:
+        store.close()
+
+
+def test_admit_normalizes_pub_date_for_ordering_across_offsets(store):
+    # 09:00-05:00 is 14:00Z, which is later than 10:00Z even though the
+    # naive string "09:00..." sorts before "10:00...".
+    _admit(store, "late", pub_date="2026-10-10T09:00:00-05:00")
+    _admit(store, "early", pub_date="2026-10-10T10:00:00Z")
+    _admit(store, "frac", pub_date="2026-10-10T12:00:00.5+00:00")
+    assert [r["guid"] for r in store.list_podcast_episodes()] == [
+        "late",
+        "frac",
+        "early",
+    ]
+    row = store.get_podcast_episode("argument", "late")
+    assert row["pub_date"] == "2026-10-10T14:00:00.000000+00:00"
+    assert store.next_due_podcast_episode(NOW)["guid"] == "early"
+
+
+@pytest.mark.parametrize("bad", ["2026-10-10T09:00:00", "not a date", ""])
+def test_admit_rejects_naive_or_garbage_pub_date(store, bad):
+    with pytest.raises(ValueError):
+        _admit(store, pub_date=bad)
+    assert store.get_podcast_episode("argument", "g1") is None
+
+
+def test_fail_refuses_completed_row(store):
+    _admit(store)
+    store.complete_podcast_episode("argument", "g1", stats={"a": 1})
+    with pytest.raises(ValueError):
+        store.fail_podcast_episode("argument", "g1", "late failure", now=NOW)
+    with pytest.raises(ValueError):
+        store.fail_podcast_episode(
+            "argument", "g1", "late failure", now=NOW, terminal=True
+        )
+    row = store.get_podcast_episode("argument", "g1")
+    assert row["status"] == "completed"
+    assert row["failure_count"] == 0
+    assert row["last_error"] is None
+
+
+def test_get_podcast_health(store):
+    assert store.get_podcast_health("argument") is None
+    store.record_podcast_discovery("argument", ok=False, error=None, now=NOW)
+    health = store.get_podcast_health("argument")
+    assert health["consecutive_failures"] == 1
+    assert health["last_error"] is None
+    assert health["last_success_at"] is None
+    assert health["alerted"] == 0
+
+
+def test_health_alerted_flag_set_at_threshold_and_cleared_on_success(store):
+    for _ in range(3):
+        store.record_podcast_discovery("argument", ok=False, error="e", now=NOW)
+    assert store.get_podcast_health("argument")["alerted"] == 0
+    store.record_podcast_discovery("argument", ok=False, error="e", now=NOW)
+    assert store.get_podcast_health("argument")["alerted"] == 1
+    store.record_podcast_discovery("argument", ok=False, error="e", now=NOW)
+    assert store.get_podcast_health("argument")["alerted"] == 1
+    store.record_podcast_discovery("argument", ok=True, error=None, now=NOW)
+    assert store.get_podcast_health("argument")["alerted"] == 0
