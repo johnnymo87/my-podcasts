@@ -46,7 +46,7 @@ SUMMARY_NAME = "summary.txt"
 ACQUISITION_NAME = "acquisition.json"
 EPISODE_AUDIO_NAME = "episode.mp3"
 
-_RSS_TIMEOUT_S = 30.0  # per read; see FEED_FETCH_DEADLINE_S for the total
+_RSS_TIMEOUT_S = 30.0  # httpx per phase; see FEED_FETCH_DEADLINE_S for the total
 FEED_FETCH_DEADLINE_S = 60  # total wall clock for one feed fetch
 FEED_MAX_BYTES = 10 * 1024 * 1024  # the real feed is ~175 KB
 FEED_MAX_REDIRECTS = 5
@@ -118,10 +118,12 @@ class FeedFetchError(httpx.HTTPError):
 
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
-# Module state for the single-flight rule: the one abandoned (timed out, still
-# running) fetch thread, if any. Guarded by ``_fetch_lock``.
+# Module state for the single-flight rule: the one fetch thread that is running
+# (or was abandoned after a timeout and is still running), if any. A caller
+# claims the slot under ``_fetch_lock`` BEFORE starting its thread, so two
+# concurrent callers can never both start one.
 _fetch_lock = threading.Lock()
-_abandoned_fetch: threading.Thread | None = None
+_active_fetch: threading.Thread | None = None
 
 
 def fetch_feed_xml(
@@ -139,24 +141,22 @@ def fetch_feed_xml(
     * The fetch runs on a daemon worker thread that the caller joins for at most
       ``deadline_s`` (default ``FEED_FETCH_DEADLINE_S``). On timeout the thread
       is abandoned (a GET has no side effects) and ``FeedFetchError`` is raised.
-      **Single-flight**: while an abandoned thread is still alive a new fetch
-      fails at once with ``FeedFetchError``, so at most one thread ever leaks.
+      **Single-flight**: the slot is claimed under a lock before the thread
+      starts, and while it holds a live thread (running or abandoned) a new
+      fetch fails at once with ``FeedFetchError``, so at most one fetch thread
+      ever exists, hence at most one ever leaks.
     * Inside the worker redirects are followed by hand (``FEED_MAX_REDIRECTS`` hops,
       the redirect response is closed and its body never read), and the body is
       read through a deadline + size-cap loop. One deadline spans all hops.
 
     Errors raised in the worker (``httpx.HTTPError`` and friends) propagate to
     the caller unchanged. ``clock``, ``transport`` and ``deadline_s`` are test
-    seams. No message names the URL: it may be signed.
+    seams. No ``FeedFetchError`` message names the URL (it may be signed); an
+    ``httpx.HTTPStatusError`` from the worker does, so callers scrub it.
     """
-    global _abandoned_fetch
+    global _active_fetch
     if deadline_s is None:
         deadline_s = FEED_FETCH_DEADLINE_S
-    with _fetch_lock:
-        if _abandoned_fetch is not None:
-            if _abandoned_fetch.is_alive():
-                raise FeedFetchError("previous feed fetch still running")
-            _abandoned_fetch = None
 
     cancelled = threading.Event()
     box: dict[str, Any] = {}
@@ -174,13 +174,29 @@ def fetch_feed_xml(
             box["error"] = exc
 
     thread = threading.Thread(target=work, name="podcast-feed-fetch", daemon=True)
-    thread.start()
-    thread.join(deadline_s)
+    with _fetch_lock:
+        if _active_fetch is not None:
+            if _active_fetch.is_alive():
+                raise FeedFetchError("previous feed fetch still running")
+            _active_fetch = None
+        _active_fetch = thread  # claimed before start: no check-then-act gap
+        try:
+            thread.start()
+        except BaseException:
+            _active_fetch = None
+            raise
+    try:
+        thread.join(deadline_s)
+    except BaseException:  # e.g. KeyboardInterrupt: leave nothing downloading
+        cancelled.set()
+        raise
     if thread.is_alive():
         cancelled.set()  # if it ever wakes, it stops instead of downloading
-        with _fetch_lock:
-            _abandoned_fetch = thread
+        # The slot keeps holding it: this is the one abandoned thread.
         raise FeedFetchError(f"feed fetch exceeded the {deadline_s:g}s deadline")
+    with _fetch_lock:
+        if _active_fetch is thread:
+            _active_fetch = None
     if "error" in box:
         raise box["error"]
     return box["text"]

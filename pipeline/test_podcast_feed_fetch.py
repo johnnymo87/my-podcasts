@@ -35,9 +35,9 @@ class FakeClock:
 def _no_leaked_fetch_state():
     """The single-flight reference is module state: never let one test's
     abandoned fetch thread refuse the next test's fetch."""
-    podcast_report._abandoned_fetch = None
+    podcast_report._active_fetch = None
     yield
-    podcast_report._abandoned_fetch = None
+    podcast_report._active_fetch = None
 
 
 def _transport(handler) -> httpx.MockTransport:
@@ -392,7 +392,7 @@ def blocked():
         yield b
     finally:
         b.release.set()
-        leaked = podcast_report._abandoned_fetch
+        leaked = podcast_report._active_fetch
         if leaked is not None:
             leaked.join(5)
 
@@ -406,7 +406,7 @@ def test_blocked_before_headers_is_cut_off_at_the_deadline(blocked):
     assert time.monotonic() - t0 < 5.0
     assert blocked.entered.is_set()
     assert "SECRET" not in str(info.value)
-    assert podcast_report._abandoned_fetch is not None
+    assert podcast_report._active_fetch is not None
 
 
 def test_a_second_fetch_while_one_is_still_abandoned_fails_at_once(blocked):
@@ -430,31 +430,87 @@ def test_fetching_works_again_once_the_abandoned_thread_has_finished(blocked):
             URL, transport=_transport(blocked), deadline_s=0.3
         )
     blocked.release.set()
-    podcast_report._abandoned_fetch.join(5)
+    podcast_report._active_fetch.join(5)
 
     def ok(request):
         return httpx.Response(200, content=b"<rss/>")
 
     assert podcast_report.fetch_feed_xml(URL, transport=_transport(ok)) == "<rss/>"
-    assert podcast_report._abandoned_fetch is None
+    assert podcast_report._active_fetch is None
 
 
-def test_the_abandoned_fetch_stops_instead_of_finishing_its_work(blocked):
-    """A late-waking abandoned thread must not keep downloading."""
+def test_a_cancelled_fetch_stops_without_reading_the_body():
+    """The cancel flag, on its own: no clock is involved (long inner deadline)."""
+    pulled = Endless()
+    cancelled = threading.Event()
+
+    def handler(request):
+        cancelled.set()  # the caller gave up while we were waiting for headers
+        return httpx.Response(200, content=pulled)
+
+    with pytest.raises(podcast_report.FeedFetchError, match="abandoned"):
+        podcast_report._fetch_feed_xml(
+            URL,
+            clock=time.monotonic,
+            transport=_transport(handler),
+            deadline_s=3600,
+            cancelled=cancelled,
+        )
+    assert pulled.pulled == 0
+
+
+def test_the_abandoned_thread_stops_when_it_wakes(blocked):
+    """End to end: timeout abandons the thread; waking it must not download."""
     pulled = Endless()
 
     def handler(request):
         blocked(request)
         return httpx.Response(200, content=pulled)
 
-    with pytest.raises(podcast_report.FeedFetchError):
+    real_fetch = podcast_report._fetch_feed_xml
+
+    def long_inner_deadline(url, **kw):
+        # Only the join times out: the inner deadline cannot be what stops it.
+        return real_fetch(url, **{**kw, "deadline_s": 3600})
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(podcast_report, "_fetch_feed_xml", long_inner_deadline)
+        with pytest.raises(podcast_report.FeedFetchError, match="deadline"):
+            podcast_report.fetch_feed_xml(
+                URL, transport=_transport(handler), deadline_s=0.3
+            )
+        blocked.release.set()
+        podcast_report._active_fetch.join(5)
+    assert not podcast_report._active_fetch.is_alive()
+    assert pulled.pulled == 0
+
+
+def test_two_concurrent_callers_cannot_both_start_a_fetch(blocked):
+    outcome: list = []
+
+    def first():
+        try:
+            outcome.append(
+                podcast_report.fetch_feed_xml(
+                    URL, transport=_transport(blocked), deadline_s=30
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            outcome.append(exc)
+
+    caller = threading.Thread(target=first, daemon=True)
+    caller.start()
+    assert blocked.entered.wait(5)  # the first fetch is in flight, not abandoned
+    with pytest.raises(podcast_report.FeedFetchError, match="still running"):
         podcast_report.fetch_feed_xml(
-            URL, transport=_transport(handler), deadline_s=0.3
+            URL, transport=_transport(blocked), deadline_s=0.3
         )
+    assert blocked.calls == 1
+    assert sum(1 for t in threading.enumerate() if t.name == "podcast-feed-fetch") == 1
     blocked.release.set()
-    podcast_report._abandoned_fetch.join(5)
-    assert not podcast_report._abandoned_fetch.is_alive()
-    assert pulled.pulled <= 1
+    caller.join(5)
+    assert outcome == ["<rss/>"]
+    assert podcast_report._active_fetch is None
 
 
 def test_errors_from_the_worker_keep_their_type():
@@ -463,4 +519,4 @@ def test_errors_from_the_worker_keep_their_type():
 
     with pytest.raises(httpx.HTTPStatusError):
         podcast_report.fetch_feed_xml(URL, transport=_transport(handler))
-    assert podcast_report._abandoned_fetch is None
+    assert podcast_report._active_fetch is None

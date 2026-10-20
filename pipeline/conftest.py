@@ -185,7 +185,15 @@ def _reset_bounded_alert_worker():
     yield
     from pipeline import alerts
 
+    worker = alerts._alert_worker
     alerts._stop_alert_worker(timeout=2.0)
+    if worker is not None and worker.is_alive():
+        # Its state was reset, so the next test would run beside this stuck
+        # worker (two workers): fail loudly instead of leaving that behind.
+        pytest.fail(
+            "bounded-alert worker did not stop within 2s: a test left its "
+            "sender blocked (release it in a finally before the test ends)"
+        )
 
 
 @pytest.fixture(autouse=True)
