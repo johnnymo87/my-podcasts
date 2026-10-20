@@ -70,7 +70,7 @@ def test_bounded_returns_the_senders_answer():
     assert alerts.send_alert_bounded("hi", sender=lambda t, severity: False) is False
 
 
-def test_bounded_returns_none_on_timeout_without_waiting_for_the_sender():
+def test_bounded_returns_timeout_without_waiting_for_the_sender():
     release = threading.Event()
     started = threading.Event()
 
@@ -83,7 +83,7 @@ def test_bounded_returns_none_on_timeout_without_waiting_for_the_sender():
         t0 = time.monotonic()
         result = alerts.send_alert_bounded("hi", timeout_s=0.2, sender=hung)
         elapsed = time.monotonic() - t0
-        assert result is None
+        assert result == "timeout"
         assert started.is_set()
         assert elapsed < 5.0
     finally:
@@ -105,3 +105,100 @@ def test_bounded_default_sender_is_looked_up_at_call_time(monkeypatch):
     )
     assert alerts.send_alert_bounded("x") is True
     assert calls == ["x"]
+
+
+# --- the one shared worker ---------------------------------------------------
+
+
+def _worker_threads():
+    return [t for t in threading.enumerate() if t.name == "bounded-alert-worker"]
+
+
+class _Blocker:
+    """A sender that blocks until released; counts what it was asked to send."""
+
+    def __init__(self):
+        self.release = threading.Event()
+        self.started = threading.Event()
+        self.texts = []
+
+    def __call__(self, text, severity="info"):
+        self.texts.append(text)
+        self.started.set()
+        self.release.wait(30)
+        return True
+
+
+def test_a_blocked_sender_times_out_and_the_next_alert_queues_behind_it():
+    blocker = _Blocker()
+    try:
+        assert (
+            alerts.send_alert_bounded("a", timeout_s=0.1, sender=blocker) == "timeout"
+        )
+        assert blocker.started.is_set()
+        # The worker is stuck in "a": "b" is queued, not run, and times out too.
+        assert (
+            alerts.send_alert_bounded("b", timeout_s=0.1, sender=blocker) == "timeout"
+        )
+        assert blocker.texts == ["a"]
+    finally:
+        blocker.release.set()
+        alerts._stop_alert_worker()
+
+
+def test_a_full_queue_drops_the_alert_and_logs_its_text(caplog):
+    blocker = _Blocker()
+    try:
+        assert (
+            alerts.send_alert_bounded("first", timeout_s=0.1, sender=blocker)
+            == "timeout"
+        )
+        # "first" holds the worker; the next ALERT_QUEUE_MAX fill the queue.
+        for i in range(alerts.ALERT_QUEUE_MAX):
+            assert (
+                alerts.send_alert_bounded(f"q{i}", timeout_s=0.01, sender=blocker)
+                == "timeout"
+            )
+        t0 = time.monotonic()
+        result = alerts.send_alert_bounded("overflow-text", timeout_s=5, sender=blocker)
+        assert result == "dropped"
+        assert time.monotonic() - t0 < 1.0  # no wait, no new thread
+        assert "overflow-text" in caplog.text
+        assert "overflow-text" not in blocker.texts
+    finally:
+        blocker.release.set()
+        alerts._stop_alert_worker()
+
+
+def test_exactly_one_worker_thread_exists_after_many_calls():
+    blocker = _Blocker()
+    try:
+        for i in range(alerts.ALERT_QUEUE_MAX + 5):
+            alerts.send_alert_bounded(f"m{i}", timeout_s=0.01, sender=blocker)
+        assert len(_worker_threads()) == 1
+    finally:
+        blocker.release.set()
+        alerts._stop_alert_worker()
+    assert _worker_threads() == []
+
+
+def test_a_dead_worker_is_replaced():
+    assert alerts.send_alert_bounded("one", sender=lambda t, severity: True) is True
+    first = alerts._alert_worker
+    alerts._alert_queue.put(alerts._STOP)  # kill it the way production never does
+    first.join(5)
+    assert not first.is_alive()
+    assert alerts.send_alert_bounded("two", sender=lambda t, severity: True) is True
+    assert alerts._alert_worker is not first
+    assert alerts._alert_worker.is_alive()
+    assert len(_worker_threads()) == 1
+
+
+def test_a_raising_sender_does_not_kill_the_worker():
+    def boom(text, severity="info"):
+        raise RuntimeError("x")
+
+    assert alerts.send_alert_bounded("a", sender=boom) is False
+    worker = alerts._alert_worker
+    assert alerts.send_alert_bounded("b", sender=lambda t, severity: True) is True
+    assert alerts._alert_worker is worker

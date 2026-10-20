@@ -116,7 +116,7 @@ def discover(
                 sender=alert,
             )
             logger.error(
-                "podcast discovery for %s: health alert sent=%s", source.key, sent
+                "podcast discovery for %s: health alert result=%s", source.key, sent
             )
 
     new = [c for c in dict.fromkeys(collisions) if c not in _ALERTED_COLLISIONS]
@@ -131,5 +131,5 @@ def discover(
             "error",
             sender=alert,
         )
-        logger.error("podcast discovery: collision alert sent=%s", sent)
+        logger.error("podcast discovery: collision alert result=%s", sent)
     return results

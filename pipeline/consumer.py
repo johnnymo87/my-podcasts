@@ -460,7 +460,7 @@ def _recover_podcast_episodes(store: StateStore) -> None:
                     f"{row['last_error']}",
                     "error",
                 )
-                print(f"Podcast recovery alert sent={sent}")
+                print(f"Podcast recovery alert result={sent}")
             else:
                 print(
                     f"Re-queued interrupted podcast episode {label} "

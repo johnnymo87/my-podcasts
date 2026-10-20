@@ -178,7 +178,7 @@ def run_one_podcast_episode(
                 "error",
                 sender=alert,
             )
-            print(f"podcast-report {label}: failure not recorded, alert sent={sent}")
+            print(f"podcast-report {label}: failure not recorded, alert result={sent}")
             return f"{label}: failure not recorded"
         verdict = "errored" if retry.status == "errored" else "failed"
         verdict += f" ({retry.failure_count})"
@@ -191,7 +191,7 @@ def run_one_podcast_episode(
                 "error",
                 sender=alert,
             )
-            print(f"podcast-report {label}: give-up alert sent={sent}")
+            print(f"podcast-report {label}: give-up alert result={sent}")
         return f"{label}: {verdict}"
 
     try:
@@ -273,7 +273,7 @@ def run_one_podcast_episode(
             "info",
             sender=alert,
         )
-        print(f"podcast-report {label}: headroom alert sent={sent}")
+        print(f"podcast-report {label}: headroom alert result={sent}")
 
     summary = (
         f"podcast-report {label}: {mode} in {stats['child_elapsed_s']}s child time, "

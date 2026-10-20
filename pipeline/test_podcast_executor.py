@@ -755,7 +755,7 @@ def test_a_hanging_alert_cannot_stall_the_executor(store, work_root, monkeypatch
         assert time.monotonic() - t0 < 5.0
     finally:
         release.set()
-    # The give-up alert timed out; the row transition happened regardless.
+    # The give-up alert timed out ("timeout"); the row transition happened regardless.
     assert result == f"argument/{item.guid}: errored (1)"
     assert store.get_podcast_episode("argument", item.guid)["status"] == "errored"
 
