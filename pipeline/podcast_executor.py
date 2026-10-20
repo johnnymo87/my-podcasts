@@ -84,6 +84,7 @@ def _blank_stats(child_elapsed_s: float, mode: str) -> dict:
         "pieces": None,
         "input_tokens": None,
         "output_tokens": None,
+        "asr_skipped_s": 0,
         "child_elapsed_s": round(child_elapsed_s, 3),
         "publish": mode,
     }
@@ -112,6 +113,9 @@ def collect_stats(work_dir: Path, *, child_elapsed_s: float, mode: str) -> dict:
         pieces=len(pieces) if pieces is not None else None,
         input_tokens=_sum_tokens(pieces, "input_tokens") if pieces else None,
         output_tokens=_sum_tokens(pieces, "output_tokens") if pieces else None,
+        # Edge-ad seconds the transcriber refused and the transcript marks as
+        # untranscribed; the manifest carries the key only when it is > 0.
+        asr_skipped_s=_num(manifest.get("skipped_s")) or 0,
     )
     return stats
 

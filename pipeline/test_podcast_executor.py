@@ -71,17 +71,20 @@ class FakeChild:
         return self.outcome
 
 
-def _manifest(decoded=5030.0, rss=5000, pieces=None):
+def _manifest(decoded=5030.0, rss=5000, pieces=None, skipped_s=None):
     if pieces is None:
         pieces = [
             {"input_tokens": 100, "output_tokens": 50},
             {"input_tokens": 200, "output_tokens": 70},
         ]
-    return {
+    manifest = {
         "decoded_duration_s": decoded,
         "rss_duration_s": rss,
         "pieces": pieces,
     }
+    if skipped_s is not None:  # the real manifest has the key only when > 0
+        manifest["skipped_s"] = skipped_s
+    return manifest
 
 
 def _ok(elapsed_s: float = 12.5) -> ChildOutcome:
@@ -184,6 +187,7 @@ def test_happy_path_completes_stores_stats_deletes_audio(store, work_root):
         "pieces": 2,
         "input_tokens": 300,
         "output_tokens": 120,
+        "asr_skipped_s": 0,
         "child_elapsed_s": 12.5,
         "publish": "published",
     }
@@ -546,6 +550,24 @@ def test_unknown_token_counts_make_the_total_none(store, work_root):
     assert stats["pieces"] == 2
     assert stats["input_tokens"] is None
     assert stats["output_tokens"] == 120
+
+
+def test_asr_skipped_s_is_read_from_the_manifest(store, work_root):
+    item = _admit(store)
+    _run(store, work_root, FakeChild(work_root, skipped_s=94.25), Publish(), Alerts())
+    stats = json.loads(store.get_podcast_episode("argument", item.guid)["stats_json"])
+    assert stats["asr_skipped_s"] == 94.25
+
+
+@pytest.mark.parametrize("bad", [None, "lots", True, [1]])
+def test_missing_or_malformed_skipped_s_is_zero(store, work_root, bad):
+    item = _admit(store)
+    child = FakeChild(work_root)
+    if bad is not None:
+        child.manifest = {"skipped_s": bad}
+    _run(store, work_root, child, Publish(), Alerts())
+    stats = json.loads(store.get_podcast_episode("argument", item.guid)["stats_json"])
+    assert stats["asr_skipped_s"] == 0
 
 
 def test_audio_delete_failure_does_not_fail_the_job(store, work_root, monkeypatch):
