@@ -7,6 +7,11 @@ piece must finish with ``STOP`` and clear a gross word-rate floor, and the
 decoded duration must match the RSS duration, or the whole call raises
 ``TranscriptionError``: a partial transcript is never returned or written.
 
+A piece whose transcription ends ``asr_blocked`` (Gemini refuses a long span,
+deterministically for those bytes) is split in half at a quiet point and each
+half transcribed on its own, recursively, down to ``MIN_SPLIT_S``; see
+``_transcribe_blocked_piece``. Only ``asr_blocked`` splits.
+
 Plain synchronous function on purpose. The Gemini SDK timeout is per-read, not
 wall-clock (see ``pipeline/tts/asr.py``), so the caller is expected to run this
 inside a killable child process with a deadline.
@@ -26,7 +31,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +64,11 @@ MIN_CHECKED_PIECE_S = 120.0
 # rate computed over a few seconds: allowed = MAX_WORDS_PER_MIN * minutes + this.
 MAX_WORDS_CUSHION = 60
 MAX_ATTEMPTS = 3
+# A piece whose transcription ends ``asr_blocked`` is split in two at a quiet
+# point and each half is transcribed on its own, recursively. A sub-piece is
+# never made shorter than this: the block was measured on long spans (a 600 s
+# piece and its first 300 s half blocked 7/7, every 120 s slice passed).
+MIN_SPLIT_S = 120.0
 RETRY_BACKOFF_S = (5.0, 20.0)
 # Generation settings. The SDK config (``_generation_config``) and the policy
 # digest (``transcription_policy_digest``) both read these, so they cannot drift.
@@ -88,9 +98,16 @@ class TranscriptionError(RuntimeError):
     supplies it."""
 
     def __init__(
-        self, message: str, *, reason: str | None = None, code: int | None = None
+        self,
+        message: str,
+        *,
+        reason: str | None = None,
+        code: int | None = None,
+        attempts: int | None = None,
     ) -> None:
         super().__init__(message)
+        # Transcriber calls spent before giving up (set by the retry loop).
+        self.attempts = attempts
         if reason is None:
             head = message.split(":", 1)[0]
             reason = head if head.startswith("asr_") else "error"
@@ -568,7 +585,27 @@ def _load_checkpoint(path: Path, key: str) -> dict[str, Any] | None:
         return None
     if cp.get("finish_reason") != "STOP" or not isinstance(cp.get("bytes"), int):
         return None
+    if "split" in cp and not _valid_split(cp["split"]):
+        return None
     return cp
+
+
+def _valid_split(split: object) -> bool:
+    """A stored ``split`` list: non-empty, each entry the five recorded fields."""
+    if not isinstance(split, list) or not split:
+        return False
+    for sub in split:
+        if not isinstance(sub, dict):
+            return False
+        if not (
+            isinstance(sub.get("mp3_sha256"), str)
+            and isinstance(sub.get("bytes"), int)
+            and isinstance(sub.get("attempts"), int)
+            and isinstance(sub.get("start_s"), int | float)
+            and isinstance(sub.get("end_s"), int | float)
+        ):
+            return False
+    return True
 
 
 def _transcribe_with_retry(
@@ -578,21 +615,271 @@ def _transcribe_with_retry(
     *,
     index: int,
     sleep: Callable[[float], None],
+    max_blocked_attempts: int = MAX_ATTEMPTS,
 ) -> tuple[PieceResult, int]:
     """Up to ``MAX_ATTEMPTS`` tries for retryable failures; returns the result and
-    the number of attempts used. Non-retryable failures raise at once."""
+    the number of attempts used. Non-retryable failures raise at once.
+    ``max_blocked_attempts`` caps tries on ``asr_blocked`` alone (sub-pieces use
+    1: the block is deterministic per span, so re-asking is wasted wall-clock)."""
     attempt = 0
     while True:
         attempt += 1
         try:
             return transcriber(mp3, prompt), attempt
         except TranscriptionError as exc:
-            if not _is_retryable(exc) or attempt >= MAX_ATTEMPTS:
+            limit = (
+                min(MAX_ATTEMPTS, max_blocked_attempts)
+                if exc.reason == _asr.ASR_BLOCKED
+                else MAX_ATTEMPTS
+            )
+            if not _is_retryable(exc) or attempt >= limit:
                 suffix = f" (after {attempt} attempts)" if attempt > 1 else ""
                 raise TranscriptionError(
-                    f"piece {index}: {exc}{suffix}", reason=exc.reason, code=exc.code
+                    f"piece {index}: {exc}{suffix}",
+                    reason=exc.reason,
+                    code=exc.code,
+                    attempts=attempt,
                 ) from exc
             sleep(RETRY_BACKOFF_S[min(attempt, len(RETRY_BACKOFF_S)) - 1])
+
+
+@dataclass
+class _SplitState:
+    """Running state while a blocked piece is transcribed as sub-pieces, in
+    order: the previous sub-piece's text (for the next context block), the
+    speakers heard so far, the open-sponsor flag, and what was spent."""
+
+    piece_context: str | None
+    previous: str | None
+    speakers: list[str]
+    sponsor_open: bool
+    attempts: int = 0
+    leaves: list[tuple[PieceResult, dict[str, Any]]] = field(default_factory=list)
+
+
+def _sum_or_none(values: list[int | None]) -> int | None:
+    known = [v for v in values if v is not None]
+    return sum(known) if len(known) == len(values) else None
+
+
+def _halve(pcm: bytes, start: int, end: int) -> tuple[tuple[int, int], ...] | None:
+    """Two contiguous halves of ``pcm[start:end]`` cut at a quiet point near the
+    middle, or None when either half would be shorter than ``MIN_SPLIT_S``."""
+    dur = (end - start) / PCM_BYTES_PER_SECOND
+    if dur < 2 * MIN_SPLIT_S:
+        return None
+    parts = split_pcm(pcm[start:end], target_s=dur / 2, search_s=PIECE_SEARCH_S)
+    if len(parts) != 2 or parts[0][0] != 0 or parts[0][1] != parts[1][0]:
+        raise TranscriptionError("segmentation of a blocked piece failed")
+    if parts[1][1] != end - start:
+        raise TranscriptionError("segmentation of a blocked piece failed")
+    halves = tuple((start + a, start + b) for a, b in parts)
+    if any((b - a) / PCM_BYTES_PER_SECOND < MIN_SPLIT_S for a, b in halves):
+        return None
+    return halves
+
+
+def _in_sub_piece(exc: TranscriptionError, start: int, end: int) -> TranscriptionError:
+    """``exc`` with the sub-piece's span (episode seconds) appended; reason and
+    code are unchanged."""
+    return TranscriptionError(
+        f"{exc} [sub-piece {start / PCM_BYTES_PER_SECOND:.0f}-"
+        f"{end / PCM_BYTES_PER_SECOND:.0f} s]",
+        reason=exc.reason,
+        code=exc.code,
+        attempts=exc.attempts,
+    )
+
+
+def _transcribe_span(
+    pcm: bytes,
+    start: int,
+    end: int,
+    *,
+    depth: int,
+    state: _SplitState,
+    index: int,
+    count: int,
+    hosts: tuple[str, ...],
+    description: str,
+    carry_context: bool,
+    transcriber: Callable[[bytes, str], PieceResult],
+    sleep: Callable[[float], None],
+) -> None:
+    """Transcribe one sub-piece (appending to ``state.leaves``); if it is blocked
+    too, halve it and recurse, until a sub-piece cannot be halved."""
+    if state.previous is None:
+        context = state.piece_context
+    elif carry_context:
+        context = _context_block(state.previous, state.speakers)
+    else:
+        context = None
+    prompt = build_piece_prompt(
+        index=index,
+        count=count,
+        hosts=hosts,
+        description=description,
+        context=context,
+    )
+    try:
+        mp3 = encode_piece(pcm[start:end])
+    except TranscriptionError as exc:
+        raise _in_sub_piece(exc, start, end) from exc
+    if len(mp3) > MAX_PIECE_BYTES:
+        raise _in_sub_piece(
+            TranscriptionError(
+                f"piece {index}: encoded size {len(mp3)} bytes exceeds "
+                f"{MAX_PIECE_BYTES} bytes"
+            ),
+            start,
+            end,
+        )
+    try:
+        result, attempts = _transcribe_with_retry(
+            transcriber, mp3, prompt, index=index, sleep=sleep, max_blocked_attempts=1
+        )
+    except TranscriptionError as exc:
+        if exc.reason != _asr.ASR_BLOCKED:
+            raise _in_sub_piece(exc, start, end) from exc
+        state.attempts += exc.attempts or 1
+        halves = _halve(pcm, start, end)
+        if halves is None:
+            raise TranscriptionError(
+                f"{exc} [blocked sub-piece {start / PCM_BYTES_PER_SECOND:.0f}-"
+                f"{end / PCM_BYTES_PER_SECOND:.0f}s is too short to split "
+                f"further; split depth {depth}]",
+                reason=exc.reason,
+                code=exc.code,
+            ) from exc
+        logger.warning(
+            "piece %d: sub-piece %.0f-%.0fs blocked; splitting into %d "
+            "sub-pieces (depth %d)",
+            index + 1,
+            start / PCM_BYTES_PER_SECOND,
+            end / PCM_BYTES_PER_SECOND,
+            len(halves),
+            depth + 1,
+        )
+        for a, b in halves:
+            _transcribe_span(
+                pcm,
+                a,
+                b,
+                depth=depth + 1,
+                state=state,
+                index=index,
+                count=count,
+                hosts=hosts,
+                description=description,
+                carry_context=carry_context,
+                transcriber=transcriber,
+                sleep=sleep,
+            )
+        return
+    if result.finish_reason != "STOP":
+        raise _in_sub_piece(
+            TranscriptionError(
+                f"piece {index}: asr_incomplete: finish_reason={result.finish_reason}",
+                reason="asr_incomplete",
+            ),
+            start,
+            end,
+        )
+    text = result.text.strip()
+    # Each leaf is rate-checked too (a near-empty half can hide inside a
+    # combined piece that is within bounds); the combined check still runs.
+    rate_error = _piece_rate_error(
+        index, len(text.split()), (end - start) / PCM_BYTES_PER_SECOND
+    )
+    if rate_error is not None:
+        raise _in_sub_piece(rate_error, start, end) from rate_error
+    state.attempts += attempts
+    names, state.sponsor_open = _speakers_in(text, state.sponsor_open)
+    for name in names:
+        if name not in state.speakers:
+            state.speakers.append(name)
+    state.previous = text
+    state.leaves.append(
+        (
+            PieceResult(
+                text, result.finish_reason, result.input_tokens, result.output_tokens
+            ),
+            {
+                "start_s": start / PCM_BYTES_PER_SECOND,
+                "end_s": end / PCM_BYTES_PER_SECOND,
+                "mp3_sha256": hashlib.sha256(mp3).hexdigest(),
+                "bytes": len(mp3),
+                "attempts": attempts,
+            },
+        )
+    )
+
+
+def _transcribe_blocked_piece(
+    pcm: bytes,
+    start: int,
+    end: int,
+    *,
+    blocked: TranscriptionError,
+    piece_context: str | None,
+    speakers: list[str],
+    sponsor_open: bool,
+    index: int,
+    count: int,
+    hosts: tuple[str, ...],
+    description: str,
+    carry_context: bool,
+    transcriber: Callable[[bytes, str], PieceResult],
+    sleep: Callable[[float], None],
+) -> tuple[PieceResult, int, str, int, list[dict[str, Any]]] | None:
+    """Recover a piece whose whole-piece transcription ended ``asr_blocked`` by
+    transcribing it as sub-pieces. Returns ``(combined result, total attempts,
+    mp3_sha256, bytes, split records)``, or None when the piece is too short to
+    split (the caller then re-raises ``blocked`` untouched)."""
+    halves = _halve(pcm, start, end)
+    if halves is None:
+        return None
+    logger.warning(
+        "piece %d: blocked (%s); splitting into %d sub-pieces (depth 1)",
+        index + 1,
+        blocked,
+        len(halves),
+    )
+    state = _SplitState(
+        piece_context=piece_context,
+        previous=None,
+        speakers=list(speakers),
+        sponsor_open=sponsor_open,
+        attempts=blocked.attempts or 1,
+    )
+    for a, b in halves:
+        _transcribe_span(
+            pcm,
+            a,
+            b,
+            depth=1,
+            state=state,
+            index=index,
+            count=count,
+            hosts=hosts,
+            description=description,
+            carry_context=carry_context,
+            transcriber=transcriber,
+            sleep=sleep,
+        )
+    results = [r for r, _ in state.leaves]
+    records = [rec for _, rec in state.leaves]
+    combined = PieceResult(
+        text="\n".join(r.text for r in results),
+        finish_reason="STOP",
+        input_tokens=_sum_or_none([r.input_tokens for r in results]),
+        output_tokens=_sum_or_none([r.output_tokens for r in results]),
+    )
+    # Synthetic: a hash of the leaf mp3 hashes, NOT the sha256 of any mp3 (there
+    # is no single mp3 for a split piece). It only has to be a stable string.
+    mp3_sha = _sha256_text("".join(rec["mp3_sha256"] for rec in records))
+    mp3_bytes = sum(rec["bytes"] for rec in records)
+    return combined, state.attempts, mp3_sha, mp3_bytes, records
 
 
 def transcribe_episode(
@@ -664,6 +951,7 @@ def transcribe_episode(
     previous = ""
     for i, (start, end) in enumerate(ranges):
         piece_started = time.monotonic()
+        split: list[dict[str, Any]] = []  # sub-piece records; empty when unsplit
         context = (
             _context_block(previous, speakers) if (carry_context and i > 0) else None
         )
@@ -692,6 +980,7 @@ def transcribe_episode(
             )
             mp3_sha, mp3_bytes = cp["mp3_sha256"], cp["bytes"]
             attempts = _int_or_none(cp.get("attempts")) or 1
+            split = cp.get("split") or []
         else:
             mp3 = encode_piece(pcm[start:end])
             if len(mp3) > MAX_PIECE_BYTES:
@@ -699,10 +988,33 @@ def transcribe_episode(
                     f"piece {i}: encoded size {len(mp3)} bytes exceeds "
                     f"{MAX_PIECE_BYTES} bytes"
                 )
-            result, attempts = _transcribe_with_retry(
-                transcriber, mp3, prompt, index=i, sleep=sleep
-            )
-            mp3_sha, mp3_bytes = hashlib.sha256(mp3).hexdigest(), len(mp3)
+            try:
+                result, attempts = _transcribe_with_retry(
+                    transcriber, mp3, prompt, index=i, sleep=sleep
+                )
+                mp3_sha, mp3_bytes = hashlib.sha256(mp3).hexdigest(), len(mp3)
+            except TranscriptionError as blocked:
+                if blocked.reason != _asr.ASR_BLOCKED:
+                    raise
+                recovered = _transcribe_blocked_piece(
+                    pcm,
+                    start,
+                    end,
+                    blocked=blocked,
+                    piece_context=context,
+                    speakers=speakers,
+                    sponsor_open=sponsor_open,
+                    index=i,
+                    count=count,
+                    hosts=hosts,
+                    description=description,
+                    carry_context=carry_context,
+                    transcriber=transcriber,
+                    sleep=sleep,
+                )
+                if recovered is None:
+                    raise
+                result, attempts, mp3_sha, mp3_bytes, split = recovered
         if result.finish_reason != "STOP":
             raise TranscriptionError(
                 f"piece {i}: asr_incomplete: finish_reason={result.finish_reason}",
@@ -716,21 +1028,19 @@ def transcribe_episode(
         if rate_error is not None:
             raise rate_error
         if cp is None:
-            _atomic_write(
-                cp_path,
-                json.dumps(
-                    {
-                        "key": key,
-                        "text": text,
-                        "finish_reason": result.finish_reason,
-                        "input_tokens": result.input_tokens,
-                        "output_tokens": result.output_tokens,
-                        "attempts": attempts,
-                        "mp3_sha256": mp3_sha,
-                        "bytes": mp3_bytes,
-                    }
-                ),
-            )
+            cp_body: dict[str, Any] = {
+                "key": key,
+                "text": text,
+                "finish_reason": result.finish_reason,
+                "input_tokens": result.input_tokens,
+                "output_tokens": result.output_tokens,
+                "attempts": attempts,
+                "mp3_sha256": mp3_sha,
+                "bytes": mp3_bytes,
+            }
+            if split:
+                cp_body["split"] = split
+            _atomic_write(cp_path, json.dumps(cp_body))
         names, sponsor_open = _speakers_in(text, sponsor_open)
         for name in names:
             if name not in speakers:
@@ -745,23 +1055,24 @@ def transcribe_episode(
         )
         previous = text
         texts.append(text)
-        pieces.append(
-            {
-                "index": i,
-                "start_s": start / PCM_BYTES_PER_SECOND,
-                "end_s": end / PCM_BYTES_PER_SECOND,
-                "mp3_sha256": mp3_sha,
-                "bytes": mp3_bytes,
-                "finish_reason": result.finish_reason,
-                "input_tokens": result.input_tokens,
-                "output_tokens": result.output_tokens,
-                "words": words,
-                "words_per_min": wpm,
-                "attempts": attempts,
-                "from_checkpoint": cp is not None,
-                "text": text,
-            }
-        )
+        entry: dict[str, Any] = {
+            "index": i,
+            "start_s": start / PCM_BYTES_PER_SECOND,
+            "end_s": end / PCM_BYTES_PER_SECOND,
+            "mp3_sha256": mp3_sha,
+            "bytes": mp3_bytes,
+            "finish_reason": result.finish_reason,
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "words": words,
+            "words_per_min": wpm,
+            "attempts": attempts,
+            "from_checkpoint": cp is not None,
+            "text": text,
+        }
+        if split:
+            entry["split"] = split
+        pieces.append(entry)
 
     transcript = "\n".join(texts)
     manifest = {

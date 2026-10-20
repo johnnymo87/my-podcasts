@@ -1102,3 +1102,450 @@ def test_logs_transcript_reuse(audio, tmp_path, caplog) -> None:
     with caplog.at_level("INFO", logger=pt.logger.name):
         _run(audio, tmp_path, FakeTranscriber())
     assert any("reusing" in r.getMessage() for r in caplog.records)
+
+
+# --- split on asr_blocked ---------------------------------------------------------
+
+SPEAKER_NAMES = [
+    "Alpha Guest",
+    "Beta Guest",
+    "Gamma Guest",
+    "Delta Guest",
+    "Epsilon Guest",
+    "Zeta Guest",
+    "Eta Guest",
+    "Theta Guest",
+]
+
+
+class SpanFake:
+    """Keyed on the audio's duration (``span_audio`` embeds it in the fake mp3
+    bytes) and the prompt. ``block(dur_s, prompt)`` says whether that call is
+    blocked; ``fail(dur_s, prompt)`` may return another exception to raise.
+    Output is 150 wpm, one distinct speaker per accepted call, so a sub-piece's
+    word rate is proportional to its length."""
+
+    model = "fake-split"
+
+    def __init__(self, block=lambda dur, prompt: False, fail=None):
+        self.block = block
+        self.fail = fail
+        self.calls: list[tuple[float, str]] = []  # (duration_s, prompt)
+        self.accepted = 0
+
+    def __call__(self, audio: bytes, prompt: str) -> pt.PieceResult:
+        dur = float(audio.split(b":", 1)[0][1:])
+        self.calls.append((dur, prompt))
+        exc = self.fail(dur, prompt) if self.fail else None
+        if exc is not None:
+            raise exc
+        if self.block(dur, prompt):
+            raise _err("asr_blocked")
+        n = self.accepted
+        self.accepted += 1
+        speaker = SPEAKER_NAMES[n % len(SPEAKER_NAMES)]
+        lines = max(1, round(dur / 8))
+        text = "\n".join(f"{speaker}: call{n} " + "word " * 18 for _ in range(lines))
+        return pt.PieceResult(
+            text=text, finish_reason="STOP", input_tokens=10, output_tokens=20
+        )
+
+
+@pytest.fixture
+def span_audio(audio, monkeypatch):
+    """``audio`` (1500 s -> pieces of 581.05, 581.05, 337.9 s) with an encoder
+    whose output records the piece's duration."""
+
+    def encode(pcm: bytes) -> bytes:
+        return b"L%.3f:" % (len(pcm) / 48000) + pcm[:16]
+
+    monkeypatch.setattr(pt, "encode_piece", encode)
+    return audio
+
+
+def _piece1_blocked(dur: float, prompt: str) -> bool:
+    """The whole second piece is blocked; any audio shorter than 400 s passes."""
+    return dur > 400 and "piece 2 of 3" in prompt
+
+
+def _nothing_over_280s(dur: float, prompt: str) -> bool:
+    # 581 s blocked -> 273 s + 308 s; 273 passes, 308 is blocked again -> ~154 s.
+    return dur > 280
+
+
+def _context_part(prompt: str) -> str:
+    """The prompt's carried tail, without the 'names already used' list."""
+    return prompt.split("Names already used")[0]
+
+
+def test_blocked_piece_is_split_and_halves_are_stitched(
+    span_audio, tmp_path, caplog
+) -> None:
+    sleeps: list[float] = []
+    fake = SpanFake(block=_piece1_blocked)
+    with caplog.at_level("WARNING", logger=pt.logger.name):
+        text = _run(span_audio, tmp_path, fake, sleep=sleeps.append)
+
+    # piece 1 was blocked 3x (with the usual backoff), then each half ran once.
+    assert sleeps == [5.0, 20.0]
+    durs = [d for d, _ in fake.calls]
+    assert len(durs) == 1 + 3 + 2 + 1
+    half_a, half_b = durs[4], durs[5]
+    assert half_a + half_b == pytest.approx(581.05, abs=0.01)
+    assert half_a > 120 and half_b > 120
+
+    pieces = _manifest(tmp_path)["pieces"]
+    p1 = pieces[1]
+    assert [p.get("split") for p in (pieces[0], pieces[2])] == [None, None]
+    assert [(s["start_s"], s["end_s"]) for s in p1["split"]] == [
+        (pytest.approx(p1["start_s"]), pytest.approx(p1["start_s"] + half_a)),
+        (pytest.approx(p1["start_s"] + half_a), pytest.approx(p1["end_s"])),
+    ]
+    assert all(
+        set(s) == {"start_s", "end_s", "mp3_sha256", "bytes", "attempts"}
+        for s in p1["split"]
+    )
+    # Combined: sub-texts joined with "\n", in order; tokens summed; attempts =
+    # 3 failed whole-piece tries + one per half.
+    assert p1["text"].index("call1") < p1["text"].index("call2")
+    assert (p1["input_tokens"], p1["output_tokens"]) == (20, 40)
+    assert p1["attempts"] == 5
+    assert p1["words"] == len(p1["text"].split())
+    assert text.index("call0") < text.index("call1") < text.index("call2")
+    assert text.index("call2") < text.index("call3")
+
+    # Checkpoint: one file per piece, carrying the same split list.
+    cp = json.loads((tmp_path / "pieces" / "0001.json").read_text())
+    assert cp["split"] == p1["split"]
+    assert cp["text"] == p1["text"]
+    assert cp["attempts"] == 5 and cp["input_tokens"] == 20
+    assert (
+        cp["mp3_sha256"]
+        == hashlib.sha256(
+            "".join(s["mp3_sha256"] for s in p1["split"]).encode()
+        ).hexdigest()
+    )
+    assert cp["bytes"] == sum(s["bytes"] for s in p1["split"])
+    assert sorted(p.name for p in (tmp_path / "pieces").glob("*")) == [
+        "0000.json",
+        "0001.json",
+        "0002.json",
+    ]
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "piece 2" in warnings[0] and "2 sub-pieces" in warnings[0]
+    assert "depth 1" in warnings[0]
+
+
+def test_split_checkpoint_key_is_the_unsplit_key(span_audio, tmp_path) -> None:
+    """The key does not depend on splitting: it is what an unblocked run of the
+    same audio would have used for piece 1."""
+    split_dir, plain_dir = tmp_path / "s", tmp_path / "p"
+    # Same text for piece 0 in both runs so piece 1's prompt (hence key) matches.
+    _run(span_audio, split_dir, SpanFake(block=_piece1_blocked))
+    _run(span_audio, plain_dir, SpanFake())
+    for n in ("0000", "0001"):
+        a = json.loads((split_dir / "pieces" / f"{n}.json").read_text())
+        b = json.loads((plain_dir / "pieces" / f"{n}.json").read_text())
+        assert a["key"] == b["key"]
+
+
+def test_split_prompts_and_context(span_audio, tmp_path) -> None:
+    fake = SpanFake(block=_piece1_blocked)
+    _run(span_audio, tmp_path, fake, hosts=("Jerusalem Demsas",), description="d")
+    prompts = [p for _, p in fake.calls]
+    whole, first_half, second_half, third_piece = (
+        prompts[1],
+        prompts[4],
+        prompts[5],
+        prompts[6],
+    )
+    # Same piece number/count as the whole piece; the first half carries the
+    # whole piece's context, so its prompt is the whole piece's, verbatim.
+    assert "piece 2 of 3" in second_half
+    assert first_half == whole
+    assert "Context from the end of the previous piece" in whole
+    assert "call0" in whole and "call1" not in whole
+    # The second half's context is the first half's tail, and its speaker list
+    # includes the first half's speaker.
+    assert "call1" in _context_part(second_half)
+    assert "call0" not in _context_part(second_half)
+    names = second_half.split(NAMES_LABEL)[1]
+    assert "Alpha Guest" in names and "Beta Guest" in names
+    # The next piece continues from the combined text and knows every speaker.
+    assert "call2" in _context_part(third_piece)
+    assert "call1" not in _context_part(third_piece)
+    assert all(n in third_piece.split(NAMES_LABEL)[1] for n in SPEAKER_NAMES[:3])
+
+
+def test_split_without_carry_context_has_no_context(span_audio, tmp_path) -> None:
+    fake = SpanFake(block=_piece1_blocked)
+    _run(span_audio, tmp_path, fake, carry_context=False)
+    assert all("Context from the end" not in p for _, p in fake.calls)
+    assert len(fake.calls) == 7
+
+
+def test_sponsor_state_carries_through_sub_pieces(span_audio, tmp_path) -> None:
+    class SponsorFake(SpanFake):
+        def __call__(self, audio, prompt):
+            res = super().__call__(audio, prompt)
+            if self.accepted == 2:  # first half of piece 1 ends inside a read
+                res = pt.PieceResult(
+                    "Alpha Guest: hi " + "word " * 300 + "\n[SPONSOR]\n"
+                    "Ghost Person: buy " + "word " * 100,
+                    "STOP",
+                    1,
+                    2,
+                )
+            return res
+
+    fake = SponsorFake(block=_piece1_blocked)
+    _run(span_audio, tmp_path, fake)
+    second_half = fake.calls[5][1]
+    # Ghost Person spoke inside the still-open sponsor read: not a speaker.
+    assert "Ghost Person" not in second_half.split(NAMES_LABEL)[1]
+
+
+def test_recursive_split(span_audio, tmp_path, caplog) -> None:
+    # The cut falls at a quiet point near (not at) the middle: 581 s splits into
+    # 273 s + 308 s. The 273 s half passes; the 308 s half is blocked again and
+    # splits into two ~154 s leaves. The 338 s tail piece splits once.
+    fake = SpanFake(block=_nothing_over_280s)
+    with caplog.at_level("WARNING", logger=pt.logger.name):
+        text = _run(span_audio, tmp_path, fake)
+    m = _manifest(tmp_path)
+    for p in m["pieces"]:
+        leaves = p["split"]
+        assert all(120 <= s["end_s"] - s["start_s"] <= 280 for s in leaves)
+        assert leaves[0]["start_s"] == pytest.approx(p["start_s"])
+        assert leaves[-1]["end_s"] == pytest.approx(p["end_s"])
+        for a, b in zip(leaves, leaves[1:], strict=False):
+            assert a["end_s"] == pytest.approx(b["start_s"])  # contiguous
+    p0 = m["pieces"][0]
+    assert len(p0["split"]) == 3 and len(m["pieces"][2]["split"]) == 2
+    # whole (3 tries) + 273 s leaf (1) + 308 s (blocked once) + two ~154 s leaves.
+    assert p0["attempts"] == 3 + 1 + 1 + 1 + 1
+    idx = [text.index(f"call{i}") for i in range(3)]
+    assert idx == sorted(idx)
+    msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("depth 1" in d for d in msgs) and any("depth 2" in d for d in msgs)
+
+
+def test_recursive_split_context_chains_through_nested_halves(
+    span_audio, tmp_path
+) -> None:
+    fake = SpanFake(block=_nothing_over_280s)
+    _run(span_audio, tmp_path, fake)
+    # Piece 0's three leaves are accepted calls 0..2; each leaf after the first
+    # was prompted with the previous leaf's tail, across the nested boundary.
+    leaf_prompts = [p for d, p in fake.calls if d < 280][:3]
+    assert "Context from the end" not in leaf_prompts[0]  # piece 0: no context
+    for k in (1, 2):
+        assert f"call{k - 1}" in _context_part(leaf_prompts[k])
+
+
+def test_blocked_down_to_minimum_raises_with_split_depth(span_audio, tmp_path) -> None:
+    # 581 s -> 273 s (passes) + 308 s -> ~154 s, which is blocked and cannot be
+    # halved (each half would be < 120 s): depth 2.
+    fake = SpanFake(block=lambda dur, prompt: dur > 280 or dur < 200)
+    with pytest.raises(pt.TranscriptionError, match="split depth 2") as ei:
+        _run(span_audio, tmp_path, fake)
+    assert ei.value.reason == "asr_blocked"
+    # whole x3, 273 s ok, then 308 s and ~154 s blocked once each.
+    assert len(fake.calls) == 3 + 1 + 1 + 1
+    assert not (tmp_path / "transcript.txt").exists()
+    assert not list((tmp_path / "pieces").glob("*"))  # nothing half-checkpointed
+
+
+def test_blocked_sub_piece_too_short_at_depth_one(span_audio, tmp_path) -> None:
+    fake = SpanFake(block=lambda dur, prompt: True)
+    with pytest.raises(pt.TranscriptionError, match="split depth 1") as ei:
+        _run(span_audio, tmp_path, fake)
+    assert ei.value.reason == "asr_blocked"
+    assert min(d for d, _ in fake.calls) > 120
+
+
+def test_blocked_piece_too_short_to_split_is_reraised_as_today(
+    span_audio, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(pt, "decode_to_pcm_with_log", lambda p: (_pcm(230), ""))
+    fake = SpanFake(block=lambda dur, prompt: True)
+    with pytest.raises(pt.TranscriptionError, match="3 attempts") as ei:
+        _run(span_audio, tmp_path, fake, rss_duration_s=230)
+    assert ei.value.reason == "asr_blocked" and "split depth" not in str(ei.value)
+    assert len(fake.calls) == 3
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        _err("asr_timeout"),
+        _err("asr_incomplete"),
+        _err("asr_empty"),
+        _err("asr_error", 400),
+    ],
+)
+def test_other_errors_never_split(span_audio, tmp_path, exc) -> None:
+    fake = SpanFake(
+        fail=lambda dur, prompt: exc if _piece1_blocked(dur, prompt) else None
+    )
+    with pytest.raises(pt.TranscriptionError) as ei:
+        _run(span_audio, tmp_path, fake)
+    assert ei.value.reason == exc.reason and ei.value.code == exc.code
+    assert all(d > 500 for d, _ in fake.calls)  # only whole pieces were sent
+
+
+def test_non_blocked_error_in_a_half_propagates(span_audio, tmp_path) -> None:
+    fake = SpanFake(
+        block=_piece1_blocked,
+        fail=lambda dur, prompt: _err("asr_error", 400) if dur < 400 else None,
+    )
+    with pytest.raises(pt.TranscriptionError) as ei:
+        _run(span_audio, tmp_path, fake)
+    assert ei.value.reason == "asr_error" and ei.value.code == 400
+    assert "[sub-piece 581-" in str(ei.value) and str(ei.value).endswith(" s]")
+    assert len(fake.calls) == 1 + 3 + 1  # piece 0, blocked whole, first half only
+
+
+def test_sub_piece_encode_size_is_checked(span_audio, tmp_path, monkeypatch) -> None:
+    # Whole pieces (>= 27 MB of PCM) encode small and pass the ceiling; only
+    # sub-pieces (< 20 MB of PCM) come back oversized, so the error can only
+    # come from the sub-piece branch.
+    monkeypatch.setattr(pt, "MAX_PIECE_BYTES", 300)
+    real = pt.encode_piece
+    monkeypatch.setattr(
+        pt,
+        "encode_piece",
+        lambda pcm: real(pcm) + (b"x" * 1000 if len(pcm) < 20_000_000 else b""),
+    )
+    fake = SpanFake(block=_piece1_blocked)
+    with pytest.raises(pt.TranscriptionError, match="exceeds") as ei:
+        _run(span_audio, tmp_path, fake)
+    assert "piece 1:" in str(ei.value) and "[sub-piece 581-" in str(ei.value)
+    # piece 0, then piece 1 blocked whole (3 tries); no sub-piece was sent.
+    assert len(fake.calls) == 1 + 3
+
+
+def test_sub_pieces_get_one_attempt_on_a_block(span_audio, tmp_path) -> None:
+    """The block is deterministic per span: depth >= 1 does not retry or back
+    off on it, the top-level piece keeps its 3 attempts."""
+    sleeps: list[float] = []
+    fake = SpanFake(block=lambda dur, prompt: dur > 280 and "piece 1 of 3" in prompt)
+    _run(span_audio, tmp_path, fake, sleep=sleeps.append)
+    # Piece 0: whole x3 (5 s + 20 s backoff), 273 s ok, 308 s blocked once,
+    # then its two ~154 s halves. Pieces 1 and 2 pass first time.
+    assert sleeps == [5.0, 20.0]
+    assert len(fake.calls) == 3 + 1 + 1 + 2 + 2
+    p0 = _manifest(tmp_path)["pieces"][0]
+    assert len(p0["split"]) == 3
+    assert [s["attempts"] for s in p0["split"]] == [1, 1, 1]
+    assert p0["attempts"] == 3 + 1 + 1 + 1 + 1
+
+
+def test_sub_piece_block_gives_up_without_backoff(span_audio, tmp_path) -> None:
+    sleeps: list[float] = []
+    fake = SpanFake(block=lambda dur, prompt: dur < 400 or "piece 1 of 3" in prompt)
+    with pytest.raises(pt.TranscriptionError, match="split depth 1") as ei:
+        _run(span_audio, tmp_path, fake, sleep=sleeps.append)
+    assert ei.value.reason == "asr_blocked"
+    assert sleeps == [5.0, 20.0]  # only the top-level piece backed off
+    assert len(fake.calls) == 3 + 1  # whole x3, then the first half once
+
+
+def test_other_retryable_errors_in_a_sub_piece_keep_backoff(
+    span_audio, tmp_path
+) -> None:
+    sleeps: list[float] = []
+    state = {"n": 0}
+
+    def fail(dur, prompt):
+        if dur < 400:  # sub-pieces of the blocked piece: time out twice
+            state["n"] += 1
+            return _err("asr_timeout") if state["n"] <= 2 else None
+        return None
+
+    fake = SpanFake(block=_piece1_blocked, fail=fail)
+    _run(span_audio, tmp_path, fake, sleep=sleeps.append)
+    assert sleeps == [5.0, 20.0, 5.0, 20.0]  # whole-piece blocks, then timeouts
+    p1 = _manifest(tmp_path)["pieces"][1]
+    assert [s["attempts"] for s in p1["split"]] == [3, 1]
+
+
+def test_each_sub_piece_is_rate_checked(span_audio, tmp_path) -> None:
+    class Sparse(SpanFake):
+        def __call__(self, audio, prompt):
+            res = super().__call__(audio, prompt)
+            dur = self.calls[-1][0]
+            if "piece 2 of 3" in prompt and dur < 400:
+                # First half nearly empty, second half long: the combined
+                # piece is within bounds, the first sub-piece is not.
+                words = 20 if self.accepted == 2 else 1500
+                res = pt.PieceResult("Alpha Guest: " + "word " * words, "STOP", 1, 2)
+            return res
+
+    fake = Sparse(block=_piece1_blocked)
+    with pytest.raises(pt.TranscriptionError, match=r"words/min < 80") as ei:
+        _run(span_audio, tmp_path, fake)
+    assert ei.value.reason == "asr_incomplete"
+    assert "piece 1:" in str(ei.value) and "[sub-piece 581-" in str(ei.value)
+
+
+def test_split_piece_checkpoint_is_reused_without_calls(span_audio, tmp_path) -> None:
+    first = SpanFake(block=_piece1_blocked)
+    text = _run(span_audio, tmp_path, first)
+    (tmp_path / "transcript.txt").unlink()
+    (tmp_path / "transcript.json").unlink()
+    second = SpanFake(block=_piece1_blocked)
+    assert _run(span_audio, tmp_path, second) == text
+    assert second.calls == []
+    p1 = _manifest(tmp_path)["pieces"][1]
+    assert p1["from_checkpoint"] is True and len(p1["split"]) == 2
+    assert p1["attempts"] == 5
+
+
+@pytest.mark.parametrize("bad", [[], [{"start_s": 1}], "x", [3]])
+def test_malformed_split_in_checkpoint_is_a_miss(span_audio, tmp_path, bad) -> None:
+    _run(span_audio, tmp_path, SpanFake(block=_piece1_blocked))
+    cp_path = tmp_path / "pieces" / "0001.json"
+    cp = json.loads(cp_path.read_text())
+    cp["split"] = bad
+    cp_path.write_text(json.dumps(cp))
+    (tmp_path / "transcript.txt").unlink()
+    (tmp_path / "transcript.json").unlink()
+    second = SpanFake(block=_piece1_blocked)
+    _run(span_audio, tmp_path, second)
+    # piece 1 was re-asked whole (blocked 3x) and split again
+    assert sum(d > 500 for d, _ in second.calls) == 3
+
+
+def test_unblocked_run_has_no_split_fields(span_audio, tmp_path) -> None:
+    fake = SpanFake()
+    _run(span_audio, tmp_path, fake)
+    assert len(fake.calls) == 3
+    for p in _manifest(tmp_path)["pieces"]:
+        assert set(p) == {
+            "index",
+            "start_s",
+            "end_s",
+            "mp3_sha256",
+            "bytes",
+            "finish_reason",
+            "input_tokens",
+            "output_tokens",
+            "words",
+            "words_per_min",
+            "attempts",
+            "from_checkpoint",
+            "text",
+        }
+    for f in (tmp_path / "pieces").glob("*.json"):
+        assert set(json.loads(f.read_text())) == {
+            "key",
+            "text",
+            "finish_reason",
+            "input_tokens",
+            "output_tokens",
+            "attempts",
+            "mp3_sha256",
+            "bytes",
+        }
