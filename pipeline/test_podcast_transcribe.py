@@ -1323,8 +1323,8 @@ def test_recursive_split(span_audio, tmp_path, caplog) -> None:
             assert a["end_s"] == pytest.approx(b["start_s"])  # contiguous
     p0 = m["pieces"][0]
     assert len(p0["split"]) == 3 and len(m["pieces"][2]["split"]) == 2
-    # whole (3 tries) + 273 s leaf (1) + 308 s (3 tries) + two ~154 s leaves (1).
-    assert p0["attempts"] == 3 + 1 + 3 + 1 + 1
+    # whole (3 tries) + 273 s leaf (1) + 308 s (blocked once) + two ~154 s leaves.
+    assert p0["attempts"] == 3 + 1 + 1 + 1 + 1
     idx = [text.index(f"call{i}") for i in range(3)]
     assert idx == sorted(idx)
     msgs = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
@@ -1351,7 +1351,8 @@ def test_blocked_down_to_minimum_raises_with_split_depth(span_audio, tmp_path) -
     with pytest.raises(pt.TranscriptionError, match="split depth 2") as ei:
         _run(span_audio, tmp_path, fake)
     assert ei.value.reason == "asr_blocked"
-    assert len(fake.calls) == 3 + 1 + 3 + 3
+    # whole x3, 273 s ok, then 308 s and ~154 s blocked once each.
+    assert len(fake.calls) == 3 + 1 + 1 + 1
     assert not (tmp_path / "transcript.txt").exists()
     assert not list((tmp_path / "pieces").glob("*"))  # nothing half-checkpointed
 
@@ -1402,21 +1403,91 @@ def test_non_blocked_error_in_a_half_propagates(span_audio, tmp_path) -> None:
     with pytest.raises(pt.TranscriptionError) as ei:
         _run(span_audio, tmp_path, fake)
     assert ei.value.reason == "asr_error" and ei.value.code == 400
+    assert "[sub-piece 581-" in str(ei.value) and str(ei.value).endswith(" s]")
     assert len(fake.calls) == 1 + 3 + 1  # piece 0, blocked whole, first half only
 
 
 def test_sub_piece_encode_size_is_checked(span_audio, tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(pt, "MAX_PIECE_BYTES", 300)  # whole pieces fit (~22 B)
+    # Whole pieces (>= 27 MB of PCM) encode small and pass the ceiling; only
+    # sub-pieces (< 20 MB of PCM) come back oversized, so the error can only
+    # come from the sub-piece branch.
+    monkeypatch.setattr(pt, "MAX_PIECE_BYTES", 300)
     real = pt.encode_piece
     monkeypatch.setattr(
         pt,
         "encode_piece",
-        lambda pcm: real(pcm) + (b"x" * 1000 if len(pcm) < 40_000_000 else b""),
+        lambda pcm: real(pcm) + (b"x" * 1000 if len(pcm) < 20_000_000 else b""),
     )
     fake = SpanFake(block=_piece1_blocked)
-    # Pieces (~28 MB of PCM) get the padding too -> size error before any call.
-    with pytest.raises(pt.TranscriptionError, match="exceeds"):
+    with pytest.raises(pt.TranscriptionError, match="exceeds") as ei:
         _run(span_audio, tmp_path, fake)
+    assert "piece 1:" in str(ei.value) and "[sub-piece 581-" in str(ei.value)
+    # piece 0, then piece 1 blocked whole (3 tries); no sub-piece was sent.
+    assert len(fake.calls) == 1 + 3
+
+
+def test_sub_pieces_get_one_attempt_on_a_block(span_audio, tmp_path) -> None:
+    """The block is deterministic per span: depth >= 1 does not retry or back
+    off on it, the top-level piece keeps its 3 attempts."""
+    sleeps: list[float] = []
+    fake = SpanFake(block=lambda dur, prompt: dur > 280 and "piece 1 of 3" in prompt)
+    _run(span_audio, tmp_path, fake, sleep=sleeps.append)
+    # Piece 0: whole x3 (5 s + 20 s backoff), 273 s ok, 308 s blocked once,
+    # then its two ~154 s halves. Pieces 1 and 2 pass first time.
+    assert sleeps == [5.0, 20.0]
+    assert len(fake.calls) == 3 + 1 + 1 + 2 + 2
+    p0 = _manifest(tmp_path)["pieces"][0]
+    assert len(p0["split"]) == 3
+    assert [s["attempts"] for s in p0["split"]] == [1, 1, 1]
+    assert p0["attempts"] == 3 + 1 + 1 + 1 + 1
+
+
+def test_sub_piece_block_gives_up_without_backoff(span_audio, tmp_path) -> None:
+    sleeps: list[float] = []
+    fake = SpanFake(block=lambda dur, prompt: dur < 400 or "piece 1 of 3" in prompt)
+    with pytest.raises(pt.TranscriptionError, match="split depth 1") as ei:
+        _run(span_audio, tmp_path, fake, sleep=sleeps.append)
+    assert ei.value.reason == "asr_blocked"
+    assert sleeps == [5.0, 20.0]  # only the top-level piece backed off
+    assert len(fake.calls) == 3 + 1  # whole x3, then the first half once
+
+
+def test_other_retryable_errors_in_a_sub_piece_keep_backoff(
+    span_audio, tmp_path
+) -> None:
+    sleeps: list[float] = []
+    state = {"n": 0}
+
+    def fail(dur, prompt):
+        if dur < 400:  # sub-pieces of the blocked piece: time out twice
+            state["n"] += 1
+            return _err("asr_timeout") if state["n"] <= 2 else None
+        return None
+
+    fake = SpanFake(block=_piece1_blocked, fail=fail)
+    _run(span_audio, tmp_path, fake, sleep=sleeps.append)
+    assert sleeps == [5.0, 20.0, 5.0, 20.0]  # whole-piece blocks, then timeouts
+    p1 = _manifest(tmp_path)["pieces"][1]
+    assert [s["attempts"] for s in p1["split"]] == [3, 1]
+
+
+def test_each_sub_piece_is_rate_checked(span_audio, tmp_path) -> None:
+    class Sparse(SpanFake):
+        def __call__(self, audio, prompt):
+            res = super().__call__(audio, prompt)
+            dur = self.calls[-1][0]
+            if "piece 2 of 3" in prompt and dur < 400:
+                # First half nearly empty, second half long: the combined
+                # piece is within bounds, the first sub-piece is not.
+                words = 20 if self.accepted == 2 else 1500
+                res = pt.PieceResult("Alpha Guest: " + "word " * words, "STOP", 1, 2)
+            return res
+
+    fake = Sparse(block=_piece1_blocked)
+    with pytest.raises(pt.TranscriptionError, match=r"words/min < 80") as ei:
+        _run(span_audio, tmp_path, fake)
+    assert ei.value.reason == "asr_incomplete"
+    assert "piece 1:" in str(ei.value) and "[sub-piece 581-" in str(ei.value)
 
 
 def test_split_piece_checkpoint_is_reused_without_calls(span_audio, tmp_path) -> None:

@@ -615,16 +615,24 @@ def _transcribe_with_retry(
     *,
     index: int,
     sleep: Callable[[float], None],
+    max_blocked_attempts: int = MAX_ATTEMPTS,
 ) -> tuple[PieceResult, int]:
     """Up to ``MAX_ATTEMPTS`` tries for retryable failures; returns the result and
-    the number of attempts used. Non-retryable failures raise at once."""
+    the number of attempts used. Non-retryable failures raise at once.
+    ``max_blocked_attempts`` caps tries on ``asr_blocked`` alone (sub-pieces use
+    1: the block is deterministic per span, so re-asking is wasted wall-clock)."""
     attempt = 0
     while True:
         attempt += 1
         try:
             return transcriber(mp3, prompt), attempt
         except TranscriptionError as exc:
-            if not _is_retryable(exc) or attempt >= MAX_ATTEMPTS:
+            limit = (
+                min(MAX_ATTEMPTS, max_blocked_attempts)
+                if exc.reason == _asr.ASR_BLOCKED
+                else MAX_ATTEMPTS
+            )
+            if not _is_retryable(exc) or attempt >= limit:
                 suffix = f" (after {attempt} attempts)" if attempt > 1 else ""
                 raise TranscriptionError(
                     f"piece {index}: {exc}{suffix}",
@@ -671,6 +679,18 @@ def _halve(pcm: bytes, start: int, end: int) -> tuple[tuple[int, int], ...] | No
     return halves
 
 
+def _in_sub_piece(exc: TranscriptionError, start: int, end: int) -> TranscriptionError:
+    """``exc`` with the sub-piece's span (episode seconds) appended; reason and
+    code are unchanged."""
+    return TranscriptionError(
+        f"{exc} [sub-piece {start / PCM_BYTES_PER_SECOND:.0f}-"
+        f"{end / PCM_BYTES_PER_SECOND:.0f} s]",
+        reason=exc.reason,
+        code=exc.code,
+        attempts=exc.attempts,
+    )
+
+
 def _transcribe_span(
     pcm: bytes,
     start: int,
@@ -701,19 +721,26 @@ def _transcribe_span(
         description=description,
         context=context,
     )
-    mp3 = encode_piece(pcm[start:end])
+    try:
+        mp3 = encode_piece(pcm[start:end])
+    except TranscriptionError as exc:
+        raise _in_sub_piece(exc, start, end) from exc
     if len(mp3) > MAX_PIECE_BYTES:
-        raise TranscriptionError(
-            f"piece {index}: encoded size {len(mp3)} bytes exceeds "
-            f"{MAX_PIECE_BYTES} bytes"
+        raise _in_sub_piece(
+            TranscriptionError(
+                f"piece {index}: encoded size {len(mp3)} bytes exceeds "
+                f"{MAX_PIECE_BYTES} bytes"
+            ),
+            start,
+            end,
         )
     try:
         result, attempts = _transcribe_with_retry(
-            transcriber, mp3, prompt, index=index, sleep=sleep
+            transcriber, mp3, prompt, index=index, sleep=sleep, max_blocked_attempts=1
         )
     except TranscriptionError as exc:
         if exc.reason != _asr.ASR_BLOCKED:
-            raise
+            raise _in_sub_piece(exc, start, end) from exc
         state.attempts += exc.attempts or 1
         halves = _halve(pcm, start, end)
         if halves is None:
@@ -750,11 +777,22 @@ def _transcribe_span(
             )
         return
     if result.finish_reason != "STOP":
-        raise TranscriptionError(
-            f"piece {index}: asr_incomplete: finish_reason={result.finish_reason}",
-            reason="asr_incomplete",
+        raise _in_sub_piece(
+            TranscriptionError(
+                f"piece {index}: asr_incomplete: finish_reason={result.finish_reason}",
+                reason="asr_incomplete",
+            ),
+            start,
+            end,
         )
     text = result.text.strip()
+    # Each leaf is rate-checked too (a near-empty half can hide inside a
+    # combined piece that is within bounds); the combined check still runs.
+    rate_error = _piece_rate_error(
+        index, len(text.split()), (end - start) / PCM_BYTES_PER_SECOND
+    )
+    if rate_error is not None:
+        raise _in_sub_piece(rate_error, start, end) from rate_error
     state.attempts += attempts
     names, state.sponsor_open = _speakers_in(text, state.sponsor_open)
     for name in names:
@@ -837,6 +875,8 @@ def _transcribe_blocked_piece(
         input_tokens=_sum_or_none([r.input_tokens for r in results]),
         output_tokens=_sum_or_none([r.output_tokens for r in results]),
     )
+    # Synthetic: a hash of the leaf mp3 hashes, NOT the sha256 of any mp3 (there
+    # is no single mp3 for a split piece). It only has to be a stable string.
     mp3_sha = _sha256_text("".join(rec["mp3_sha256"] for rec in records))
     mp3_bytes = sum(rec["bytes"] for rec in records)
     return combined, state.attempts, mp3_sha, mp3_bytes, records
