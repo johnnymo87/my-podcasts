@@ -4,6 +4,8 @@ size cap, on top of the per-read timeout. No network: ``httpx.MockTransport``.""
 from __future__ import annotations
 
 import gzip
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -27,6 +29,15 @@ class FakeClock:
 
     def __call__(self) -> float:
         return self.now
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_fetch_state():
+    """The single-flight reference is module state: never let one test's
+    abandoned fetch thread refuse the next test's fetch."""
+    podcast_report._abandoned_fetch = None
+    yield
+    podcast_report._abandoned_fetch = None
 
 
 def _transport(handler) -> httpx.MockTransport:
@@ -221,3 +232,235 @@ def test_dry_run_cli_reports_a_clean_error(monkeypatch):
 def test_fixture_feed_is_far_below_the_cap():
     fixture = Path(__file__).parent / "fixtures" / "argument_feed.xml"
     assert fixture.stat().st_size < podcast_report.FEED_MAX_BYTES // 10
+
+
+# --- redirects are handled by us, and never read ---------------------------------
+
+
+class Endless:
+    """A body that would feed a reader forever; counts what was pulled."""
+
+    def __init__(self) -> None:
+        self.pulled = 0
+
+    def __iter__(self):
+        while True:
+            self.pulled += 1
+            yield b"x" * 65536
+
+
+def test_redirect_body_is_never_read():
+    body = Endless()
+
+    def handler(request):
+        if request.url.path == "/feed.rss":
+            return httpx.Response(
+                302, headers={"location": "https://example.test/real"}, content=body
+            )
+        return httpx.Response(200, content=b"<rss/>")
+
+    text = podcast_report.fetch_feed_xml(
+        "https://example.test/feed.rss", transport=_transport(handler)
+    )
+    assert text == "<rss/>"
+    assert body.pulled == 0
+
+
+def test_a_redirect_loop_with_endless_bodies_is_bounded_and_unread():
+    bodies: list[Endless] = []
+
+    def handler(request):
+        body = Endless()
+        bodies.append(body)
+        return httpx.Response(
+            302, headers={"location": "https://example.test/next"}, content=body
+        )
+
+    with pytest.raises(podcast_report.FeedFetchError, match="redirect"):
+        podcast_report.fetch_feed_xml(
+            "https://example.test/feed.rss", transport=_transport(handler)
+        )
+    assert len(bodies) == podcast_report.FEED_MAX_REDIRECTS + 1
+    assert all(b.pulled == 0 for b in bodies)
+
+
+def test_exactly_the_maximum_number_of_redirects_is_followed():
+    hops: list[str] = []
+
+    def handler(request):
+        hops.append(request.url.path)
+        n = len(hops)
+        if n <= podcast_report.FEED_MAX_REDIRECTS:
+            return httpx.Response(302, headers={"location": f"/hop{n}"})
+        return httpx.Response(200, content=b"<rss/>")
+
+    assert (
+        podcast_report.fetch_feed_xml(
+            "https://example.test/feed.rss", transport=_transport(handler)
+        )
+        == "<rss/>"
+    )
+    assert len(hops) == podcast_report.FEED_MAX_REDIRECTS + 1
+
+
+def test_relative_and_absolute_locations_are_joined_against_the_current_url():
+    seen: list[str] = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        if request.url.path == "/a/feed.rss":
+            return httpx.Response(301, headers={"location": "../b/feed2.rss?x=1"})
+        if request.url.path == "/b/feed2.rss":
+            return httpx.Response(307, headers={"location": "https://other.test/z"})
+        return httpx.Response(200, content=b"<rss/>")
+
+    podcast_report.fetch_feed_xml(
+        "https://example.test/a/feed.rss", transport=_transport(handler)
+    )
+    assert seen == [
+        "https://example.test/a/feed.rss",
+        "https://example.test/b/feed2.rss?x=1",
+        "https://other.test/z",
+    ]
+
+
+def test_redirect_without_location_is_an_error():
+    def handler(request):
+        return httpx.Response(302, content=Endless())
+
+    with pytest.raises(podcast_report.FeedFetchError, match="Location"):
+        podcast_report.fetch_feed_xml(URL, transport=_transport(handler))
+
+
+def test_redirect_to_a_non_http_scheme_is_refused():
+    def handler(request):
+        return httpx.Response(302, headers={"location": "file:///etc/passwd"})
+
+    with pytest.raises(podcast_report.FeedFetchError, match="scheme"):
+        podcast_report.fetch_feed_xml(URL, transport=_transport(handler))
+
+
+def test_one_deadline_spans_all_hops():
+    clock = FakeClock()
+
+    def handler(request):
+        clock.now += 25.0  # each hop costs 25 fake seconds before headers
+        if request.url.path.count("h") < 5:
+            return httpx.Response(302, headers={"location": request.url.path + "h"})
+        return httpx.Response(200, content=b"<rss/>")
+
+    with pytest.raises(podcast_report.FeedFetchError, match="deadline"):
+        podcast_report.fetch_feed_xml(
+            "https://example.test/", transport=_transport(handler), clock=clock
+        )
+    assert clock.now <= 1000.0 + podcast_report.FEED_FETCH_DEADLINE_S + 25.0
+
+
+def test_redirect_error_does_not_leak_the_signed_url():
+    def handler(request):
+        return httpx.Response(
+            302, headers={"location": request.url.path + "?sig=SECRET"}
+        )
+
+    with pytest.raises(podcast_report.FeedFetchError) as info:
+        podcast_report.fetch_feed_xml(URL, transport=_transport(handler))
+    assert "SECRET" not in str(info.value)
+
+
+# --- the whole exchange is bounded: blocked before headers -----------------------
+
+
+class Blocked:
+    """A transport that blocks until released (a server that never answers)."""
+
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.entered = threading.Event()
+        self.calls = 0
+
+    def __call__(self, request):
+        self.calls += 1
+        self.entered.set()
+        self.release.wait(30)
+        return httpx.Response(200, content=b"<rss/>")
+
+
+@pytest.fixture
+def blocked():
+    b = Blocked()
+    try:
+        yield b
+    finally:
+        b.release.set()
+        leaked = podcast_report._abandoned_fetch
+        if leaked is not None:
+            leaked.join(5)
+
+
+def test_blocked_before_headers_is_cut_off_at_the_deadline(blocked):
+    t0 = time.monotonic()
+    with pytest.raises(podcast_report.FeedFetchError, match="deadline") as info:
+        podcast_report.fetch_feed_xml(
+            URL, transport=_transport(blocked), deadline_s=0.3
+        )
+    assert time.monotonic() - t0 < 5.0
+    assert blocked.entered.is_set()
+    assert "SECRET" not in str(info.value)
+    assert podcast_report._abandoned_fetch is not None
+
+
+def test_a_second_fetch_while_one_is_still_abandoned_fails_at_once(blocked):
+    with pytest.raises(podcast_report.FeedFetchError, match="deadline"):
+        podcast_report.fetch_feed_xml(
+            URL, transport=_transport(blocked), deadline_s=0.3
+        )
+    t0 = time.monotonic()
+    with pytest.raises(podcast_report.FeedFetchError, match="still running"):
+        podcast_report.fetch_feed_xml(
+            URL, transport=_transport(blocked), deadline_s=0.3
+        )
+    assert time.monotonic() - t0 < 0.2  # immediate: no wait, no new thread
+    assert blocked.calls == 1  # the second call never reached the transport
+    assert sum(1 for t in threading.enumerate() if t.name == "podcast-feed-fetch") == 1
+
+
+def test_fetching_works_again_once_the_abandoned_thread_has_finished(blocked):
+    with pytest.raises(podcast_report.FeedFetchError):
+        podcast_report.fetch_feed_xml(
+            URL, transport=_transport(blocked), deadline_s=0.3
+        )
+    blocked.release.set()
+    podcast_report._abandoned_fetch.join(5)
+
+    def ok(request):
+        return httpx.Response(200, content=b"<rss/>")
+
+    assert podcast_report.fetch_feed_xml(URL, transport=_transport(ok)) == "<rss/>"
+    assert podcast_report._abandoned_fetch is None
+
+
+def test_the_abandoned_fetch_stops_instead_of_finishing_its_work(blocked):
+    """A late-waking abandoned thread must not keep downloading."""
+    pulled = Endless()
+
+    def handler(request):
+        blocked(request)
+        return httpx.Response(200, content=pulled)
+
+    with pytest.raises(podcast_report.FeedFetchError):
+        podcast_report.fetch_feed_xml(
+            URL, transport=_transport(handler), deadline_s=0.3
+        )
+    blocked.release.set()
+    podcast_report._abandoned_fetch.join(5)
+    assert not podcast_report._abandoned_fetch.is_alive()
+    assert pulled.pulled <= 1
+
+
+def test_errors_from_the_worker_keep_their_type():
+    def handler(request):
+        return httpx.Response(503)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        podcast_report.fetch_feed_xml(URL, transport=_transport(handler))
+    assert podcast_report._abandoned_fetch is None

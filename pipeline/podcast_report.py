@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import json
 import os
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -48,6 +49,7 @@ EPISODE_AUDIO_NAME = "episode.mp3"
 _RSS_TIMEOUT_S = 30.0  # per read; see FEED_FETCH_DEADLINE_S for the total
 FEED_FETCH_DEADLINE_S = 60  # total wall clock for one feed fetch
 FEED_MAX_BYTES = 10 * 1024 * 1024  # the real feed is ~175 KB
+FEED_MAX_REDIRECTS = 5
 
 
 _SERVE_HEALTH_TIMEOUT_S = 5.0
@@ -114,61 +116,149 @@ class FeedFetchError(httpx.HTTPError):
     """
 
 
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+# Module state for the single-flight rule: the one abandoned (timed out, still
+# running) fetch thread, if any. Guarded by ``_fetch_lock``.
+_fetch_lock = threading.Lock()
+_abandoned_fetch: threading.Thread | None = None
+
+
 def fetch_feed_xml(
     url: str,
     *,
     clock: Callable[[], float] = time.monotonic,
     transport: httpx.BaseTransport | None = None,
+    deadline_s: float | None = None,
 ) -> str:
-    """The feed body as text, within ``FEED_FETCH_DEADLINE_S`` and
-    ``FEED_MAX_BYTES``.
+    """The feed body as text, within one total deadline and ``FEED_MAX_BYTES``.
 
-    The per-read timeout alone does not bound a fetch: a server that trickles a
-    byte every few seconds never trips it, and the consumer is single-threaded.
-    So the body is streamed and the total wall clock is checked between chunks.
-    A single read that blocks is still bounded by the per-read timeout, so the
-    worst case is the deadline plus one read timeout.
+    The whole exchange is bounded, not just the body loop: connect and header
+    waits and redirects count too. Two layers do it:
 
-    ``clock`` and ``transport`` are test seams.
+    * The fetch runs on a daemon worker thread that the caller joins for at most
+      ``deadline_s`` (default ``FEED_FETCH_DEADLINE_S``). On timeout the thread
+      is abandoned (a GET has no side effects) and ``FeedFetchError`` is raised.
+      **Single-flight**: while an abandoned thread is still alive a new fetch
+      fails at once with ``FeedFetchError``, so at most one thread ever leaks.
+    * Inside the worker redirects are followed by hand (``FEED_MAX_REDIRECTS`` hops,
+      the redirect response is closed and its body never read), and the body is
+      read through a deadline + size-cap loop. One deadline spans all hops.
+
+    Errors raised in the worker (``httpx.HTTPError`` and friends) propagate to
+    the caller unchanged. ``clock``, ``transport`` and ``deadline_s`` are test
+    seams. No message names the URL: it may be signed.
     """
-    deadline = clock() + FEED_FETCH_DEADLINE_S
+    global _abandoned_fetch
+    if deadline_s is None:
+        deadline_s = FEED_FETCH_DEADLINE_S
+    with _fetch_lock:
+        if _abandoned_fetch is not None:
+            if _abandoned_fetch.is_alive():
+                raise FeedFetchError("previous feed fetch still running")
+            _abandoned_fetch = None
 
-    def over_deadline() -> bool:
-        return clock() > deadline
+    cancelled = threading.Event()
+    box: dict[str, Any] = {}
 
-    with (
-        httpx.Client(
-            timeout=_RSS_TIMEOUT_S,
-            follow_redirects=True,
-            headers={"User-Agent": "my-podcasts/1.0"},
-            transport=transport,
-        ) as client,
-        client.stream("GET", url) as resp,
-    ):
-        resp.raise_for_status()
-        declared = resp.headers.get("content-length")
-        if declared is not None and declared.isdigit():
-            if int(declared) > FEED_MAX_BYTES:
-                raise FeedFetchError(
-                    f"feed declares {declared} bytes, over the cap of "
-                    f"{FEED_MAX_BYTES} bytes"
-                )
-        chunks: list[bytes] = []
-        total = 0
-        for chunk in resp.iter_bytes():
-            total += len(chunk)
-            if total > FEED_MAX_BYTES:
-                raise FeedFetchError(
-                    f"feed body exceeded the cap of {FEED_MAX_BYTES} bytes"
-                )
-            chunks.append(chunk)
-            if over_deadline():
-                raise FeedFetchError(
-                    f"feed fetch exceeded the {FEED_FETCH_DEADLINE_S}s deadline "
-                    f"({total} bytes received)"
-                )
-        # Same decoding as ``Response.text``: declared charset, else UTF-8.
-        return b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
+    def work() -> None:
+        try:
+            box["text"] = _fetch_feed_xml(
+                url,
+                clock=clock,
+                transport=transport,
+                deadline_s=deadline_s,
+                cancelled=cancelled,
+            )
+        except BaseException as exc:  # noqa: BLE001 -- re-raised in the caller
+            box["error"] = exc
+
+    thread = threading.Thread(target=work, name="podcast-feed-fetch", daemon=True)
+    thread.start()
+    thread.join(deadline_s)
+    if thread.is_alive():
+        cancelled.set()  # if it ever wakes, it stops instead of downloading
+        with _fetch_lock:
+            _abandoned_fetch = thread
+        raise FeedFetchError(f"feed fetch exceeded the {deadline_s:g}s deadline")
+    if "error" in box:
+        raise box["error"]
+    return box["text"]
+
+
+def _fetch_feed_xml(
+    url: str,
+    *,
+    clock: Callable[[], float],
+    transport: httpx.BaseTransport | None,
+    deadline_s: float,
+    cancelled: threading.Event,
+) -> str:
+    deadline = clock() + deadline_s
+
+    def check() -> None:
+        if cancelled.is_set():
+            raise FeedFetchError("feed fetch abandoned")
+        if clock() > deadline:
+            raise FeedFetchError(f"feed fetch exceeded the {deadline_s:g}s deadline")
+
+    with httpx.Client(
+        timeout=_RSS_TIMEOUT_S,
+        follow_redirects=False,
+        headers={"User-Agent": "my-podcasts/1.0"},
+        transport=transport,
+    ) as client:
+        current = httpx.URL(url)
+        for hop in range(FEED_MAX_REDIRECTS + 1):
+            check()
+            resp = client.send(client.build_request("GET", current), stream=True)
+            try:
+                check()
+                if resp.status_code in _REDIRECT_STATUSES:
+                    # Never read a redirect body: it is attacker-sized.
+                    location = resp.headers.get("location")
+                    if not location:
+                        raise FeedFetchError("feed redirect without a Location")
+                    if hop == FEED_MAX_REDIRECTS:
+                        raise FeedFetchError(
+                            f"feed followed more than {FEED_MAX_REDIRECTS} redirects"
+                        )
+                    try:
+                        current = resp.url.join(location)
+                    except httpx.InvalidURL as exc:
+                        raise FeedFetchError("feed redirect to an invalid URL") from exc
+                    if current.scheme not in ("http", "https"):
+                        raise FeedFetchError(
+                            f"feed redirect to a non-http scheme ({current.scheme!r})"
+                        )
+                    continue
+                return _read_body(resp, check)
+            finally:
+                resp.close()
+    raise FeedFetchError("feed redirect loop")  # unreachable; keeps types honest
+
+
+def _read_body(resp: httpx.Response, check: Callable[[], None]) -> str:
+    resp.raise_for_status()
+    declared = resp.headers.get("content-length")
+    if declared is not None and declared.isdigit():
+        if int(declared) > FEED_MAX_BYTES:
+            raise FeedFetchError(
+                f"feed declares {declared} bytes, over the cap of "
+                f"{FEED_MAX_BYTES} bytes"
+            )
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in resp.iter_bytes():
+        total += len(chunk)
+        if total > FEED_MAX_BYTES:
+            raise FeedFetchError(
+                f"feed body exceeded the cap of {FEED_MAX_BYTES} bytes"
+            )
+        chunks.append(chunk)
+        check()
+    # Same decoding as ``Response.text``: declared charset, else UTF-8.
+    return b"".join(chunks).decode(resp.encoding or "utf-8", errors="replace")
 
 
 def find_item(rss_xml: str, guid: str) -> PodcastItem:
