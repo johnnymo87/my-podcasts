@@ -156,6 +156,108 @@ def test_duration_tolerance_boundary(audio, tmp_path) -> None:
         _run(audio, tmp_path, FakeTranscriber(), rss_duration_s=1700)
 
 
+@pytest.mark.parametrize(
+    ("decoded", "rss", "allowed"),
+    [
+        (3500.0, 3000, 600.0),  # long, rss small: excess floor 600 > 0.20 * rss
+        (3000.0, 3000, 600.0),  # equal counts as the excess side
+        (4000.0, 3600, 720.0),  # long, 0.20 * rss wins over the floor
+        (2900.0, 3000, 240.0),  # short: 0.08 * rss
+        (500.0, 600, 120.0),  # short: the 120 s floor beats 0.08 * rss
+    ],
+)
+def test_duration_allowance_is_per_side(decoded, rss, allowed) -> None:
+    assert pt.duration_allowance(decoded, rss) == pytest.approx(allowed)
+
+
+def test_duration_allowance_constants() -> None:
+    assert (pt.DURATION_SHORTFALL_MIN_S, pt.DURATION_SHORTFALL_FRACTION) == (
+        120.0,
+        0.08,
+    )
+    assert (pt.DURATION_EXCESS_MIN_S, pt.DURATION_EXCESS_FRACTION) == (600.0, 0.20)
+
+
+@pytest.mark.parametrize(
+    ("decoded", "rss"),
+    [(3600.0, 3000), (4320.0, 3600), (2760.0, 3000), (480.0, 600)],
+)
+def test_check_duration_accepts_the_boundary_on_both_sides(decoded, rss) -> None:
+    assert pt._check_duration(decoded, rss) is False
+
+
+def test_check_duration_skipped_without_rss() -> None:
+    assert pt._check_duration(123.0, None) is True
+
+
+def test_check_duration_accepts_inserted_audio_the_old_rule_refused() -> None:
+    # 255 s of ads on a 61-minute episode used 86% of the old allowance;
+    # 4 minutes of ads on a 20-minute episode would have been refused.
+    assert pt._check_duration(1200.0 + 240.0, 1200) is False
+
+
+def test_check_duration_refuses_excess_naming_the_side() -> None:
+    with pytest.raises(pt.TranscriptionError) as exc:
+        pt._check_duration(4000.0, 3000)
+    msg = str(exc.value)
+    assert "decoded 4000s vs RSS 3000s (+1000s; allowed +600s/-240s)" in msg
+    assert "more inserted audio than expected" in msg
+    assert "truncated" not in msg
+
+
+def test_check_duration_refuses_shortfall_naming_the_side() -> None:
+    with pytest.raises(pt.TranscriptionError) as exc:
+        pt._check_duration(2700.0, 3000)
+    msg = str(exc.value)
+    assert "decoded 2700s vs RSS 3000s (-300s; allowed +600s/-240s)" in msg
+    assert "likely truncated or the wrong file" in msg
+
+
+def test_duration_tolerance_is_not_in_the_transcription_policy(monkeypatch) -> None:
+    """Loosening a duration bound must not cold-invalidate any checkpoint."""
+    before = pt.transcription_policy_digest("m")
+    monkeypatch.setattr(pt, "DURATION_EXCESS_MIN_S", 1.0)
+    monkeypatch.setattr(pt, "DURATION_EXCESS_FRACTION", 0.99)
+    monkeypatch.setattr(pt, "DURATION_SHORTFALL_MIN_S", 2.0)
+    monkeypatch.setattr(pt, "DURATION_SHORTFALL_FRACTION", 0.5)
+    assert pt.transcription_policy_digest("m") == before
+
+
+def test_cached_transcript_with_inserted_audio_is_reusable_under_the_new_rule(
+    audio, tmp_path
+) -> None:
+    # decoded 1500 vs rss 950 = +550: refused by the old max(120, 8%), allowed
+    # now (excess bound max(600, 0.20 * 950)).
+    _run(audio, tmp_path, FakeTranscriber(), rss_duration_s=1500)
+    again = FakeTranscriber()
+    _run(audio, tmp_path, again, rss_duration_s=950)
+    assert again.calls == []
+    assert (tmp_path / "transcript.txt").exists()
+
+
+def test_cached_transcript_past_the_excess_bound_is_not_reused(audio, tmp_path) -> None:
+    _run(audio, tmp_path, FakeTranscriber(), rss_duration_s=1500)
+    again = FakeTranscriber()
+    with pytest.raises(pt.TranscriptionError, match="more inserted audio"):
+        _run(audio, tmp_path, again, rss_duration_s=890)  # +610 > 600
+    assert again.calls == []
+
+
+def test_cached_transcript_with_a_shortfall_is_still_rejected(audio, tmp_path) -> None:
+    # decoded 1500 vs rss 1800 = -300 > max(120, 0.08 * 1800 = 144).
+    _run(audio, tmp_path, FakeTranscriber(), rss_duration_s=1500)
+    again = FakeTranscriber()
+    with pytest.raises(pt.TranscriptionError, match="truncated"):
+        _run(audio, tmp_path, again, rss_duration_s=1800)
+    assert again.calls == []
+
+
+def test_fresh_run_with_inserted_audio_passes_the_check(audio, tmp_path) -> None:
+    fake = FakeTranscriber()
+    _run(audio, tmp_path, fake, rss_duration_s=950)  # +550 on a fresh decode
+    assert fake.calls
+
+
 def test_one_failed_piece_fails_all(audio, tmp_path) -> None:
     with pytest.raises(pt.TranscriptionError):
         _run(audio, tmp_path, FakeTranscriber(fail_piece=1))

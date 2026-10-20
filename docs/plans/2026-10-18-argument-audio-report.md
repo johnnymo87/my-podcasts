@@ -33,6 +33,15 @@ Work in `/home/dev/projects/my-podcasts/.worktrees/argument-audio-report`.
 
 ## Handoff state (keep current)
 
+- **Status 2026-10-20 (latest, supersedes below):** Phase 2 shipped (#38,
+  2633aa7); blocked-piece split #39 (6892f3d) and edge-ad skip #40 (29385a1)
+  merged and deployed; all 4 backfill Reports (Sep 10, Oct 1, Oct 8, Oct 15)
+  published 2026-10-20 (Oct 8/15 split to depth 3, `asr_skipped_s` 0); R2
+  previews deleted. Follow-ups: `my-podcasts-qez` (HTTP 402 as account pause),
+  `my-podcasts-5n5` (per-sub-piece checkpoints), `my-podcasts-oqf` (asymmetric
+  duration tolerance: shortfall bound unchanged, excess bound
+  `max(600 s, 20% of RSS)`). Remaining: unattended Oct 22 publish check
+  (scheduled wake 2026-10-22T15:00Z), then close `my-podcasts-bw3`.
 - Bead: `my-podcasts-bw3`. Branch `argument-audio-report`, worktree
   `/home/dev/projects/my-podcasts/.worktrees/argument-audio-report` (based on
   `origin/main` 96afaeb; the main checkout's local `main` was behind origin).
@@ -61,7 +70,7 @@ Work in `/home/dev/projects/my-podcasts/.worktrees/argument-audio-report`.
   binding decisions); executing via SDD in worktree
   `.worktrees/argument-audio-phase2`, branch `argument-audio-phase2` (stacked
   on `argument-audio-report`, PR #37 awaiting owner merge).
-- **Status 2026-10-20 (latest, supersedes below):** Round-2 findings fixed in
+- **Status 2026-10-20 (superseded):** Round-2 findings fixed in
   1a5c95c (whole-exchange feed fetch: manual redirects, worker thread +
   deadline join, single-flight), 4b1e204 (one shared alert worker, results
   True/False/"timeout"/"dropped"), 709a1fc + ea4dea9 (docs incl. accepted R2
