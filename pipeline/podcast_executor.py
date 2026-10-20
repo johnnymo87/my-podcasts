@@ -34,16 +34,16 @@ from pipeline.podcast_publish import validate_identity
 from pipeline.podcast_report import AUDIO_NAME, EPISODE_AUDIO_NAME
 from pipeline.podcast_sources import get_podcast_source
 from pipeline.podcast_transcribe import (
-    DURATION_TOLERANCE_FRACTION,
-    DURATION_TOLERANCE_MIN_S,
     MANIFEST_NAME,
+    duration_allowance,
+    duration_bounds,
 )
 
 
 logger = logging.getLogger(__name__)
 
-# Dynamic ad insertion already uses ~40% of the allowed decoded-vs-RSS gap;
-# beyond this fraction we are close enough to a refusal to say so.
+# Beyond this fraction of the allowed decoded-vs-RSS gap (for the side the gap
+# is on) we are close enough to a refusal to say so.
 HEADROOM_WARN_FRACTION = 0.75
 TERMINAL_HTTP_CODE = 400  # Gemini reports an invalid request/key as 400
 
@@ -81,6 +81,8 @@ def _blank_stats(child_elapsed_s: float, mode: str) -> dict:
         "rss_duration_s": None,
         "decoded_minus_rss_s": None,
         "allowed_s": None,
+        "allowed_short_s": None,
+        "allowed_long_s": None,
         "pieces": None,
         "input_tokens": None,
         "output_tokens": None,
@@ -100,16 +102,20 @@ def collect_stats(work_dir: Path, *, child_elapsed_s: float, mode: str) -> dict:
         pieces = None
 
     stats = _blank_stats(child_elapsed_s, mode)
-    diff = allowed = None
+    diff = allowed = allowed_short = allowed_long = None
     if decoded is not None and rss is not None:
         diff = round(decoded - rss, 3)
-        # Same formula as podcast_transcribe._check_duration.
-        allowed = max(DURATION_TOLERANCE_MIN_S, DURATION_TOLERANCE_FRACTION * rss)
+        # The very functions podcast_transcribe._check_duration uses, so the
+        # stats cannot drift from the refusal.
+        allowed = duration_allowance(decoded, rss)
+        allowed_short, allowed_long = duration_bounds(rss)
     stats.update(
         decoded_duration_s=decoded,
         rss_duration_s=rss,
         decoded_minus_rss_s=diff,
         allowed_s=allowed,
+        allowed_short_s=allowed_short,
+        allowed_long_s=allowed_long,
         pieces=len(pieces) if pieces is not None else None,
         input_tokens=_sum_tokens(pieces, "input_tokens") if pieces else None,
         output_tokens=_sum_tokens(pieces, "output_tokens") if pieces else None,
@@ -122,9 +128,9 @@ def collect_stats(work_dir: Path, *, child_elapsed_s: float, mode: str) -> dict:
 
 def _headroom_used(stats: dict) -> bool:
     """True when the decoded-vs-RSS gap is past the warning fraction of the
-    allowed tolerance. Magnitude, not sign: the refusal in
-    ``podcast_transcribe._check_duration`` is on ``abs()``, so a short decode
-    is just as close to it."""
+    allowance for its side (``allowed_s``). Both directions are checked: a short
+    decode is close to its (tighter) refusal in
+    ``podcast_transcribe._check_duration`` too."""
     diff, allowed = stats["decoded_minus_rss_s"], stats["allowed_s"]
     if diff is None or allowed is None:
         return False
@@ -268,12 +274,14 @@ def run_one_podcast_episode(
             logger.warning("%s: could not delete %s: %r", label, name, exc)
 
     if _headroom_used(stats):
+        diff = stats["decoded_minus_rss_s"]
+        side = "longer" if diff >= 0 else "shorter"
         sent = send_alert_bounded(
             f"Podcast report {title}: decoded audio is "
-            f"{stats['decoded_minus_rss_s']:+.0f}s from the RSS duration, "
-            f"{abs(stats['decoded_minus_rss_s']) / stats['allowed_s']:.0%} of the "
-            f"{stats['allowed_s']:.0f}s the duration check allows. Refusals "
-            "start at 100%.",
+            f"{abs(diff):.0f}s {side} than the RSS duration ({diff:+.0f}s), "
+            f"{abs(diff) / stats['allowed_s']:.0%} of the "
+            f"{stats['allowed_s']:.0f}s the duration check allows on that "
+            "side. Refusals start at 100%.",
             "info",
             sender=alert,
         )

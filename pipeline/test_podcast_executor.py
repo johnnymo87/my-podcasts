@@ -7,11 +7,11 @@ import pytest
 
 from pipeline.db import PODCAST_MAX_FAILURES, PODCAST_RETRY_BACKOFF, StateStore
 from pipeline.podcast_child import ChildOutcome
-from pipeline.podcast_executor import run_one_podcast_episode
+from pipeline.podcast_executor import collect_stats, run_one_podcast_episode
 from pipeline.podcast_feed import PodcastItem
 from pipeline.podcast_jobs import admit_item, work_dir_for
 from pipeline.podcast_sources import get_podcast_source
-from pipeline.podcast_transcribe import MANIFEST_NAME
+from pipeline.podcast_transcribe import MANIFEST_NAME, duration_allowance
 
 
 NOW = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
@@ -183,7 +183,9 @@ def test_happy_path_completes_stores_stats_deletes_audio(store, work_root):
         "decoded_duration_s": 5030.0,
         "rss_duration_s": 5000,
         "decoded_minus_rss_s": 30.0,
-        "allowed_s": 400.0,
+        "allowed_s": 1000.0,
+        "allowed_short_s": 400.0,
+        "allowed_long_s": 1000.0,
         "pieces": 2,
         "input_tokens": 300,
         "output_tokens": 120,
@@ -438,53 +440,82 @@ def test_exhaustion_alert_text_has_no_signed_url(store, work_root):
 def test_headroom_over_75_percent_sends_one_info_alert(store, work_root):
     item = _admit(store)
     alerts = Alerts()
-    # allowed = max(120, 0.08 * 5000) = 400; 80% of that = 320 > 300.
-    child = FakeChild(work_root, decoded=5320.0)
+    # long side: allowed = max(600, 0.20 * 5000) = 1000; 80% of that = 800 > 750.
+    child = FakeChild(work_root, decoded=5800.0)
     _run(store, work_root, child, Publish(), alerts)
     row = store.get_podcast_episode("argument", item.guid)
     assert row["status"] == "completed"
     stats = json.loads(row["stats_json"])
-    assert stats["decoded_minus_rss_s"] == 320.0
-    assert stats["allowed_s"] == 400.0
+    assert stats["decoded_minus_rss_s"] == 800.0
+    assert stats["allowed_s"] == 1000.0
+    assert stats["allowed_long_s"] == 1000.0
+    assert stats["allowed_short_s"] == 400.0
     assert len(alerts.calls) == 1
     text, severity = alerts.calls[0]
     assert severity == "info"
     assert "Episode 1" in text
-    assert "320" in text and "400" in text
+    assert "800" in text and "1000" in text and "80%" in text
+    assert "longer than the RSS duration" in text
+
+
+def test_the_old_headroom_gap_is_no_longer_near_a_refusal(store, work_root):
+    # +320 s on 5000 s used 80% of the old symmetric allowance; now 32%.
+    item = _admit(store)
+    alerts = Alerts()
+    _run(store, work_root, FakeChild(work_root, decoded=5320.0), Publish(), alerts)
+    stats = json.loads(store.get_podcast_episode("argument", item.guid)["stats_json"])
+    assert stats["decoded_minus_rss_s"] == 320.0
+    assert alerts.calls == []
 
 
 def test_headroom_in_the_short_direction_also_warns(store, work_root):
-    # The refusal in podcast_transcribe is on abs(); so is the early warning.
+    # The shortfall bound is unchanged (max(120, 8%) = 400): -320 is 80% of it.
     item = _admit(store)
     alerts = Alerts()
     _run(store, work_root, FakeChild(work_root, decoded=4680.0), Publish(), alerts)
     assert len(alerts.calls) == 1 and alerts.calls[0][1] == "info"
+    assert "shorter than the RSS duration" in alerts.calls[0][0]
     stats = json.loads(store.get_podcast_episode("argument", item.guid)["stats_json"])
     assert stats["decoded_minus_rss_s"] == -320.0
+    assert stats["allowed_s"] == 400.0  # the side that applies
+    assert stats["allowed_short_s"] == 400.0
+    assert stats["allowed_long_s"] == 1000.0
 
 
 def test_headroom_at_exactly_75_percent_does_not_alert(store, work_root):
     _admit(store)
     alerts = Alerts()
-    _run(store, work_root, FakeChild(work_root, decoded=5300.0), Publish(), alerts)
+    _run(store, work_root, FakeChild(work_root, decoded=5750.0), Publish(), alerts)
     assert alerts.calls == []
 
 
-def test_short_episode_uses_the_two_minute_floor(store, work_root):
+def test_short_episode_uses_the_floors(store, work_root):
     item = _admit(store)
-    # rss 600 s: 8% = 48 < floor 120. 100 s over = 83% of 120.
-    child = FakeChild(work_root, decoded=700.0, rss=600)
+    # rss 600 s: long side floor 600 (20% = 120); short side floor 120 (8% = 48).
+    # 500 s over = 83% of 600.
+    child = FakeChild(work_root, decoded=1100.0, rss=600)
     alerts = Alerts()
     _run(store, work_root, child, Publish(), alerts)
     stats = json.loads(store.get_podcast_episode("argument", item.guid)["stats_json"])
-    assert stats["allowed_s"] == 120.0
+    assert stats["allowed_s"] == 600.0
+    assert stats["allowed_long_s"] == 600.0
+    assert stats["allowed_short_s"] == 120.0
     assert len(alerts.calls) == 1
+
+
+def test_stats_use_the_same_allowance_as_the_duration_check(tmp_path):
+    for decoded, rss in ((5300.0, 5000), (4700.0, 5000), (5000.0, 5000)):
+        (tmp_path / MANIFEST_NAME).write_text(
+            json.dumps(_manifest(decoded=decoded, rss=rss)), encoding="utf-8"
+        )
+        stats = collect_stats(tmp_path, child_elapsed_s=1.0, mode="published")
+        assert stats["allowed_s"] == duration_allowance(decoded, rss)
 
 
 def test_info_alert_failing_to_send_does_not_fail_the_job(store, work_root):
     item = _admit(store)
     exploding = ExplodingAlerts()
-    _run(store, work_root, FakeChild(work_root, decoded=5320.0), Publish(), exploding)
+    _run(store, work_root, FakeChild(work_root, decoded=5800.0), Publish(), exploding)
     assert store.get_podcast_episode("argument", item.guid)["status"] == "completed"
     assert [sev for _, sev in exploding.calls] == ["info"]
 
@@ -521,6 +552,8 @@ def test_unreadable_manifest_gives_none_stats_and_still_completes(
     assert stats["decoded_duration_s"] is None
     assert stats["decoded_minus_rss_s"] is None
     assert stats["allowed_s"] is None
+    assert stats["allowed_short_s"] is None
+    assert stats["allowed_long_s"] is None
     assert stats["pieces"] is None
     assert stats["child_elapsed_s"] == 7.0
     assert stats["publish"] == "published"
@@ -536,6 +569,8 @@ def test_manifest_without_rss_duration_has_no_headroom(store, work_root):
     assert stats["rss_duration_s"] is None
     assert stats["decoded_minus_rss_s"] is None
     assert stats["allowed_s"] is None
+    assert stats["allowed_short_s"] is None
+    assert stats["allowed_long_s"] is None
     assert alerts.calls == []
 
 

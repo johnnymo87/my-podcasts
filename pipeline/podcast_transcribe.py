@@ -100,8 +100,15 @@ CONTEXT_LINES = 20
 MAX_OUTPUT_TOKENS = 16384
 ENCODE_TIMEOUT_SECONDS = 120
 DEFAULT_TIMEOUT_SECONDS = 300.0
-DURATION_TOLERANCE_MIN_S = 120.0
-DURATION_TOLERANCE_FRACTION = 0.08
+# Decoded-vs-RSS duration bounds, one per side. Deliberately NOT part of
+# ``transcription_policy_digest``: loosening them must not invalidate checkpoints.
+# Shortfall (decoded shorter than the RSS): the truncation check, kept tight.
+DURATION_SHORTFALL_MIN_S = 120.0
+DURATION_SHORTFALL_FRACTION = 0.08
+# Excess (decoded longer): dynamic ad insertion only ever adds audio (observed
+# +141..+255 s), and a too-long file is not a truncation, so this side is loose.
+DURATION_EXCESS_MIN_S = 600.0
+DURATION_EXCESS_FRACTION = 0.20
 
 TRANSCRIPT_NAME = "transcript.txt"
 MANIFEST_NAME = "transcript.json"
@@ -545,18 +552,38 @@ def _cached_result_passes_current_checks(
     return True
 
 
+def duration_bounds(rss_duration_s: int | float) -> tuple[float, float]:
+    """(shortfall, excess) allowance in seconds for an RSS duration."""
+    return (
+        max(DURATION_SHORTFALL_MIN_S, DURATION_SHORTFALL_FRACTION * rss_duration_s),
+        max(DURATION_EXCESS_MIN_S, DURATION_EXCESS_FRACTION * rss_duration_s),
+    )
+
+
+def duration_allowance(decoded_s: float, rss_duration_s: int | float) -> float:
+    """The allowed decoded-vs-RSS gap for the side that applies: the excess
+    bound when ``decoded_s >= rss_duration_s``, else the shortfall bound. The
+    single source for the refusal and for the executor's headroom stats."""
+    short, excess = duration_bounds(rss_duration_s)
+    return excess if decoded_s >= rss_duration_s else short
+
+
 def _check_duration(decoded_s: float, rss_duration_s: int | None) -> bool:
     """Return True when the check was skipped (no RSS duration)."""
     if rss_duration_s is None:
         return True
-    allowed = max(
-        DURATION_TOLERANCE_MIN_S, DURATION_TOLERANCE_FRACTION * rss_duration_s
-    )
-    if abs(decoded_s - rss_duration_s) > allowed:
+    diff = decoded_s - rss_duration_s
+    if abs(diff) > duration_allowance(decoded_s, rss_duration_s):
+        short, excess = duration_bounds(rss_duration_s)
+        verdict = (
+            "more inserted audio than expected"
+            if diff > 0
+            else "audio is likely truncated or the wrong file"
+        )
         raise TranscriptionError(
             f"duration mismatch: decoded {decoded_s:.0f}s vs RSS "
-            f"{rss_duration_s}s (allowed +/-{allowed:.0f}s); audio is likely "
-            "truncated or the wrong file"
+            f"{rss_duration_s}s ({diff:+.0f}s; allowed +{excess:.0f}s/"
+            f"-{short:.0f}s); {verdict}"
         )
     return False
 
