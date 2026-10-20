@@ -61,7 +61,16 @@ Work in `/home/dev/projects/my-podcasts/.worktrees/argument-audio-report`.
   binding decisions); executing via SDD in worktree
   `.worktrees/argument-audio-phase2`, branch `argument-audio-phase2` (stacked
   on `argument-audio-report`, PR #37 awaiting owner merge).
-- **Status 2026-10-18 (latest, supersedes below):** PR #37 (Phase 1) MERGED
+- **Status 2026-10-20 (latest, supersedes below):** Round-2 findings fixed in
+  1a5c95c (whole-exchange feed fetch: manual redirects, worker thread +
+  deadline join, single-flight), 4b1e204 (one shared alert worker, results
+  True/False/"timeout"/"dropped"), 709a1fc + ea4dea9 (docs incl. accepted R2
+  residual risk; review nits). Code-reviewed; full suite 2650 passed.
+  adversarial-reviewer-astra round 3: **approve-with-changes, blocker closed**;
+  its one doc correction (abandoned fetch thread may live indefinitely ->
+  restart recovery) applied. NEXT: open Phase 2 PR to main; owner merge; ship
+  with owner OK (Task 16).
+- **Status 2026-10-18 (superseded):** PR #37 (Phase 1) MERGED
   as 61fddc1; Phase 2 branch rebased onto main. Tasks 8-15 done + reviewed;
   full suite 2630 passed at 6896182. Pre-PR adversarial-reviewer-astra round 1
   BLOCKED (work outside the child unbounded) -> fixed in a4c410c..6896182
