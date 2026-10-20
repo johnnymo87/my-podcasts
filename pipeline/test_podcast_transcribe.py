@@ -1974,3 +1974,207 @@ def test_valid_split_accepts_the_skipped_flag() -> None:
     base = {"start_s": 0, "end_s": 40, "mp3_sha256": "x", "bytes": 1, "attempts": 3}
     assert pt._valid_split([{**base, "skipped": True}, dict(base)])
     assert not pt._valid_split([{**base, "skipped": False}])
+
+
+# --- review fixes: interior leaf rate floor; cached skips are revalidated -----------
+
+
+def _split_above_100s(off: float, dur: float, prompt: str) -> bool:
+    """Every span over 100 s is blocked, so pieces split down to ~74 s leaves."""
+    return dur > 100
+
+
+def test_interior_leaves_must_clear_the_words_per_minute_floor(
+    edge_audio, tmp_path
+) -> None:
+    """Reviewer's scenario: three interior ~74 s leaves (218 s) come back as
+    "[inaudible]". Each is under MIN_CHECKED_PIECE_S, which used to exempt it
+    from the floor, and the rest of the piece is dense enough to carry the
+    combined rate. The leaf rate floor now applies to interior leaves."""
+
+    class Inaudible(EdgeFake):
+        def __call__(self, audio, prompt):
+            res = super().__call__(audio, prompt)
+            dur, off = self.calls[-1][0], self.offsets[-1]
+            if "piece 2 of 3" in prompt and dur < 100 and 700 <= off < 900:
+                return pt.PieceResult("[inaudible]", "STOP", 1, 2)
+            return res
+
+    fake = Inaudible(block=_split_above_100s)
+    with pytest.raises(pt.TranscriptionError, match=r"words/min < 80") as ei:
+        _run(edge_audio, tmp_path, fake)
+    assert ei.value.reason == "asr_incomplete"
+    assert "piece 1:" in str(ei.value) and "[sub-piece 7" in str(ei.value)
+    assert not (tmp_path / "transcript.txt").exists()
+
+    # The same text is fine where the combined piece alone would judge it
+    # (top-level pieces keep today's rule, including the short-piece exemption).
+    assert pt._piece_rate_error(0, 1, 74.0) is None
+    assert pt._piece_rate_error(0, 1, 74.0, min_checked_s=0.0) is not None
+
+
+def test_edge_leaves_keep_the_short_piece_exemption(edge_audio, tmp_path) -> None:
+    """Music or an ad read at the very start or end legitimately has few
+    words: a leaf wholly inside the first or last AD_EDGE_S is not floored."""
+
+    class Music(EdgeFake):
+        def __call__(self, audio, prompt):
+            res = super().__call__(audio, prompt)
+            dur, off = self.calls[-1][0], self.offsets[-1]
+            if dur < 100 and (off + dur <= 120 or off >= _EPISODE_S - 120):
+                return pt.PieceResult("Alpha Guest: [music]", "STOP", 1, 2)
+            return res
+
+    fake = Music(block=_split_above_100s)
+    text = _run(edge_audio, tmp_path, fake)
+    assert text.startswith("Alpha Guest: [music]\n") and text.endswith("[music]")
+    assert "skipped_s" not in _manifest(tmp_path)
+
+
+def test_a_leaf_reaching_past_the_edge_is_floored(edge_audio, tmp_path) -> None:
+    """A leaf only partly inside the first 120 s is interior for this rule."""
+
+    class Sparse(EdgeFake):
+        def __call__(self, audio, prompt):
+            res = super().__call__(audio, prompt)
+            dur, off = self.calls[-1][0], self.offsets[-1]
+            if dur < 100 and off < 120 < off + dur:
+                return pt.PieceResult("Alpha Guest: [music]", "STOP", 1, 2)
+            return res
+
+    with pytest.raises(pt.TranscriptionError, match=r"words/min < 80"):
+        _run(edge_audio, tmp_path, Sparse(block=_split_above_100s))
+
+
+class StableFake(EdgeFake):
+    """Same text for any span, so a piece's checkpoint key does not depend on
+    how it was split (the tail it hands the next piece is identical)."""
+
+    def __call__(self, audio, prompt):
+        super().__call__(audio, prompt)
+        lines = max(1, round(self.calls[-1][0] / 8))
+        text = "\n".join("Alpha Guest: stable " + "word " * 18 for _ in range(lines))
+        return pt.PieceResult(text, "STOP", 10, 20)
+
+
+def _drop_checkpoint_outputs(tmp_path) -> None:
+    (tmp_path / "transcript.txt").unlink()
+    (tmp_path / "transcript.json").unlink()
+
+
+def test_cached_trailing_skip_plus_fresh_leading_skip_over_budget_is_refused(
+    edge_audio, tmp_path
+) -> None:
+    """Reviewer's reproduction: a trailing 36.85 s skip is cached, a fresh
+    leading 56.73 s skip would bring the total to 93.58 s > 90 s. The cached
+    piece must not be accepted on top of it."""
+    _run(edge_audio, tmp_path, StableFake(block=_trailing_ad))
+    (trailing,) = _skipped(_manifest(tmp_path))
+    trailing_s = trailing["end_s"] - trailing["start_s"]
+    _drop_checkpoint_outputs(tmp_path)
+    (tmp_path / "pieces" / "0000.json").unlink()  # piece 0 is asked fresh
+
+    again = StableFake(block=_two_edges)
+    with pytest.raises(pt.TranscriptionError) as ei:
+        _run(edge_audio, tmp_path, again)
+    assert trailing_s + 56.7 > pt.MAX_SKIPPED_S
+    assert ei.value.reason == "asr_blocked" and "skip budget" in str(ei.value)
+    # Piece 1 was reused; piece 2's cached skip was refused and re-asked.
+    assert any(off > 1100 for off in again.offsets)
+    assert not (tmp_path / "transcript.json").exists()
+
+
+def test_cached_skips_within_the_budget_are_still_reused(edge_audio, tmp_path) -> None:
+    _run(edge_audio, tmp_path, StableFake(block=_leading_ad))
+    _drop_checkpoint_outputs(tmp_path)
+    again = StableFake(block=_leading_ad)
+    _run(edge_audio, tmp_path, again)
+    assert again.calls == []
+
+
+def test_max_skipped_zero_rejects_a_cached_skip_checkpoint(
+    edge_audio, tmp_path, monkeypatch
+) -> None:
+    _run(edge_audio, tmp_path, StableFake(block=_leading_ad))
+    _drop_checkpoint_outputs(tmp_path)
+    monkeypatch.setattr(pt, "MAX_SKIPPED_S", 0.0)
+    again = StableFake(block=_leading_ad)
+    with pytest.raises(pt.TranscriptionError, match="skip budget"):
+        _run(edge_audio, tmp_path, again)
+    assert again.offsets and again.offsets[0] == 0  # piece 0 was asked again
+
+
+def test_max_skipped_zero_rejects_a_cached_skip_whole_transcript(
+    edge_audio, tmp_path, monkeypatch
+) -> None:
+    text = _run(edge_audio, tmp_path, StableFake(block=_leading_ad))
+    monkeypatch.setattr(pt, "MAX_SKIPPED_S", 0.0)
+    again = StableFake()  # nothing blocked any more: a recompute has no marker
+    new_text = _run(edge_audio, tmp_path, again)
+    assert again.calls, "the stored transcript must not have been reused"
+    assert new_text != text and _MARKER not in new_text
+    assert "skipped_s" not in _manifest(tmp_path)
+
+
+def _cached_manifest(split, decoded_s=1500.0, end_s=588.0):
+    piece = {"start_s": 0.0, "end_s": end_s, "text": " ".join(["w"] * 2000)}
+    if split is not None:
+        piece["split"] = split
+    return {"decoded_duration_s": decoded_s, "pieces": [piece]}
+
+
+def _entry(start, end, **kw):
+    return {"start_s": start, "end_s": end, **kw}
+
+
+def test_cached_manifest_skips_are_validated() -> None:
+    check = pt._cached_result_passes_current_checks
+    ok = [_entry(0.0, 50.0, skipped=True), _entry(50.0, 588.0)]
+    assert check(_cached_manifest(ok), None)
+    # Not at an edge (interior), straddling the 120 s edge, past the decoded end.
+    assert not check(_cached_manifest([_entry(300.0, 340.0, skipped=True)]), None)
+    assert not check(_cached_manifest([_entry(100.0, 130.0, skipped=True)]), None)
+    assert not check(_cached_manifest([_entry(1480.0, 1510.0, skipped=True)]), None)
+    assert not check(_cached_manifest([_entry(-5.0, 30.0, skipped=True)]), None)
+    # The trailing edge is valid.
+    assert check(_cached_manifest([_entry(1460.0, 1500.0, skipped=True)]), None)
+    # Budget: recomputed from the entries, whatever the manifest's skipped_s says.
+    over = [_entry(0.0, 50.0, skipped=True), _entry(1450.0, 1500.0, skipped=True)]
+    m = _cached_manifest(over, end_s=1500.0)
+    m["skipped_s"] = 1.0  # a lying manifest total changes nothing
+    assert not check(m, None)
+
+
+def test_cached_manifest_budget_is_cumulative_across_pieces() -> None:
+    a = {"start_s": 0.0, "end_s": 600.0, "text": " ".join(["w"] * 2000)}
+    b = {"start_s": 600.0, "end_s": 1500.0, "text": " ".join(["w"] * 3000)}
+    a["split"] = [_entry(0.0, 57.0, skipped=True), _entry(57.0, 600.0)]
+    b["split"] = [_entry(600.0, 1463.0), _entry(1463.0, 1500.0, skipped=True)]
+    m = {"decoded_duration_s": 1500.0, "pieces": [a, b]}
+    assert not pt._cached_result_passes_current_checks(m, None)  # 57 + 37 > 90
+    b["split"][1]["end_s"] = 1495.0
+    b["split"][1]["start_s"] = 1470.0  # 57 + 25 = 82 <= 90
+    assert pt._cached_result_passes_current_checks(m, None)
+
+
+def test_max_skipped_zero_rejects_a_cached_skip_manifest(monkeypatch) -> None:
+    m = _cached_manifest([_entry(0.0, 50.0, skipped=True), _entry(50.0, 588.0)])
+    assert pt._cached_result_passes_current_checks(m, None)
+    monkeypatch.setattr(pt, "MAX_SKIPPED_S", 0.0)
+    assert not pt._cached_result_passes_current_checks(m, None)
+
+
+def test_checkpoint_skip_entries_are_checked_against_the_episode(
+    edge_audio, tmp_path
+) -> None:
+    """A checkpoint whose skipped entry is not at an edge (or is out of bounds)
+    is a miss, whatever the key says."""
+    _run(edge_audio, tmp_path, StableFake(block=_leading_ad))
+    cp_path = tmp_path / "pieces" / "0000.json"
+    cp = json.loads(cp_path.read_text())
+    cp["split"][0].update(start_s=400.0, end_s=440.0)
+    cp_path.write_text(json.dumps(cp))
+    _drop_checkpoint_outputs(tmp_path)
+    again = StableFake(block=_leading_ad)
+    _run(edge_audio, tmp_path, again)
+    assert again.offsets and again.offsets[0] == 0

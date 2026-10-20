@@ -523,10 +523,18 @@ def _cached_result_passes_current_checks(
         return False
     try:
         _check_duration(float(decoded_s), rss_duration_s)
+        skipped_so_far = 0.0
         for i, piece in enumerate(pieces):
             piece_s = float(piece["end_s"]) - float(piece["start_s"])
             if piece_s <= 0 or not isinstance(piece["text"], str):
                 return False
+            # Recomputed from the entries (the manifest's own total is not
+            # trusted), cumulatively, under today's edge rule and budget.
+            if _stored_skips_refusal(
+                piece.get("split"), float(decoded_s), skipped_so_far
+            ):
+                return False
+            skipped_so_far += _skipped_seconds(piece.get("split"))
             piece_s -= _skipped_seconds(piece.get("split"))
             if _piece_rate_error(i, len(piece["text"].split()), piece_s):
                 return False
@@ -554,16 +562,20 @@ def _check_duration(decoded_s: float, rss_duration_s: int | None) -> bool:
 
 
 def _piece_rate_error(
-    index: int, words: int, piece_s: float
+    index: int, words: int, piece_s: float, min_checked_s: float | None = None
 ) -> TranscriptionError | None:
     """The word-rate refusal for one piece, or None when it is acceptable. The
     floor needs a piece of ``MIN_CHECKED_PIECE_S``; the ceiling has no length
     exemption, only the ``MAX_WORDS_CUSHION`` allowance. A span with nothing
-    left to rate (all of it skipped) has no rate."""
+    left to rate (all of it skipped) has no rate. ``min_checked_s`` replaces
+    ``MIN_CHECKED_PIECE_S`` as the length from which the floor applies (0 =
+    always); sub-pieces of a split pass 0 unless they sit at an episode edge."""
     if piece_s <= 0:
         return None
+    if min_checked_s is None:
+        min_checked_s = MIN_CHECKED_PIECE_S
     minutes = piece_s / 60
-    if piece_s >= MIN_CHECKED_PIECE_S and words / minutes < MIN_WORDS_PER_MIN:
+    if piece_s >= min_checked_s and words / minutes < MIN_WORDS_PER_MIN:
         return TranscriptionError(
             f"piece {index}: only {words} words in {minutes:.1f} min "
             f"({words / minutes:.0f} words/min < {MIN_WORDS_PER_MIN}); transcript "
@@ -725,16 +737,22 @@ def _halve(pcm: bytes, start: int, end: int) -> tuple[tuple[int, int], ...] | No
     return halves
 
 
+def _at_edge(start_s: float, end_s: float, total_s: float) -> bool:
+    """True when ``[start_s, end_s]`` lies wholly within the first or the last
+    ``AD_EDGE_S`` of an episode ``total_s`` long."""
+    return end_s <= AD_EDGE_S or start_s >= total_s - AD_EDGE_S
+
+
 def _edge_skip_refusal(
-    pcm: bytes, start: int, end: int, already_skipped_s: float
+    start_s: float, end_s: float, total_s: float, already_skipped_s: float
 ) -> str | None:
-    """None when the blocked floor leaf ``pcm[start:end]`` may be skipped, else
-    why not: it must lie entirely within the first or last ``AD_EDGE_S`` of the
-    episode, and the episode's skipped total must stay within ``MAX_SKIPPED_S``."""
-    start_s = start / PCM_BYTES_PER_SECOND
-    end_s = end / PCM_BYTES_PER_SECOND
-    total_s = len(pcm) / PCM_BYTES_PER_SECOND
-    if not (end_s <= AD_EDGE_S or start_s >= total_s - AD_EDGE_S):
+    """None when a blocked floor leaf spanning ``start_s``-``end_s`` of a
+    ``total_s`` episode may be skipped, else why not: it must lie entirely
+    within the first or last ``AD_EDGE_S``, and the episode's skipped total
+    must stay within ``MAX_SKIPPED_S``."""
+    if not (0 <= start_s < end_s <= total_s + 1e-6):
+        return f"{start_s:.0f}-{end_s:.0f}s is outside the {total_s:.0f}s episode"
+    if not _at_edge(start_s, end_s, total_s):
         return (
             f"not within the first or last {AD_EDGE_S:.0f}s of the "
             f"{total_s:.0f}s episode"
@@ -745,6 +763,31 @@ def _edge_skip_refusal(
             f"{already_skipped_s:.0f}s already skipped + {leaf_s:.0f}s would exceed "
             f"the {MAX_SKIPPED_S:.0f}s skip budget"
         )
+    return None
+
+
+def _stored_skips_refusal(
+    split: object, total_s: float, already_skipped_s: float
+) -> str | None:
+    """Why the skipped entries of a stored ``split`` list (a checkpoint's or a
+    manifest piece's) are no longer acceptable under today's edge rule and
+    budget, given the ``already_skipped_s`` that precede them; None when fine.
+    Nothing stored is trusted: a skip was legal when written, not necessarily
+    now (the audio, the constants, or the pieces around it may differ)."""
+    if not isinstance(split, list):
+        return None
+    running = already_skipped_s
+    for sub in split:
+        if not (isinstance(sub, dict) and sub.get("skipped") is True):
+            continue
+        try:
+            start_s, end_s = float(sub["start_s"]), float(sub["end_s"])
+        except (KeyError, TypeError, ValueError):
+            return "malformed skipped entry"
+        refusal = _edge_skip_refusal(start_s, end_s, total_s, running)
+        if refusal is not None:
+            return refusal
+        running += end_s - start_s
     return None
 
 
@@ -828,7 +871,12 @@ def _transcribe_span(
         if halve_error is not None:
             raise halve_error from exc
         if halves is None:
-            refusal = _edge_skip_refusal(pcm, start, end, state.skipped_s)
+            refusal = _edge_skip_refusal(
+                start / PCM_BYTES_PER_SECOND,
+                end / PCM_BYTES_PER_SECOND,
+                len(pcm) / PCM_BYTES_PER_SECOND,
+                state.skipped_s,
+            )
             if refusal is not None:
                 raise TranscriptionError(
                     f"{exc} [blocked sub-piece {start / PCM_BYTES_PER_SECOND:.0f}-"
@@ -905,8 +953,18 @@ def _transcribe_span(
     text = result.text.strip()
     # Each leaf is rate-checked too (a near-empty half can hide inside a
     # combined piece that is within bounds); the combined check still runs.
+    # The short-piece exemption is for edge music/ads; an interior leaf that
+    # comes back near-empty ("[inaudible]") is refused whatever its length.
+    at_edge = _at_edge(
+        start / PCM_BYTES_PER_SECOND,
+        end / PCM_BYTES_PER_SECOND,
+        len(pcm) / PCM_BYTES_PER_SECOND,
+    )
     rate_error = _piece_rate_error(
-        index, len(text.split()), (end - start) / PCM_BYTES_PER_SECOND
+        index,
+        len(text.split()),
+        (end - start) / PCM_BYTES_PER_SECOND,
+        min_checked_s=None if at_edge else 0.0,
     )
     if rate_error is not None:
         raise _in_sub_piece(rate_error, start, end) from rate_error
@@ -1085,6 +1143,17 @@ def transcribe_episode(
         key = _checkpoint_key(audio_sha, start, end, policy_sha, prompt)
         cp_path = _checkpoint_path(work_dir, i)
         cp = _load_checkpoint(cp_path, key)
+        if cp is not None and _stored_skips_refusal(
+            cp.get("split"), decoded_s, skipped_total_s
+        ):
+            # A cached skip is only reused if it is still legal here: at an
+            # edge of this audio and inside the running episode budget.
+            logger.warning(
+                "piece %d: checkpoint's skipped span is no longer acceptable; "
+                "re-transcribing",
+                i + 1,
+            )
+            cp = None
         if cp is not None and _piece_rate_error(
             i,
             len(cp["text"].split()),
