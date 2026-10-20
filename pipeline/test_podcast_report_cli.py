@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
+import re
+import xml.etree.ElementTree as ET
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -258,9 +263,7 @@ def test_matching_rerun_keeps_original_item_json_fields(monkeypatch, tmp_path, c
     assert result.exit_code == 0, result.output
     after = json.loads(item_path.read_text())
     assert after["enclosure_url"] == "https://old.example/pinned.mp3"
-    fields = {k: v for k, v in after.items() if k != "last_requested_at"}
-    assert fields == {k: v for k, v in stale.items() if k != "last_requested_at"}
-    assert "last_requested_at" in after
+    assert after == stale
 
 
 def test_default_work_dir_is_per_source_hash_of_guid():
@@ -393,28 +396,17 @@ def test_check_opencode_serve(monkeypatch):
         podcast_report.check_opencode_serve()
 
 
-def test_fetch_feed_xml_passes_timeout_redirects_and_ua(monkeypatch):
-    seen: dict = {}
-
-    def get(url, **kw):
-        seen["url"], seen["kw"] = url, kw
-        return httpx.Response(200, text="<rss/>", request=httpx.Request("GET", url))
-
-    monkeypatch.setattr(podcast_report.httpx, "get", get)
-    assert podcast_report.fetch_feed_xml("https://example.test/f.rss") == "<rss/>"
-    assert seen["url"] == "https://example.test/f.rss"
-    assert seen["kw"]["timeout"] == 30.0
-    assert seen["kw"]["follow_redirects"] is True
-    assert seen["kw"]["headers"]["User-Agent"] == "my-podcasts/1.0"
-
-
 def test_feed_http_error_is_a_clean_cli_error(monkeypatch, tmp_path, calls):
     monkeypatch.setenv("GEMINI_API_KEY", "dummy")
 
-    def get(url, **kw):
-        return httpx.Response(503, request=httpx.Request("GET", url))
+    def fetch(url, **kw):
+        raise httpx.HTTPStatusError(
+            "Server error '503'",
+            request=httpx.Request("GET", url),
+            response=httpx.Response(503, request=httpx.Request("GET", url)),
+        )
 
-    monkeypatch.setattr(podcast_report.httpx, "get", get)
+    monkeypatch.setattr(podcast_report, "fetch_feed_xml", fetch)
     result = CliRunner().invoke(
         main_mod.cli,
         ["podcast-report", "dry-run", "--source", "argument", "--guid", GUID],
@@ -423,3 +415,542 @@ def test_feed_http_error_is_a_clean_cli_error(monkeypatch, tmp_path, calls):
     assert "HTTPStatusError" in result.output and "503" in result.output
     assert "Traceback" not in result.output
     assert calls["download"] == []
+
+
+def _direct_args():
+    from pipeline.podcast_feed import parse_podcast_feed
+    from pipeline.podcast_sources import get_podcast_source
+
+    source = get_podcast_source("argument")
+    item = next(
+        i
+        for i in parse_podcast_feed(FIXTURE.read_text(encoding="utf-8"))
+        if i.guid == GUID
+    )
+    return source, item
+
+
+def test_on_stage_receives_stages_in_order(tmp_path, calls):
+    source, item = _direct_args()
+    seen: list[str] = []
+    podcast_report.run_episode_to_script(
+        source, item, tmp_path / "work", on_stage=seen.append
+    )
+    assert seen == ["claim", "download", "transcribe", "write"]
+
+
+def test_on_stage_names_the_stage_that_failed(monkeypatch, tmp_path, calls):
+    source, item = _direct_args()
+    seen: list[str] = []
+
+    def bad_write(**kw):
+        raise RuntimeError("refused")
+
+    monkeypatch.setattr(podcast_report, "write_report", bad_write)
+    with pytest.raises(RuntimeError):
+        podcast_report.run_episode_to_script(
+            source, item, tmp_path / "work", on_stage=seen.append
+        )
+    assert seen[-1] == "write"
+
+
+def test_fresh_download_writes_acquisition_json(tmp_path, calls):
+    source, item = _direct_args()
+    work = tmp_path / "work"
+    podcast_report.run_episode_to_script(source, item, work)
+
+    acq = json.loads((work / "acquisition.json").read_text())
+    assert acq["url"] == item.enclosure_url
+    assert acq["bytes"] == 3
+    assert acq["sha256"] == hashlib.sha256(b"mp3").hexdigest()
+    from datetime import datetime
+
+    assert datetime.fromisoformat(acq["downloaded_at"]).tzinfo is not None
+    assert not list(work.glob("*.tmp"))
+
+
+def test_existing_audio_does_not_rewrite_acquisition_json(tmp_path, calls):
+    source, item = _direct_args()
+    work = tmp_path / "work"
+    podcast_report.run_episode_to_script(source, item, work)
+    before = (work / "acquisition.json").read_bytes()
+    stat_before = (work / "acquisition.json").stat()
+
+    podcast_report.run_episode_to_script(source, item, work)
+
+    assert (work / "acquisition.json").read_bytes() == before
+    assert (work / "acquisition.json").stat().st_ino == stat_before.st_ino
+
+
+def test_empty_audio_counts_as_a_fresh_download(tmp_path, calls):
+    source, item = _direct_args()
+    work = tmp_path / "work"
+    podcast_report.run_episode_to_script(source, item, work)
+    (work / "audio.mp3").write_bytes(b"")
+    (work / "acquisition.json").write_text("stale")
+
+    podcast_report.run_episode_to_script(source, item, work)
+
+    assert json.loads((work / "acquisition.json").read_text())["bytes"] == 3
+
+
+def test_item_json_is_written_once_and_never_churns(tmp_path, calls):
+    source, item = _direct_args()
+    work = tmp_path / "work"
+    podcast_report.run_episode_to_script(source, item, work)
+    before = (work / "item.json").read_bytes()
+    assert "last_requested_at" not in json.loads(before)
+
+    podcast_report.run_episode_to_script(source, item, work)
+    assert (work / "item.json").read_bytes() == before
+
+    from pipeline.podcast_feed import parse_podcast_feed
+
+    other = next(
+        i
+        for i in parse_podcast_feed(FIXTURE.read_text(encoding="utf-8"))
+        if i.guid != GUID
+    )
+    with pytest.raises(RuntimeError, match="work dir belongs to"):
+        podcast_report.run_episode_to_script(source, other, work)
+    assert (work / "item.json").read_bytes() == before
+
+
+def test_dry_run_quiets_the_http_loggers(monkeypatch, tmp_path, calls):
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+    for name in ("httpx", "httpcore"):
+        monkeypatch.setattr(logging.getLogger(name), "level", logging.NOTSET)
+    assert _run(tmp_path).exit_code == 0
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
+
+
+# --- enqueue / reset / list -------------------------------------------------
+
+FEED_XML = FIXTURE.read_text(encoding="utf-8")
+NOW = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture
+def queue_cli(monkeypatch):
+    """Patch the feed fetch and the clock; forbid R2 and the pipeline itself.
+
+    ``MY_PODCASTS_STATE_DB`` is already redirected to tmp_path by conftest, so
+    the real ``StateStore`` runs against a throwaway DB.
+    """
+    state = {"fetch": lambda url: FEED_XML, "fetched": []}
+
+    def fetch(url):
+        state["fetched"].append(url)
+        return state["fetch"](url)
+
+    def boom(*a, **k):
+        raise AssertionError("the queue commands must not run the pipeline or use R2")
+
+    monkeypatch.setattr(podcast_report, "fetch_feed_xml", fetch)
+    monkeypatch.setattr(main_mod, "_podcast_now", lambda: NOW)
+    monkeypatch.setattr(main_mod, "R2Client", boom)
+    monkeypatch.setattr("pipeline.r2.R2Client", boom)
+    monkeypatch.setattr(podcast_report, "run_episode_to_script", boom)
+    return state
+
+
+def _q(*args):
+    return CliRunner().invoke(main_mod.cli, ["podcast-report", *args])
+
+
+def _store():
+    return main_mod.StateStore(main_mod._default_state_db_path())
+
+
+def test_enqueue_admits_a_pending_row(queue_cli):
+    result = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 0, result.output
+    assert f"enqueued argument/{GUID} as " in result.output
+    assert '"Report: 2026-10-15 - ' in result.output
+    store = _store()
+    try:
+        row = store.get_podcast_episode("argument", GUID)
+    finally:
+        store.close()
+    assert row["status"] == "pending"
+    assert row["admitted_via"] == "enqueue"
+
+
+def test_enqueue_bypasses_since_cutoff(queue_cli):
+    # The Jan 1 item predates the source's `since`; discovery would skip it.
+    old = "Buzzsprout-12345"
+    result = _q("enqueue", "--source", "argument", "--guid", old)
+    assert result.exit_code == 0, result.output
+    assert "enqueued" in result.output
+
+
+def test_enqueue_twice_reports_already_pending(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    result = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 0, result.output
+    assert "already pending" in result.output
+    assert "reset" not in result.output
+
+
+def test_enqueue_errored_row_points_at_reset(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    store = _store()
+    try:
+        store._conn.execute("UPDATE podcast_episodes SET status = 'errored'")
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 0, result.output
+    assert "already errored" in result.output
+    assert "podcast-report reset" in result.output
+
+
+def test_enqueue_unknown_guid_exits_1(queue_cli):
+    result = _q("enqueue", "--source", "argument", "--guid", "nope")
+    assert result.exit_code == 1
+    assert "not found" in result.output
+    store = _store()
+    try:
+        assert store.list_podcast_episodes() == []
+    finally:
+        store.close()
+
+
+def test_enqueue_unknown_source_exits_1(queue_cli):
+    result = _q("enqueue", "--source", "nope", "--guid", GUID)
+    assert result.exit_code == 1
+    assert "unknown podcast source" in result.output
+    assert queue_cli["fetched"] == []
+
+
+def test_enqueue_future_item_exits_1(monkeypatch, queue_cli):
+    monkeypatch.setattr(
+        main_mod, "_podcast_now", lambda: datetime(2026, 10, 14, tzinfo=UTC)
+    )
+    result = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 1
+    assert "future-dated" in result.output
+    store = _store()
+    try:
+        assert store.list_podcast_episodes() == []
+    finally:
+        store.close()
+
+
+def test_enqueue_fetch_error_exits_1(queue_cli):
+    def down(url):
+        raise httpx.ConnectError("no route")
+
+    queue_cli["fetch"] = down
+    result = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 1
+    assert "ConnectError" in result.output
+
+
+def test_enqueue_r2_key_collision_exits_1(queue_cli):
+    first = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert first.exit_code == 0, first.output
+    # Same title and date under a different guid -> same R2 key.
+    clash = FEED_XML.replace(OTHER_GUID, "audioboom-clash").replace(
+        "Thu, 08 Oct 2026 07:00:00 +0000", "Thu, 15 Oct 2026 07:00:00 +0000"
+    )
+    first_title = re.search(r"<title>([^<]*)</title>", FEED_XML.split("<item>")[1])
+    second = clash.split("<item>")
+    assert first_title is not None
+    # Rewrite the second item's title to equal the first's.
+    second[2] = re.sub(
+        r"<title>[^<]*</title>",
+        f"<title>{first_title.group(1)}</title>",
+        second[2],
+        count=1,
+    )
+    queue_cli["fetch"] = lambda url: "<item>".join(second)
+    result = _q("enqueue", "--source", "argument", "--guid", "audioboom-clash")
+    assert result.exit_code == 1, result.output
+    assert "collides" in result.output
+
+
+def test_reset_errored_row(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    store = _store()
+    try:
+        store._conn.execute(
+            "UPDATE podcast_episodes SET status = 'errored', failure_count = 4, "
+            "last_error = 'boom'"
+        )
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("reset", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 0, result.output
+    assert f"reset argument/{GUID} (was errored)" in result.output
+    store = _store()
+    try:
+        row = store.get_podcast_episode("argument", GUID)
+    finally:
+        store.close()
+    assert (row["status"], row["failure_count"], row["last_error"]) == (
+        "pending",
+        0,
+        None,
+    )
+
+
+@pytest.mark.parametrize("status", ["completed", "in_progress"])
+def test_reset_refuses_completed_and_in_progress(queue_cli, status):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    store = _store()
+    try:
+        store._conn.execute("UPDATE podcast_episodes SET status = ?", (status,))
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("reset", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 1
+    assert status in result.output
+    store = _store()
+    try:
+        assert store.get_podcast_episode("argument", GUID)["status"] == status
+    finally:
+        store.close()
+
+
+def test_reset_unknown_row_exits_1(queue_cli):
+    result = _q("reset", "--source", "argument", "--guid", "nope")
+    assert result.exit_code == 1
+    assert "no podcast episode" in result.output
+
+
+def test_list_empty(queue_cli):
+    result = _q("list")
+    assert result.exit_code == 0
+    assert "No podcast episodes" in result.output
+
+
+def test_list_shows_rows_and_truncates_error(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    _q("enqueue", "--source", "argument", "--guid", OTHER_GUID)
+    store = _store()
+    try:
+        store._conn.execute(
+            "UPDATE podcast_episodes SET status = 'errored', failure_count = 4, "
+            "last_error = ? WHERE guid = ?",
+            ("x" * 300 + "\nsecond line", GUID),
+        )
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("list")
+    assert result.exit_code == 0, result.output
+    lines = result.output.strip().splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("errored\t2026-10-15\tfailures=4\tReport: ")
+    assert lines[0].endswith("\t" + "x" * 120)
+    assert lines[1].startswith("pending\t2026-10-08\tfailures=0\t")
+    assert _q("list", "--source", "argument").output == result.output
+    assert "No podcast episodes" in _q("list", "--source", "other").output
+
+
+def test_queue_commands_never_touch_r2_or_pipeline(queue_cli):
+    # The fixture's boom() raises AssertionError if a command reaches R2 or
+    # runs the pipeline; CliRunner would surface that as result.exception.
+    for args, code in (
+        (("enqueue", "--source", "argument", "--guid", GUID), 0),
+        (("list",), 0),
+        (("reset", "--source", "argument", "--guid", GUID), 0),
+    ):
+        result = _q(*args)
+        assert result.exit_code == code, result.output
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_enqueue_completed_row_reports_already_completed(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    store = _store()
+    try:
+        store._conn.execute("UPDATE podcast_episodes SET status = 'completed'")
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 0, result.output
+    assert "already completed" in result.output
+    assert "reset" not in result.output
+
+
+@pytest.mark.parametrize("body", ["<html><body>Bad gateway", "", "not xml at all"])
+def test_enqueue_unparseable_feed_exits_1_cleanly(queue_cli, body):
+    queue_cli["fetch"] = lambda url: body
+    result = _q("enqueue", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 1
+    assert "ParseError" in result.output
+    assert not isinstance(result.exception, ET.ParseError)
+    store = _store()
+    try:
+        assert store.list_podcast_episodes() == []
+    finally:
+        store.close()
+
+
+def test_reset_pending_row_makes_it_due_now(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    store = _store()
+    try:
+        store._conn.execute(
+            "UPDATE podcast_episodes SET failure_count = 2, last_error = 'e', "
+            "next_attempt_at = '2099-01-01T00:00:00+00:00'"
+        )
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("reset", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 0, result.output
+    assert f"reset argument/{GUID} (was pending)" in result.output
+    store = _store()
+    try:
+        row = store.get_podcast_episode("argument", GUID)
+    finally:
+        store.close()
+    assert row["failure_count"] == 0
+    assert datetime.fromisoformat(row["next_attempt_at"]) == NOW
+
+
+def test_reset_in_progress_hints_at_restarting_the_consumer(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    store = _store()
+    try:
+        store._conn.execute("UPDATE podcast_episodes SET status = 'in_progress'")
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("reset", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 1
+    assert "restart the consumer" in result.output
+
+
+def test_reset_completed_does_not_suggest_restarting(queue_cli):
+    _q("enqueue", "--source", "argument", "--guid", GUID)
+    store = _store()
+    try:
+        store._conn.execute("UPDATE podcast_episodes SET status = 'completed'")
+        store._conn.commit()
+    finally:
+        store.close()
+    result = _q("reset", "--source", "argument", "--guid", GUID)
+    assert result.exit_code == 1
+    assert "restart" not in result.output
+
+
+# --- signed URLs stay out of the output -----------------------------------------
+
+SIGNED = "https://cdn.example/posts/8964415.mp3?sig=SECRET&exp=1"
+
+
+def _signed_feed(tmp_path) -> Path:
+    xml = FIXTURE.read_text(encoding="utf-8")
+    original = re.search(r'<enclosure url="([^"]+)"', xml).group(1)
+    path = tmp_path / "signed.xml"
+    path.write_text(xml.replace(original, SIGNED.replace("&", "&amp;")))
+    return path
+
+
+def _run_signed(tmp_path, rss: Path):
+    return CliRunner().invoke(
+        main_mod.cli,
+        [
+            "podcast-report",
+            "dry-run",
+            "--source",
+            "argument",
+            "--guid",
+            GUID,
+            "--rss-file",
+            str(rss),
+            "--work-dir",
+            str(tmp_path / "work"),
+        ],
+    )
+
+
+def test_dry_run_success_output_has_no_signed_url(monkeypatch, tmp_path, calls):
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+    result = _run_signed(tmp_path, _signed_feed(tmp_path))
+    assert result.exit_code == 0, result.output
+    ((url, _dest),) = calls["download"]
+    assert url == SIGNED  # the download really used the signed URL
+    assert "SECRET" not in result.output
+    assert "sig=" not in result.output
+    assert f"argument/{GUID}" in result.output  # names the episode instead
+
+
+def test_progress_line_names_the_source_and_guid_not_the_url(tmp_path, calls):
+    from pipeline.podcast_feed import parse_podcast_feed
+    from pipeline.podcast_sources import get_podcast_source
+
+    item = next(
+        i
+        for i in parse_podcast_feed(_signed_feed(tmp_path).read_text())
+        if i.guid == GUID
+    )
+    assert item.enclosure_url == SIGNED
+    lines: list[str] = []
+    podcast_report.run_episode_to_script(
+        get_podcast_source("argument"),
+        item,
+        tmp_path / "w",
+        progress=lines.append,
+        transcriber_factory=FakeTranscriber,
+    )
+    assert lines[0] == f"Downloading argument/{GUID} ..."
+    assert not any("SECRET" in line or "sig=" in line for line in lines)
+
+
+def test_dry_run_download_failure_output_has_no_signed_url(
+    monkeypatch, tmp_path, calls
+):
+    from pipeline.podcast_download import DownloadError
+
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+
+    def failing_download(url, dest, **kw):
+        raise DownloadError(f"HTTP 403 for {url}")
+
+    monkeypatch.setattr(podcast_report, "download_enclosure", failing_download)
+    result = _run_signed(tmp_path, _signed_feed(tmp_path))
+    assert result.exit_code == 1
+    assert "DownloadError: HTTP 403 for https://cdn.example/posts/8964415.mp3" in (
+        result.output
+    )
+    assert "SECRET" not in result.output
+    assert "sig=" not in result.output
+
+
+def test_dry_run_httpx_failure_output_has_no_signed_url(monkeypatch, tmp_path, calls):
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+
+    def failing_download(url, dest, **kw):
+        raise httpx.ConnectError(f"All connection attempts failed for {url}")
+
+    monkeypatch.setattr(podcast_report, "download_enclosure", failing_download)
+    result = _run_signed(tmp_path, _signed_feed(tmp_path))
+    assert result.exit_code == 1
+    assert "ConnectError" in result.output
+    assert "SECRET" not in result.output
+
+
+def test_dry_run_feed_fetch_failure_is_scrubbed_too(monkeypatch, tmp_path, calls):
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy")
+
+    def failing_fetch(url, **kw):
+        raise httpx.ConnectError(f"boom for {url}?token=SECRET")
+
+    monkeypatch.setattr(podcast_report, "fetch_feed_xml", failing_fetch)
+    result = CliRunner().invoke(
+        main_mod.cli,
+        ["podcast-report", "dry-run", "--source", "argument", "--guid", GUID],
+    )
+    assert result.exit_code == 1
+    assert "ConnectError" in result.output
+    assert "SECRET" not in result.output

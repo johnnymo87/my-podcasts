@@ -42,6 +42,12 @@ class RetryUpdate:
 
 MAX_RETRY_FAILURES = 51
 
+# Podcast-report jobs (podcast_episodes): every failure counts against one
+# budget; the PODCAST_MAX_FAILURES-th failure makes the row 'errored'.
+PODCAST_MAX_FAILURES = 4
+PODCAST_RETRY_BACKOFF = timedelta(hours=6)
+PODCAST_HEALTH_ALERT_AFTER = 4
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS episodes (
@@ -102,7 +108,84 @@ CREATE TABLE IF NOT EXISTS processed_blog_posts (
     feed_slug TEXT NOT NULL,
     processed_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS podcast_episodes (
+    source TEXT NOT NULL,
+    guid TEXT NOT NULL,
+    item_json TEXT NOT NULL,
+    pub_date TEXT NOT NULL,
+    display_title TEXT NOT NULL,
+    episode_slug TEXT NOT NULL,
+    r2_key TEXT NOT NULL UNIQUE,
+    admitted_via TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    next_attempt_at TEXT NOT NULL,
+    stats_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (source, guid)
+);
+
+CREATE TABLE IF NOT EXISTS podcast_source_health (
+    source TEXT PRIMARY KEY,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    last_success_at TEXT,
+    alerted INTEGER NOT NULL DEFAULT 0
+);
 """
+
+
+_EPISODE_COLUMNS = """\
+                    id,
+                    title,
+                    slug,
+                    pub_date,
+                    r2_key,
+                    feed_slug,
+                    category,
+                    source_tag,
+                    preset_name,
+                    source_url,
+                    size_bytes,
+                    duration_seconds,
+                    summary,
+                    articles_json,
+                    show_notes_html"""
+
+
+def _row_to_episode(row: sqlite3.Row) -> Episode:
+    return Episode(
+        id=row["id"],
+        title=row["title"],
+        slug=row["slug"],
+        pub_date=row["pub_date"],
+        r2_key=row["r2_key"],
+        feed_slug=row["feed_slug"],
+        category=row["category"],
+        source_tag=row["source_tag"],
+        preset_name=row["preset_name"],
+        source_url=row["source_url"],
+        size_bytes=row["size_bytes"],
+        duration_seconds=row["duration_seconds"],
+        summary=row["summary"],
+        articles_json=row["articles_json"],
+        show_notes_html=row["show_notes_html"],
+    )
+
+
+def _utc_iso(moment: datetime) -> str:
+    """Format *moment* as a fixed-width ISO-8601 UTC string.
+
+    Podcast job timestamps are compared as strings in SQL, so every one goes
+    through this helper: always UTC, always with microseconds. A naive datetime
+    is refused rather than silently read as local time.
+    """
+    if moment.tzinfo is None:
+        raise ValueError("timestamp must be timezone-aware")
+    return moment.astimezone(UTC).isoformat(timespec="microseconds")
 
 
 class StateStore:
@@ -289,23 +372,9 @@ class StateStore:
     def list_episodes(self, feed_slug: str | None = None) -> list[Episode]:
         if feed_slug:
             rows = self._conn.execute(
-                """
+                f"""
                 SELECT
-                    id,
-                    title,
-                    slug,
-                    pub_date,
-                    r2_key,
-                    feed_slug,
-                    category,
-                    source_tag,
-                    preset_name,
-                    source_url,
-                    size_bytes,
-                    duration_seconds,
-                    summary,
-                    articles_json,
-                    show_notes_html
+{_EPISODE_COLUMNS}
                 FROM episodes
                 WHERE feed_slug = ?
                 ORDER BY created_at DESC
@@ -314,47 +383,33 @@ class StateStore:
             ).fetchall()
         else:
             rows = self._conn.execute(
-                """
+                f"""
                 SELECT
-                    id,
-                    title,
-                    slug,
-                    pub_date,
-                    r2_key,
-                    feed_slug,
-                    category,
-                    source_tag,
-                    preset_name,
-                    source_url,
-                    size_bytes,
-                    duration_seconds,
-                    summary,
-                    articles_json,
-                    show_notes_html
+{_EPISODE_COLUMNS}
                 FROM episodes
                 ORDER BY created_at DESC
                 """
             ).fetchall()
-        return [
-            Episode(
-                id=row["id"],
-                title=row["title"],
-                slug=row["slug"],
-                pub_date=row["pub_date"],
-                r2_key=row["r2_key"],
-                feed_slug=row["feed_slug"],
-                category=row["category"],
-                source_tag=row["source_tag"],
-                preset_name=row["preset_name"],
-                source_url=row["source_url"],
-                size_bytes=row["size_bytes"],
-                duration_seconds=row["duration_seconds"],
-                summary=row["summary"],
-                articles_json=row["articles_json"],
-                show_notes_html=row["show_notes_html"],
-            )
-            for row in rows
-        ]
+        return [_row_to_episode(row) for row in rows]
+
+    def get_episode_by_r2_key(self, r2_key: str) -> Episode | None:
+        """The episode published under ``r2_key``, or None.
+
+        ``episodes.r2_key`` is not constrained unique; if a historical
+        duplicate exists the newest row wins, as in ``list_episodes``.
+        """
+        row = self._conn.execute(
+            f"""
+            SELECT
+{_EPISODE_COLUMNS}
+            FROM episodes
+            WHERE r2_key = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (r2_key,),
+        ).fetchone()
+        return _row_to_episode(row) if row is not None else None
 
     def recent_coverage_summary(self, feed_slug: str, days: int = 3) -> list[dict]:
         """Return coverage frequency of themes from recent episodes.
@@ -670,3 +725,311 @@ class StateStore:
         self._conn.commit()
         if cursor.rowcount == 0:
             raise ValueError(f"Unknown job id: {job_id}")
+
+    # ------------------------------------------------------------------ #
+    # Podcast-report jobs (podcast_episodes)                               #
+    # ------------------------------------------------------------------ #
+    #
+    # Rows are keyed (source, guid). Only the consumer executes them; a CLI
+    # only admits and resets. Every time-dependent method takes an explicit
+    # UTC-aware ``now`` and stores it via ``_utc_iso`` so SQL string
+    # comparison orders correctly.
+
+    def admit_podcast_episode(
+        self,
+        *,
+        source: str,
+        guid: str,
+        item_json: str,
+        pub_date: str,
+        display_title: str,
+        episode_slug: str,
+        r2_key: str,
+        admitted_via: str,
+        now: datetime,
+    ) -> bool:
+        """Insert a pending row; return False if (source, guid) already exists.
+
+        Admission metadata is frozen: a repeat admit changes nothing. A
+        *different* (source, guid) reusing an ``r2_key`` raises
+        ``sqlite3.IntegrityError`` (after rolling back, so the write lock is
+        released) and is deliberately not swallowed.
+
+        ``pub_date`` must be an aware ISO-8601 string; it is normalized to the
+        same UTC form as every other timestamp so it orders correctly. A naive
+        or unparseable value raises ``ValueError``.
+        """
+        pub_date_iso = _utc_iso(datetime.fromisoformat(pub_date))
+        try:
+            cursor = self._conn.execute(
+                """INSERT INTO podcast_episodes
+                   (source, guid, item_json, pub_date, display_title,
+                    episode_slug, r2_key, admitted_via, status, next_attempt_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                   ON CONFLICT (source, guid) DO NOTHING""",
+                (
+                    source,
+                    guid,
+                    item_json,
+                    pub_date_iso,
+                    display_title,
+                    episode_slug,
+                    r2_key,
+                    admitted_via,
+                    _utc_iso(now),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            # The failed INSERT leaves an implicit transaction open, holding
+            # the write lock; without this a CLI writer would block on it.
+            self._conn.rollback()
+            raise
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def get_podcast_episode(self, source: str, guid: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM podcast_episodes WHERE source = ? AND guid = ?",
+            (source, guid),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_podcast_episodes(self, source: str | None = None) -> list[dict]:
+        if source is None:
+            rows = self._conn.execute(
+                "SELECT * FROM podcast_episodes ORDER BY pub_date DESC, guid ASC"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM podcast_episodes WHERE source = ? "
+                "ORDER BY pub_date DESC, guid ASC",
+                (source,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def next_due_podcast_episode(self, now: datetime) -> dict | None:
+        """Oldest-published pending row whose next_attempt_at has arrived."""
+        row = self._conn.execute(
+            """SELECT * FROM podcast_episodes
+               WHERE status = 'pending' AND next_attempt_at <= ?
+               ORDER BY pub_date ASC, guid ASC
+               LIMIT 1""",
+            (_utc_iso(now),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_podcast_health(self, source: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM podcast_source_health WHERE source = ?", (source,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def claim_podcast_episode(self, source: str, guid: str) -> bool:
+        """pending -> in_progress. True iff this call made the transition."""
+        cursor = self._conn.execute(
+            "UPDATE podcast_episodes SET status = 'in_progress', "
+            "updated_at = datetime('now') "
+            "WHERE source = ? AND guid = ? AND status = 'pending'",
+            (source, guid),
+        )
+        self._conn.commit()
+        return cursor.rowcount == 1
+
+    def complete_podcast_episode(
+        self, source: str, guid: str, *, stats: dict | None
+    ) -> None:
+        cursor = self._conn.execute(
+            "UPDATE podcast_episodes SET status = 'completed', last_error = NULL, "
+            "stats_json = ?, updated_at = datetime('now') "
+            "WHERE source = ? AND guid = ?",
+            (json.dumps(stats) if stats is not None else None, source, guid),
+        )
+        self._conn.commit()
+        if cursor.rowcount == 0:
+            raise KeyError((source, guid))
+
+    def fail_podcast_episode(
+        self,
+        source: str,
+        guid: str,
+        error: str,
+        *,
+        now: datetime,
+        terminal: bool = False,
+    ) -> RetryUpdate:
+        """Record a failed attempt.
+
+        The PODCAST_MAX_FAILURES-th failure, or any failure with
+        ``terminal=True``, makes the row 'errored'; otherwise it returns to
+        'pending' after PODCAST_RETRY_BACKOFF.
+
+        Precondition: the row is not ``completed``. A failure arriving for a
+        published episode raises ``ValueError`` and changes nothing, so a late
+        or duplicated failure can never resurrect it. An unknown row raises
+        ``KeyError``.
+        """
+        row = self._conn.execute(
+            "SELECT failure_count, status FROM podcast_episodes "
+            "WHERE source = ? AND guid = ?",
+            (source, guid),
+        ).fetchone()
+        if row is None:
+            raise KeyError((source, guid))
+        if row["status"] == "completed":
+            raise ValueError("cannot fail a completed podcast episode")
+        failure_count = int(row["failure_count"] or 0) + 1
+        if terminal or failure_count >= PODCAST_MAX_FAILURES:
+            self._conn.execute(
+                "UPDATE podcast_episodes SET status = 'errored', failure_count = ?, "
+                "last_error = ?, updated_at = datetime('now') "
+                "WHERE source = ? AND guid = ?",
+                (failure_count, error[:500], source, guid),
+            )
+            self._conn.commit()
+            return RetryUpdate(
+                failure_count=failure_count,
+                process_after=None,
+                status="errored",
+                exhausted=True,
+            )
+        process_after = _utc_iso(now + PODCAST_RETRY_BACKOFF)
+        self._conn.execute(
+            "UPDATE podcast_episodes SET status = 'pending', failure_count = ?, "
+            "last_error = ?, next_attempt_at = ?, updated_at = datetime('now') "
+            "WHERE source = ? AND guid = ?",
+            (failure_count, error[:500], process_after, source, guid),
+        )
+        self._conn.commit()
+        return RetryUpdate(
+            failure_count=failure_count,
+            process_after=process_after,
+            status="pending",
+            exhausted=False,
+        )
+
+    def reset_podcast_episode(self, source: str, guid: str, *, now: datetime) -> str:
+        """Put an errored/pending row back to a clean, due-now pending state.
+
+        Returns the prior status. ``completed`` (re-publishing is unsupported)
+        and ``in_progress`` (the consumer is on it) raise ValueError; an
+        unknown row raises KeyError.
+        """
+        row = self._conn.execute(
+            "SELECT status FROM podcast_episodes WHERE source = ? AND guid = ?",
+            (source, guid),
+        ).fetchone()
+        if row is None:
+            raise KeyError((source, guid))
+        prior = str(row["status"])
+        if prior in ("completed", "in_progress"):
+            raise ValueError(f"cannot reset a {prior} podcast episode")
+        # The status guard is repeated in the UPDATE: the consumer can claim
+        # the row between the SELECT above and this write, and a reset must
+        # never clobber an in_progress (or completed) row.
+        cur = self._conn.execute(
+            "UPDATE podcast_episodes SET status = 'pending', failure_count = 0, "
+            "last_error = NULL, next_attempt_at = ?, updated_at = datetime('now') "
+            "WHERE source = ? AND guid = ? AND status IN ('pending', 'errored')",
+            (_utc_iso(now), source, guid),
+        )
+        if cur.rowcount == 0:
+            current = self._conn.execute(
+                "SELECT status FROM podcast_episodes WHERE source = ? AND guid = ?",
+                (source, guid),
+            ).fetchone()
+            if current is None:
+                raise KeyError((source, guid))
+            raise ValueError(f"cannot reset a {current['status']} podcast episode")
+        self._conn.commit()
+        return prior
+
+    def recover_interrupted_podcast_episodes(self) -> list[dict]:
+        """in_progress -> pending after a consumer restart.
+
+        An interruption counts as a failed attempt: a job that kills the
+        consumer every time (OOM, a hang the supervisor restarts) must run out
+        of budget like any other failure, not crash-loop forever. Each
+        recovered row gets ``failure_count + 1`` and ``last_error``
+        "interrupted: ..."; the PODCAST_MAX_FAILURES-th makes it 'errored'.
+        ``next_attempt_at`` is kept, so a row that was already due runs at once.
+
+        Returns one dict per recovered row (source, guid, display_title,
+        failure_count, status, last_error) so the caller can alert on newly
+        errored ones.
+        """
+        rows = self._conn.execute(
+            "SELECT source, guid, display_title, failure_count "
+            "FROM podcast_episodes WHERE status = 'in_progress' "
+            "ORDER BY pub_date ASC, guid ASC"
+        ).fetchall()
+        recovered: list[dict] = []
+        for row in rows:
+            failure_count = int(row["failure_count"] or 0) + 1
+            status = "errored" if failure_count >= PODCAST_MAX_FAILURES else "pending"
+            last_error = "interrupted: consumer stopped mid-run"
+            self._conn.execute(
+                "UPDATE podcast_episodes SET status = ?, failure_count = ?, "
+                "last_error = ?, updated_at = datetime('now') "
+                "WHERE source = ? AND guid = ? AND status = 'in_progress'",
+                (status, failure_count, last_error, row["source"], row["guid"]),
+            )
+            recovered.append(
+                {
+                    "source": row["source"],
+                    "guid": row["guid"],
+                    "display_title": row["display_title"],
+                    "failure_count": failure_count,
+                    "status": status,
+                    "last_error": last_error,
+                }
+            )
+        self._conn.commit()
+        return recovered
+
+    def record_podcast_discovery(
+        self, source: str, *, ok: bool, error: str | None, now: datetime
+    ) -> tuple[int, bool]:
+        """Record one discovery tick; return (consecutive_failures, should_alert).
+
+        ``should_alert`` is True exactly once per failure streak: when the
+        count reaches PODCAST_HEALTH_ALERT_AFTER. A success resets the streak
+        and re-arms the alert.
+
+        The alert is at-most-once: ``alerted`` is committed here, before the
+        caller sends anything, so a crash or failed send between the two loses
+        the alert rather than repeating it.
+        """
+        now_iso = _utc_iso(now)
+        self._conn.execute(
+            "INSERT INTO podcast_source_health (source) VALUES (?) "
+            "ON CONFLICT (source) DO NOTHING",
+            (source,),
+        )
+        if ok:
+            self._conn.execute(
+                "UPDATE podcast_source_health SET consecutive_failures = 0, "
+                "alerted = 0, last_success_at = ? WHERE source = ?",
+                (now_iso, source),
+            )
+            self._conn.commit()
+            return 0, False
+        row = self._conn.execute(
+            "SELECT consecutive_failures, alerted FROM podcast_source_health "
+            "WHERE source = ?",
+            (source,),
+        ).fetchone()
+        count = int(row["consecutive_failures"]) + 1
+        reached = count >= PODCAST_HEALTH_ALERT_AFTER
+        should_alert = reached and not row["alerted"]
+        self._conn.execute(
+            "UPDATE podcast_source_health SET consecutive_failures = ?, "
+            "last_error = ?, alerted = ? WHERE source = ?",
+            (
+                count,
+                error[:500] if error is not None else None,
+                int(reached or bool(row["alerted"])),
+                source,
+            ),
+        )
+        self._conn.commit()
+        return count, should_alert

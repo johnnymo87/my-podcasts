@@ -26,6 +26,9 @@ def _no_outbound_side_channels(monkeypatch):
     # it back, so the stub cannot change what a later test in the session sees.
     monkeypatch.setattr("pipeline.consumer._last_blog_poll", 0.0)
     monkeypatch.setattr("pipeline.alerts.send_alert", lambda *a, **k: True)
+    # The podcast tick (discovery fetch + executor) is covered by
+    # test_consumer_podcast.py; these tests use MagicMock stores it cannot run on.
+    monkeypatch.setattr("pipeline.consumer._podcast_tick", lambda *a, **k: None)
 
 
 class _Done(BaseException):

@@ -175,6 +175,28 @@ def _block_persist_writes(request):
 
 
 @pytest.fixture(autouse=True)
+def _reset_bounded_alert_worker():
+    """``alerts.send_alert_bounded`` runs on one module-level daemon worker.
+
+    Stop it after every test so a worker still holding a test's fake sender (or
+    a queue full of its jobs) can never delay or drop the next test's alert.
+    A test that blocks the sender releases it first, in its own ``finally``.
+    """
+    yield
+    from pipeline import alerts
+
+    worker = alerts._alert_worker
+    alerts._stop_alert_worker(timeout=2.0)
+    if worker is not None and worker.is_alive():
+        # Its state was reset, so the next test would run beside this stuck
+        # worker (two workers): fail loudly instead of leaving that behind.
+        pytest.fail(
+            "bounded-alert worker did not stop within 2s: a test left its "
+            "sender blocked (release it in a finally before the test ends)"
+        )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_script_archive(tmp_path, monkeypatch):
     """``publish_script`` archives its inputs under ``SCRIPT_ARCHIVE_ROOT``.
 

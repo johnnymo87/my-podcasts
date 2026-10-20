@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock
 from xml.etree import ElementTree as ET
 
@@ -609,3 +610,175 @@ def test_publish_script_explicit_voice_is_used(
 
     [call] = fake_tts_render
     assert call["config"] == openai_config(model="tts-1-hd", voice="ash")
+
+
+def test_episode_identity_formula_is_pinned() -> None:
+    """slug/r2_key are the published identity of every script episode; the
+    podcast-report path computes them through the same function."""
+    from pipeline.script_processor import EpisodeIdentity, episode_identity
+
+    ident = episode_identity(
+        "Some Title: With  Punctuation!", "deep-dives", "2026-03-13"
+    )
+    assert ident == EpisodeIdentity(
+        slug="2026-03-13-some-title-with-punctuation",
+        r2_key="episodes/deep-dives/2026-03-13-some-title-with-punctuation.mp3",
+    )
+
+
+def test_publish_script_uses_the_pinned_identity(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="60.0\n"),
+    )
+    monkeypatch.setattr(
+        "pipeline.script_processor.regenerate_and_upload_feed", lambda s, r: None
+    )
+    script_file = tmp_path / "script.md"
+    script_file.write_text("The episode body.", encoding="utf-8")
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2 = MagicMock()
+    try:
+        result = publish_script(
+            script_file=script_file,
+            title="Some Title",
+            feed_slug="deep-dives",
+            store=store,
+            r2_client=r2,
+            date_str="2026-03-13",
+        )
+        [ep] = store.list_episodes(feed_slug="deep-dives")
+    finally:
+        store.close()
+    [call] = fake_tts_render
+    assert call["episode_id"] == "2026-03-13-some-title"
+    assert result.r2_key == "episodes/deep-dives/2026-03-13-some-title.mp3"
+    assert r2.upload_file.call_args[0][1] == result.r2_key
+    assert (ep.slug, ep.r2_key) == (
+        "2026-03-13-some-title",
+        "episodes/deep-dives/2026-03-13-some-title.mp3",
+    )
+
+
+def test_episode_identity_rejects_empty_slug() -> None:
+    from pipeline.script_processor import episode_identity
+
+    with pytest.raises(ValueError):
+        episode_identity("!!!", "deep-dives", "2026-03-13")
+
+
+# --- build_tts_text and prerendered audio ------------------------------------
+
+
+def test_build_tts_text_strips_markdown_and_opens_with_the_title() -> None:
+    from pipeline.script_processor import build_tts_text
+
+    text = build_tts_text(
+        "## Heading\n\n**Bold** body.\n\n---\n\n*[END OF SCRIPT]*",
+        feed_slug="deep-dives",
+        title="2026-03-13 - Great Interview",
+    )
+    assert text == "Great Interview.\n\nHeading\n\nBold body.\n\n"
+
+
+@pytest.mark.parametrize("feed_slug", ["the-rundown", "fp-digest"])
+def test_build_tts_text_has_no_prelude_for_daily_digests(feed_slug) -> None:
+    from pipeline.script_processor import build_tts_text
+
+    assert build_tts_text("Body.", feed_slug=feed_slug, title="T") == "Body."
+
+
+def test_publish_script_hears_exactly_build_tts_text(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
+    """The child renders podcast audio from ``build_tts_text``; publish_script
+    must feed TTS the very same text or the two paths drift."""
+    from pipeline.script_processor import build_tts_text
+
+    raw = "## Heading\n\n**Bold** body.\n\n---\n\n*[END OF SCRIPT]*"
+    script_file = tmp_path / "script.md"
+    script_file.write_text(raw, encoding="utf-8")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="60.0\n"),
+    )
+    monkeypatch.setattr(
+        "pipeline.script_processor.regenerate_and_upload_feed", lambda s, r: None
+    )
+    store = StateStore(tmp_path / "test.sqlite3")
+    try:
+        publish_script(
+            script_file=script_file,
+            title="Some Title",
+            feed_slug="deep-dives",
+            store=store,
+            r2_client=MagicMock(),
+            date_str="2026-03-13",
+        )
+    finally:
+        store.close()
+    [call] = fake_tts_render
+    assert call["text"] == build_tts_text(
+        raw, feed_slug="deep-dives", title="Some Title"
+    )
+
+
+def test_publish_script_with_prerendered_audio_skips_tts(
+    tmp_path, monkeypatch, fake_tts_render
+) -> None:
+    audio = tmp_path / "episode.mp3"
+    audio.write_bytes(b"\xff\xfb\x90\x00" * 50)
+    script_file = tmp_path / "script.md"
+    script_file.write_text("The episode body.", encoding="utf-8")
+    probed: list = []
+    monkeypatch.setattr(
+        "pipeline.script_processor._parse_duration_seconds",
+        lambda path: probed.append(path) or 77,
+    )
+    regen: list = []
+    monkeypatch.setattr(
+        "pipeline.script_processor.regenerate_and_upload_feed",
+        lambda s, r: regen.append(True),
+    )
+    store = StateStore(tmp_path / "test.sqlite3")
+    r2 = MagicMock()
+    uploaded: list = []
+    r2.upload_file.side_effect = lambda path, key, content_type=None: uploaded.append(
+        (Path(path), key, content_type, Path(path).read_bytes())
+    )
+    try:
+        result = publish_script(
+            script_file=script_file,
+            title="Some Title",
+            feed_slug="deep-dives",
+            store=store,
+            r2_client=r2,
+            date_str="2026-03-13",
+            prerendered_audio=audio,
+        )
+        [ep] = store.list_episodes(feed_slug="deep-dives")
+    finally:
+        store.close()
+
+    assert fake_tts_render == []  # no TTS
+    assert uploaded == [
+        (
+            audio,
+            "episodes/deep-dives/2026-03-13-some-title.mp3",
+            "audio/mpeg",
+            audio.read_bytes(),
+        )
+    ]
+    assert probed == [audio]
+    assert (ep.size_bytes, ep.duration_seconds) == (audio.stat().st_size, 77)
+    assert ep.slug == "2026-03-13-some-title"
+    assert result.size_bytes == audio.stat().st_size
+    assert regen == [True]
+    assert audio.exists()  # the caller's file is not consumed
+    assert (
+        tmp_path / "scripts" / "deep-dives" / "2026-03-13-some-title.md"
+    ).exists()  # archived like any publish

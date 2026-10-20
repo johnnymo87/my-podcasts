@@ -107,6 +107,18 @@ def apply_title_prelude(*, feed_slug: str, title: str, tts_text: str) -> str:
     return prepend_title(title, tts_text)
 
 
+def build_tts_text(script: str, *, feed_slug: str, title: str) -> str:
+    """The exact text a script episode's TTS hears: markdown stripped, then the
+    spoken title (daily digests excepted).
+
+    The one formula, shared by ``publish_script`` and the podcast-report child
+    (which renders the audio itself), so the two cannot drift.
+    """
+    return apply_title_prelude(
+        feed_slug=feed_slug, title=title, tts_text=strip_markdown_for_tts(script)
+    )
+
+
 def _archive_publish_inputs(
     *,
     script_file: Path,
@@ -174,6 +186,24 @@ def _slugify(title: str) -> str:
     return slug
 
 
+@dataclass(frozen=True)
+class EpisodeIdentity:
+    """The published identity of a script episode: its slug and R2 key."""
+
+    slug: str
+    r2_key: str
+
+
+def episode_identity(title: str, feed_slug: str, date_str: str) -> EpisodeIdentity:
+    """The one formula for an episode's slug and R2 key.
+
+    Shared by ``publish_script`` and the podcast-report admission path, which
+    freezes the result on the job row so a retry cannot drift.
+    """
+    slug = f"{date_str}-{_slugify(title)}"
+    return EpisodeIdentity(slug=slug, r2_key=f"episodes/{feed_slug}/{slug}.mp3")
+
+
 def publish_script(
     *,
     script_file: Path,
@@ -186,12 +216,18 @@ def publish_script(
     category: str = DEFAULT_CATEGORY,
     date_str: str | None = None,
     source_url: str | None = None,
+    prerendered_audio: Path | None = None,
 ) -> PublishResult:
     """Publish a podcast episode from a pre-written script file.
 
     ``voice=None`` renders the feed's configured ``FEED_VOICES`` entry, exactly
     as the consumer would (a Gemini primary included). An explicit ``voice``
     forces OpenAI with that voice.
+
+    ``prerendered_audio`` skips TTS and uploads that mp3 instead (the podcast
+    reports render inside a killable child, so the single-threaded consumer
+    never waits on a renderer). Everything else is identical. The file is not
+    consumed.
     """
     from pipeline.db import Episode
 
@@ -200,8 +236,7 @@ def publish_script(
 
     # Read and prepare script text for TTS
     raw_script = script_file.read_text(encoding="utf-8")
-    tts_text = strip_markdown_for_tts(raw_script)
-    tts_text = apply_title_prelude(feed_slug=feed_slug, title=title, tts_text=tts_text)
+    tts_text = build_tts_text(raw_script, feed_slug=feed_slug, title=title)
 
     # Process show notes if provided
     summary: str | None = None
@@ -212,25 +247,32 @@ def publish_script(
         show_notes_html = render_show_notes_html(notes_md)
 
     # TTS
-    title_slug = _slugify(title)
-    episode_slug = f"{date_str}-{title_slug}"
-    episode_r2_key = f"episodes/{feed_slug}/{episode_slug}.mp3"
+    identity = episode_identity(title, feed_slug, date_str)
+    episode_slug = identity.slug
+    episode_r2_key = identity.r2_key
 
-    with tempfile.TemporaryDirectory(prefix="publish-script-") as tmp_dir:
-        tmp = Path(tmp_dir)
-        output_mp3 = tmp / f"{episode_slug}.mp3"
-
-        tts.render_episode(
-            tts_text,
-            tts.resolve_render_config(feed_slug, voice_override=voice),
-            output_mp3,
-            feed_slug=feed_slug,
-            episode_id=episode_slug,
+    if prerendered_audio is not None:
+        r2_client.upload_file(
+            prerendered_audio, episode_r2_key, content_type="audio/mpeg"
         )
+        size_bytes = prerendered_audio.stat().st_size
+        duration_seconds = _parse_duration_seconds(prerendered_audio)
+    else:
+        with tempfile.TemporaryDirectory(prefix="publish-script-") as tmp_dir:
+            tmp = Path(tmp_dir)
+            output_mp3 = tmp / f"{episode_slug}.mp3"
 
-        r2_client.upload_file(output_mp3, episode_r2_key, content_type="audio/mpeg")
-        size_bytes = output_mp3.stat().st_size
-        duration_seconds = _parse_duration_seconds(output_mp3)
+            tts.render_episode(
+                tts_text,
+                tts.resolve_render_config(feed_slug, voice_override=voice),
+                output_mp3,
+                feed_slug=feed_slug,
+                episode_id=episode_slug,
+            )
+
+            r2_client.upload_file(output_mp3, episode_r2_key, content_type="audio/mpeg")
+            size_bytes = output_mp3.stat().st_size
+            duration_seconds = _parse_duration_seconds(output_mp3)
 
     # Insert episode
     episode = Episode(

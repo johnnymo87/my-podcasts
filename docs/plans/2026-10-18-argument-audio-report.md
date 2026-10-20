@@ -56,6 +56,53 @@ Work in `/home/dev/projects/my-podcasts/.worktrees/argument-audio-report`.
   `run_episode_to_script` in `pipeline/podcast_report.py`, policy digest,
   checkpoints in `work_dir/pieces/`, `.rejected.txt` raw replies, carried list
   worded "Names already used for voices in earlier pieces").
+- **Phase 2 (2026-10-18):** expanded into
+  `docs/plans/2026-10-18-argument-audio-report-phase2.md` (Tasks 8-16 + 11
+  binding decisions); executing via SDD in worktree
+  `.worktrees/argument-audio-phase2`, branch `argument-audio-phase2` (stacked
+  on `argument-audio-report`, PR #37 awaiting owner merge).
+- **Status 2026-10-20 (latest, supersedes below):** Round-2 findings fixed in
+  1a5c95c (whole-exchange feed fetch: manual redirects, worker thread +
+  deadline join, single-flight), 4b1e204 (one shared alert worker, results
+  True/False/"timeout"/"dropped"), 709a1fc + ea4dea9 (docs incl. accepted R2
+  residual risk; review nits). Code-reviewed; full suite 2650 passed.
+  adversarial-reviewer-astra round 3: **approve-with-changes, blocker closed**;
+  its one doc correction (abandoned fetch thread may live indefinitely ->
+  restart recovery) applied. NEXT: open Phase 2 PR to main; owner merge; ship
+  with owner OK (Task 16).
+- **Status 2026-10-18 (superseded):** PR #37 (Phase 1) MERGED
+  as 61fddc1; Phase 2 branch rebased onto main. Tasks 8-15 done + reviewed;
+  full suite 2630 passed at 6896182. Pre-PR adversarial-reviewer-astra round 1
+  BLOCKED (work outside the child unbounded) -> fixed in a4c410c..6896182
+  (bounded feed fetch, TTS render moved into the child -> work_dir/episode.mp3
+  + publish_script(prerendered_audio=), child deadline 1800 s, bounded alerts,
+  reconcile-before-child, dry-run URL scrub). Round 2 still BLOCKS on:
+  (1) feed fetch not bounded across the whole exchange (connect/headers and
+  redirect bodies bypass the 60 s/10 MB checks; reproduced with a 302 streaming
+  body). Planned fix: follow_redirects=False + manual redirects (max 5, never
+  read redirect bodies, one overall deadline) AND run the fetch in a worker
+  thread joined with the deadline, single-flight (refuse a new fetch while an
+  abandoned one is alive). (2) non-blocking: send_alert_bounded leaks one
+  thread per timed-out call -> one shared daemon worker + Queue(maxsize=8),
+  results True/False/"timeout"/"dropped" (mirror tts/render.py:490-536).
+  (3) accept + document: parent-side R2 upload/feed regen has no whole-op
+  deadline (not moved to an abandonable thread: a late feed PUT could
+  overwrite a newer snapshot). Note: render-in-child only works for
+  OpenAI-primary feeds (daemonic child can't spawn the Gemini TTS child);
+  yglesias is OpenAI shimmer, pinned by a test. An interrupted subagent left
+  uncommitted WIP tests in `pipeline/test_podcast_feed_fetch.py` (+237 lines,
+  copy at /tmp/opencode/p2-fetch-wip.patch) — review, keep or discard.
+  NEXT: fix (1)-(3), adversarial re-review, PR to main, owner merge, then ship
+  with owner OK (restart consumer, enqueue Sep 10/Oct 1/Oct 8/Oct 15, delete
+  R2 previews, confirm Oct 22 unattended).
+- **Status (earlier): Phase 2 Tasks 8-15 implemented and reviewed** (spec + quality
+  review per task) in worktree `.worktrees/argument-audio-phase2`, branch
+  `argument-audio-phase2`; see `git log` for the head. Docs landed in Task 15
+  (root `AGENTS.md` "Podcast Audio Reports (The Argument)", `pipeline/AGENTS.md`).
+  **Next:** Task 16 per the Phase 2 plan: pre-PR adversarial review of the diff,
+  PR (base `argument-audio-report` until #37 merges, then rebase onto main), then
+  ship with owner OK (consumer restart, backfill the four GUIDs below, delete the
+  R2 previews, confirm the Thursday 2026-10-22 unattended run).
 - Phase 2 notes from reviews: key state by `(source.key, guid)`; record
   acquisition (URL, time, audio sha) separately from immutable admission
   metadata in item.json; executor must wrap `run_episode_to_script` in the
@@ -949,7 +996,7 @@ Hand the owner both `script.txt` files plus the attribution findings. Outcomes:
 
 ---
 
-## Phase 2 — outline (expand into full tasks after the pilot)
+## Phase 2 — outline (EXPANDED: see `docs/plans/2026-10-18-argument-audio-report-phase2.md`, which supersedes this outline)
 
 Each item below becomes a TDD task of the Phase 1 shape. Order matters.
 

@@ -4,7 +4,7 @@ import json
 import os
 import re
 import traceback
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -1855,6 +1855,7 @@ def podcast_report_dry_run_command(
     import requests
 
     from pipeline import podcast_report
+    from pipeline.podcast_child import scrub_detail
     from pipeline.podcast_sources import get_podcast_source
 
     try:
@@ -1875,6 +1876,9 @@ def podcast_report_dry_run_command(
         logging.basicConfig(
             level=logging.INFO, format="%(asctime)s %(name)s: %(message)s"
         )
+    # httpx logs every request URL at INFO, and audioboom's are signed.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     try:
         if rss_file is not None:
@@ -1883,7 +1887,9 @@ def podcast_report_dry_run_command(
             rss_xml = podcast_report.fetch_feed_xml(source.rss_url)
         item = podcast_report.find_item(rss_xml, guid)
     except (podcast_report.ItemNotFoundError, httpx.HTTPError, OSError) as exc:
-        raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
+        raise click.ClickException(
+            f"{type(exc).__name__}: {scrub_detail(exc)}"
+        ) from exc
 
     if work_dir is None:
         work_dir = podcast_report.default_work_dir(source.key, guid)
@@ -1899,7 +1905,10 @@ def podcast_report_dry_run_command(
             progress=click.echo,
         )
     except (RuntimeError, requests.RequestException, httpx.HTTPError, OSError) as exc:
-        raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
+        # Download errors quote the (signed) URL they failed on.
+        raise click.ClickException(
+            f"{type(exc).__name__}: {scrub_detail(exc)}"
+        ) from exc
 
     click.echo(f"Transcript: {result.transcript_path}")
     click.echo(f"Script: {result.script_path}")
@@ -1922,6 +1931,129 @@ def podcast_report_dry_run_command(
         f"Wall time: download {result.download_s:.1f}s, "
         f"transcribe {result.transcribe_s:.1f}s, write {result.write_s:.1f}s"
     )
+
+
+def _podcast_now() -> datetime:
+    """Clock seam for the podcast-report queue commands (tests patch this)."""
+    return datetime.now(UTC)
+
+
+@podcast_report_group.command("enqueue")
+@click.option("--source", "source_key", required=True, type=str, help="Source key.")
+@click.option("--guid", required=True, type=str, help="RSS item GUID.")
+def podcast_report_enqueue_command(source_key: str, guid: str) -> None:
+    """Queue one episode for the consumer to report on (backfill).
+
+    Admits the item regardless of the source's `since` cutoff, but refuses an
+    item dated in the future. Only writes a job row: the consumer runs it, and
+    nothing here touches R2.
+    """
+    import sqlite3
+    import xml.etree.ElementTree as ET
+
+    import httpx
+
+    from pipeline import podcast_report
+    from pipeline.podcast_jobs import admit_item
+    from pipeline.podcast_sources import get_podcast_source
+
+    try:
+        source = get_podcast_source(source_key)
+    except KeyError:
+        raise click.ClickException(f"unknown podcast source {source_key!r}") from None
+
+    try:
+        item = podcast_report.find_item(
+            podcast_report.fetch_feed_xml(source.rss_url), guid
+        )
+    except (
+        podcast_report.ItemNotFoundError,
+        httpx.HTTPError,
+        OSError,
+        ET.ParseError,  # not a ValueError: a 200 with an HTML/garbage body
+        ValueError,
+    ) as exc:
+        raise click.ClickException(f"{type(exc).__name__}: {exc}") from exc
+
+    store = StateStore(_default_state_db_path())
+    try:
+        try:
+            admitted = admit_item(
+                store, source, item, via="enqueue", now=_podcast_now()
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        except sqlite3.IntegrityError as exc:
+            # (source, guid) duplicates are handled inside admit_podcast_episode
+            # (admitted=False), so the only IntegrityError that reaches here is
+            # the UNIQUE r2_key: a different guid already owns this identity.
+            raise click.ClickException(
+                f"cannot enqueue {source.key}/{guid}: its R2 key collides with "
+                f"another episode ({exc})"
+            ) from exc
+        row = store.get_podcast_episode(source.key, guid)
+    finally:
+        store.close()
+
+    if row is None:  # admitted a moment ago; only a concurrent delete gets here
+        raise click.ClickException(f"{source.key}/{guid} vanished after admission")
+    if admitted:
+        click.echo(f'enqueued {source.key}/{guid} as "{row["display_title"]}"')
+        return
+    click.echo(f"already {row['status']}: {source.key}/{guid}")
+    if row["status"] == "errored":
+        click.echo(
+            f"run podcast-report reset --source {source.key} --guid {guid} to retry it"
+        )
+
+
+@podcast_report_group.command("reset")
+@click.option("--source", "source_key", required=True, type=str, help="Source key.")
+@click.option("--guid", required=True, type=str, help="RSS item GUID.")
+def podcast_report_reset_command(source_key: str, guid: str) -> None:
+    """Put an errored (or waiting) episode back in the queue, due now."""
+    store = StateStore(_default_state_db_path())
+    try:
+        try:
+            prior = store.reset_podcast_episode(source_key, guid, now=_podcast_now())
+        except KeyError:
+            raise click.ClickException(
+                f"no podcast episode {source_key}/{guid} in the queue"
+            ) from None
+        except ValueError as exc:
+            hint = ""
+            if "in_progress" in str(exc):
+                hint = (
+                    " (the consumer is running it; if it is not -- e.g. a failure "
+                    "could not be recorded -- restart the consumer to re-queue it)"
+                )
+            raise click.ClickException(f"{source_key}/{guid}: {exc}{hint}") from exc
+    finally:
+        store.close()
+    click.echo(f"reset {source_key}/{guid} (was {prior})")
+
+
+@podcast_report_group.command("list")
+@click.option(
+    "--source", "source_key", default=None, type=str, help="Filter by source."
+)
+def podcast_report_list_command(source_key: str | None) -> None:
+    """List queued/finished podcast reports, newest episode first."""
+    store = StateStore(_default_state_db_path())
+    try:
+        rows = store.list_podcast_episodes(source_key)
+    finally:
+        store.close()
+    if not rows:
+        click.echo("No podcast episodes.")
+        return
+    for row in rows:
+        error = " ".join((row["last_error"] or "").split())[:120]
+        click.echo(
+            f"{row['status']}\t{row['pub_date'][:10]}"
+            f"\tfailures={row['failure_count']}"
+            f"\t{row['display_title']}\t{error}"
+        )
 
 
 cli.add_command(podcast_report_group)
