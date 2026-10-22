@@ -275,17 +275,37 @@ def run_one_podcast_episode(
                 return fail(error)
             if _quota_alerted_at is None or now_q - _quota_alerted_at >= QUOTA_REALERT:
                 detail = scrub_detail(str(child.detail))[:QUOTA_ALERT_DETAIL_CHARS]
+                if child.code == 402:
+                    what, check, severity = (
+                        "billing error (HTTP 402, credits depleted)",
+                        "Check AI Studio billing",
+                        "error",
+                    )
+                else:
+                    # A 429 that outlived the transcriber's retries is usually
+                    # a quota, but can be a passing rate limit: warn, not page.
+                    what, check, severity = (
+                        f"quota/rate-limit error (HTTP {child.code})",
+                        "Check AI Studio quota and billing",
+                        "warning",
+                    )
                 sent = send_alert_bounded(
-                    f"Gemini account quota/billing error (HTTP {child.code}) on "
-                    f"podcast report {title}: {detail}. Podcast reports paused "
-                    f"until {_quota_pause_until:%H:%M}Z; episodes are not charged "
-                    "a failure and will retry. The same Gemini account also "
-                    "feeds the Rundown/FP editors, Semafor routing and Gemini "
-                    "TTS (falls back to OpenAI). Check AI Studio billing.",
-                    "error",
+                    f"Gemini account {what} on podcast report {title}: "
+                    f"{detail}. Podcast reports paused until "
+                    f"{_quota_pause_until:%H:%M}Z; episodes are not charged a "
+                    "failure and will retry. The same Gemini account also feeds "
+                    "the Rundown/FP editors, Semafor routing and Gemini TTS "
+                    f"(falls back to OpenAI). {check}. After fixing it, restart "
+                    "the consumer to resume at once (podcast-report reset does "
+                    "not lift the pause; nothing is in_progress, so the restart "
+                    "costs no failure).",
+                    severity,
                     sender=alert,
                 )
-                _quota_alerted_at = now_q
+                # Suppress repeats only once the alert went out (a timeout may
+                # still deliver late); otherwise the next probe tries again.
+                if sent is True or sent == "timeout":
+                    _quota_alerted_at = now_q
                 print(f"podcast-report {label}: quota alert result={sent}")
             logger.warning("%s: deferred (account quota): %s", label, error)
             print(

@@ -1146,7 +1146,44 @@ def test_429_is_treated_like_402(store, work_root):
     row = store.get_podcast_episode("argument", item.guid)
     assert row["status"] == "pending"
     assert row["failure_count"] == 0
-    assert "HTTP 429" in alerts.calls[0][0]
+    text, severity = alerts.calls[0]
+    assert "HTTP 429" in text
+    # A 429 can be a passing rate limit: warn, do not page as a billing error.
+    assert severity == "warning"
+    assert "billing error" not in text
+
+
+def test_quota_alert_says_how_to_resume_after_fixing_billing(store, work_root):
+    _admit(store)
+    alerts = Alerts()
+    _run(store, work_root, FakeChild(work_root, _quota()), Publish(), alerts)
+    text = alerts.calls[0][0]
+    assert "restart the consumer" in text
+    assert "reset" in text
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_calls"), [(False, 2), ("dropped", 2), ("timeout", 1)]
+)
+def test_quota_alert_repeat_suppression_needs_a_delivered_alert(
+    store, work_root, monkeypatch, result, expected_calls
+):
+    # False / "dropped": not delivered, so the next probe tries again.
+    # "timeout": delivery unknown and may still land late; count it as sent.
+    calls = []
+
+    def bounded(text, severity="info", *, sender=None, timeout_s=None):
+        calls.append((text, severity))
+        return result
+
+    import pipeline.podcast_executor as ex
+
+    monkeypatch.setattr(ex, "send_alert_bounded", bounded)
+    _admit(store)
+    child = FakeChild(work_root, _quota())
+    _run(store, work_root, child, Publish(), Alerts())
+    _run(store, work_root, child, Publish(), Alerts(), now=NOW + timedelta(hours=1))
+    assert len(calls) == expected_calls
 
 
 def test_defer_error_text_has_signed_url_query_scrubbed(store, work_root):
