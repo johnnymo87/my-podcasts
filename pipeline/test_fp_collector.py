@@ -1569,3 +1569,58 @@ def test_collect_fp_artifacts_leaves_no_sentinels_when_editor_raises(tmp_path) -
 
     assert not (work_dir / "plan.json").exists()
     assert not (work_dir / "collection_done.json").exists()
+
+
+def test_pending_semafor_file_routes_by_category_not_dropped(tmp_path, monkeypatch):
+    """A file still at Routing: __PENDING__ (classification failed) is routed by
+    its category: an 'fp' category reaches FP Digest, a 'th' one does not."""
+    monkeypatch.setattr(
+        "pipeline.fp_collector._extract_article_text", lambda url: "text"
+    )
+    monkeypatch.setattr(
+        "pipeline.fp_collector.generate_fp_research_plan",
+        lambda *a, **kw: _make_empty_plan(),
+    )
+    monkeypatch.setattr("pipeline.fp_collector.search_related", lambda *a, **kw: [])
+    homepage_cache = tmp_path / "homepage-cache"
+    homepage_cache.mkdir()
+    rss_cache = tmp_path / "rss-cache"
+    rss_cache.mkdir()
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    today = _today_et()
+
+    _write_semafor_cache_file_with_routing(
+        semafor_cache,
+        today,
+        "Gulf Pending Story",
+        "https://semafor.com/gulf-pending",
+        "Gulf",
+        "__PENDING__",
+        "Gulf pending text",
+    )
+    _write_semafor_cache_file_with_routing(
+        semafor_cache,
+        today,
+        "Tech Pending Story",
+        "https://semafor.com/tech-pending",
+        "Technology",
+        "__PENDING__",
+        "Tech pending text",
+    )
+
+    work_dir = tmp_path / "work"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    collect_fp_artifacts(
+        "test-pending",
+        work_dir,
+        scripts_source_dir=scripts_dir,
+        homepage_cache_dir=homepage_cache,
+        antiwar_rss_cache_dir=rss_cache,
+        semafor_cache_dir=semafor_cache,
+    )
+
+    files = list((work_dir / "articles" / "semafor").glob("*.md"))
+    assert len(files) == 1
+    assert "Gulf Pending Story" in files[0].read_text()

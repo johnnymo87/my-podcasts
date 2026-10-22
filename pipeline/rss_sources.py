@@ -83,6 +83,27 @@ def categorize_semafor_article(category: str) -> str:
     return "both"
 
 
+# ``Routing:`` header value of a cached Semafor article whose LLM classification
+# has not (yet) succeeded. ``source_cache.sync_semafor_cache`` writes it and
+# retries it on later syncs; readers treat it as "no routing yet".
+ROUTING_PENDING = "__PENDING__"
+SEMAFOR_ROUTINGS = frozenset({"fp", "th", "both", "skip"})
+
+
+def semafor_routing(routing: str, category: str) -> str:
+    """Resolve a cached Semafor article's routing for a reader.
+
+    ``routing`` is the file's ``Routing:`` header (``""`` if absent, as in
+    legacy files). A real value wins; anything else -- absent, ``__PENDING__``
+    (classification failed and is awaiting a retry) -- falls back to the
+    category-based guess, so such a file reaches the right podcast instead of
+    being silently dropped by both.
+    """
+    if routing in SEMAFOR_ROUTINGS:
+        return routing
+    return categorize_semafor_article(category)
+
+
 _WORD_RE = re.compile(r"[a-z0-9']+")
 _SESSION: requests.Session | None = None
 

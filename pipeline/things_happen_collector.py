@@ -15,7 +15,7 @@ from pipeline.freshness import (
     classify_headlines,
     format_coverage_ledger,
 )
-from pipeline.rss_sources import categorize_semafor_article
+from pipeline.rss_sources import semafor_routing
 from pipeline.things_happen_editor import generate_rundown_research_plan
 from pipeline.things_happen_extractor import resolve_redirect_url
 from pipeline.zvi_cache import sync_zvi_cache
@@ -182,8 +182,9 @@ def collect_all_artifacts(
                 elif line.startswith("Routing: "):
                     routing = line[9:].strip()
             # Prefer Routing header; fall back to category-based classification
-            if not routing:
-                routing = categorize_semafor_article(category)
+            # when it is absent (legacy file) or still __PENDING__ (the
+            # sync-time classification failed and awaits a retry).
+            routing = semafor_routing(routing, category)
             if routing not in ("th", "both"):
                 # Routed exclusively to FP Digest (or explicitly skipped) --
                 # counted as a candidate above, so it must be accounted for

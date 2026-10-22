@@ -2136,3 +2136,58 @@ def test_collect_all_artifacts_leaves_no_sentinels_when_editor_raises(tmp_path) 
 
     assert not (work_dir / "plan.json").exists()
     assert not (work_dir / "collection_done.json").exists()
+
+
+def _run_rundown_collector_on_semafor_cache(tmp_path, monkeypatch, files):
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(themes=[], directives=[]),
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
+    )
+    today = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    for slug, headline, category, routing in files:
+        (semafor_cache / f"{today}-{slug}.md").write_text(
+            f"# {headline}\n\nURL: https://semafor.com/{slug}\nPublished: {today}\n"
+            f"Source: semafor\nCategory: {category}\nRouting: {routing}\n"
+            f"Type: article\n\nBody of {headline}."
+        )
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+    work_dir = tmp_path / "work"
+    collect_all_artifacts(
+        "test-pending-routing",
+        work_dir,
+        levine_cache_dir=levine_cache,
+        semafor_cache_dir=semafor_cache,
+    )
+    return work_dir
+
+
+def test_pending_semafor_file_routes_by_category_not_dropped(tmp_path, monkeypatch):
+    """A file still at Routing: __PENDING__ (classification failed) is routed by
+    its category: a 'th' category reaches the Rundown, an 'fp' one does not."""
+    work_dir = _run_rundown_collector_on_semafor_cache(
+        tmp_path,
+        monkeypatch,
+        [
+            ("tech-pending", "Tech Pending Story", "Technology", "__PENDING__"),
+            ("gulf-pending", "Gulf Pending Story", "Gulf", "__PENDING__"),
+        ],
+    )
+
+    texts = [f.read_text() for f in (work_dir / "articles" / "semafor").glob("*.md")]
+    assert len(texts) == 1
+    assert "Tech Pending Story" in texts[0]
+    sentinel = json.loads((work_dir / "collection_done.json").read_text())
+    assert sentinel["candidates"]["semafor"] == 2
+    assert sentinel["routed_away"]["semafor"] == 1
