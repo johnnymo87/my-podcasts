@@ -218,3 +218,64 @@ def test_alert_default_now_is_used(monkeypatch) -> None:
     assert gemini_quota.alert_account_quota(_api_error(402), "A", sender=sender) is True
     assert gemini_quota._alerted_at is not None
     assert gemini_quota._alerted_at.tzinfo is not None
+
+
+def test_402_after_a_429_alerts_even_within_six_hours() -> None:
+    """Severity escalation: a 429 warning must not mute the billing error."""
+    sender = _Sender()
+    assert (
+        gemini_quota.alert_account_quota(_api_error(429), "A", now=T0, sender=sender)
+        is True
+    )
+    assert (
+        gemini_quota.alert_account_quota(
+            _api_error(402), "B", now=T0 + timedelta(minutes=5), sender=sender
+        )
+        is True
+    )
+    assert [sev for _, sev in sender.calls] == ["warning", "error"]
+    # The 402 is now the latched code, so a repeat 402 is suppressed again.
+    assert (
+        gemini_quota.alert_account_quota(
+            _api_error(402), "C", now=T0 + timedelta(minutes=10), sender=sender
+        )
+        is None
+    )
+    assert len(sender.calls) == 2
+
+
+def test_429_after_a_402_stays_suppressed_within_six_hours() -> None:
+    sender = _Sender()
+    assert (
+        gemini_quota.alert_account_quota(_api_error(402), "A", now=T0, sender=sender)
+        is True
+    )
+    assert (
+        gemini_quota.alert_account_quota(
+            _api_error(429), "B", now=T0 + timedelta(minutes=5), sender=sender
+        )
+        is None
+    )
+    assert len(sender.calls) == 1
+    # ...and the 6 h rule still applies to it afterwards.
+    assert (
+        gemini_quota.alert_account_quota(
+            _api_error(429), "C", now=T0 + timedelta(hours=6), sender=sender
+        )
+        is True
+    )
+
+
+def test_undelivered_429_does_not_arm_the_escalation_state() -> None:
+    sender = _Sender(False, True)
+    assert (
+        gemini_quota.alert_account_quota(_api_error(429), "A", now=T0, sender=sender)
+        is False
+    )
+    assert gemini_quota._alerted_code is None
+    assert (
+        gemini_quota.alert_account_quota(
+            _api_error(429), "A", now=T0 + timedelta(minutes=1), sender=sender
+        )
+        is True
+    )

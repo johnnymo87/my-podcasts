@@ -11,7 +11,9 @@ waiting ~12 hours for the retry-exhaustion alert.
 
 ``account_quota_code`` recognises such an error through the wrappers the
 pipeline puts around it (an editor raises ``RuntimeError(...) from <APIError>``).
-``alert_account_quota`` sends at most one alert per 6 hours per process.
+``alert_account_quota`` sends at most one alert per 6 hours per process, except
+that a 402 (billing, severity ``error``) always alerts after a latched 429
+(a ``warning``): a passing rate limit must not mute a depleted balance.
 """
 
 from __future__ import annotations
@@ -42,7 +44,9 @@ ALERT_DETAIL_CHARS = 200
 _MAX_CHAIN_NODES = 8
 
 # In-process state; a consumer restart clears it (at most one extra alert).
+# The code is latched with the time so a 402 can escalate past a 429 warning.
 _alerted_at: datetime | None = None
+_alerted_code: int | None = None
 
 
 def account_quota_code(exc: BaseException) -> int | None:
@@ -81,20 +85,28 @@ def alert_account_quota(
     """Alert (bounded, at most once per ``QUOTA_REALERT``) on a quota error.
 
     Returns ``None`` -- and sends nothing -- when ``exc`` is not an account
-    quota error or an alert went out less than ``QUOTA_REALERT`` ago. Otherwise
+    quota error or an alert went out less than ``QUOTA_REALERT`` ago. The one
+    exception: a 402 always alerts when the latched alert was a 429, even within
+    ``QUOTA_REALERT`` (severity escalation). The latch is not reset by success.
+    Otherwise
     returns the bounded sender's result. The 6 h suppression starts only once an
     alert was delivered (``True``) or may still land (``"timeout"``); ``False``
     and ``"dropped"`` leave it unarmed so the next failure tries again.
 
     Never raises: this runs inside a job's failure handler.
     """
-    global _alerted_at
+    global _alerted_at, _alerted_code
     try:
         code = account_quota_code(exc)
         if code is None:
             return None
         when = now if now is not None else datetime.now(UTC)
-        if _alerted_at is not None and when - _alerted_at < QUOTA_REALERT:
+        escalation = code == 402 and _alerted_code == 429
+        if (
+            _alerted_at is not None
+            and when - _alerted_at < QUOTA_REALERT
+            and not escalation
+        ):
             return None
         if code == 402:
             severity = "error"
@@ -112,6 +124,7 @@ def alert_account_quota(
         result = alerts.send_alert_bounded(text, severity, sender=sender)
         if result is True or result == "timeout":
             _alerted_at = when
+            _alerted_code = code
         logger.info("gemini quota alert for %s: result=%s", where, result)
         return result
     except Exception:  # noqa: BLE001 -- must never disturb a failure handler

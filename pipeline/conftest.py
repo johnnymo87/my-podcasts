@@ -204,6 +204,7 @@ def _reset_gemini_quota_latch(monkeypatch):
     next test's "first alert is sent" expectation.
     """
     monkeypatch.setattr("pipeline.gemini_quota._alerted_at", None)
+    monkeypatch.setattr("pipeline.gemini_quota._alerted_code", None)
 
 
 @pytest.fixture(autouse=True)
