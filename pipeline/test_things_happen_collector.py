@@ -2107,3 +2107,32 @@ def test_flat_tier_requires_the_full_numbered_prefix(tmp_path):
 
     text, path, reason = find_rundown_article_source(D(), tmp_path)
     assert path is None
+
+
+def test_collect_all_artifacts_leaves_no_sentinels_when_editor_raises(tmp_path) -> None:
+    """A failed editor call must not leave a plan.json (or collection_done.json)
+    for the retry to reuse -- the poisoned-empty-plan bug (my-podcasts-6fk)."""
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    work_dir = tmp_path / "work"
+
+    with (
+        patch(
+            "pipeline.things_happen_collector.generate_rundown_research_plan",
+            side_effect=RuntimeError("Rundown editor: Gemini call failed: boom"),
+        ),
+        patch("pipeline.things_happen_collector.sync_zvi_cache"),
+        pytest.raises(RuntimeError, match="Gemini call failed"),
+    ):
+        collect_all_artifacts(
+            "job123",
+            work_dir,
+            levine_cache_dir=levine_cache,
+            semafor_cache_dir=semafor_cache,
+            zvi_cache_dir=tmp_path / "zvi-cache",
+        )
+
+    assert not (work_dir / "plan.json").exists()
+    assert not (work_dir / "collection_done.json").exists()

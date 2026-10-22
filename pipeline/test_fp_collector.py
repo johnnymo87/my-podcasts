@@ -1541,3 +1541,31 @@ def test_retry_reuse_decodes_before_comparing_to_a_predecode_work_dir(
     assert calls == [url]
     assert "FRESH FETCHED TEXT" in art_path.read_text()
     assert "&#8230;" not in art_path.read_text()
+
+
+def test_collect_fp_artifacts_leaves_no_sentinels_when_editor_raises(tmp_path) -> None:
+    """A failed editor call must not leave a plan.json (or collection_done.json)
+    for the retry to reuse -- the poisoned-empty-plan bug (my-podcasts-6fk)."""
+    caches = {}
+    for name in ("homepage", "rss", "semafor"):
+        caches[name] = tmp_path / f"{name}-cache"
+        caches[name].mkdir()
+    work_dir = tmp_path / "work"
+
+    with (
+        patch(
+            "pipeline.fp_collector.generate_fp_research_plan",
+            side_effect=RuntimeError("FP editor: Gemini call failed: boom"),
+        ),
+        pytest.raises(RuntimeError, match="Gemini call failed"),
+    ):
+        collect_fp_artifacts(
+            "job123",
+            work_dir,
+            homepage_cache_dir=caches["homepage"],
+            antiwar_rss_cache_dir=caches["rss"],
+            semafor_cache_dir=caches["semafor"],
+        )
+
+    assert not (work_dir / "plan.json").exists()
+    assert not (work_dir / "collection_done.json").exists()
