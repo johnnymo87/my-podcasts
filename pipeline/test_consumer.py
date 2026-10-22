@@ -1012,3 +1012,163 @@ def test_consume_forever_does_not_alert_on_an_ordinary_fp_retry(
     assert row["failure_count"] == 1
     assert not alert.called
     store.close()
+
+
+# ---------------------------------------------------------------------------
+# my-podcasts-6fk: Gemini account-quota errors on the daily jobs alert once
+# ---------------------------------------------------------------------------
+
+
+def _quota_failure(code: int = 402) -> RuntimeError:
+    """What an editor raises: a RuntimeError chained from the SDK's APIError."""
+    from google.genai import errors as genai_errors
+
+    api = genai_errors.APIError(code, {"error": {"message": "credits depleted"}})
+    wrapped = RuntimeError(f"editor: Gemini call failed: APIError: {api}")
+    wrapped.__cause__ = api
+    return wrapped
+
+
+def _run_one_pass(monkeypatch, store, tmp_path) -> None:
+    calls = 0
+
+    def fake_pull(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return []
+        raise _Done("done")
+
+    mock_consumer = MagicMock()
+    mock_consumer.pull.side_effect = fake_pull
+    monkeypatch.setattr(time, "sleep", lambda n: None)
+    monkeypatch.setattr("pipeline.consumer._work_dir_base", lambda: tmp_path)
+    with patch("pipeline.consumer.CloudflareQueueConsumer", return_value=mock_consumer):
+        try:
+            consume_forever(store, MagicMock(), poll_interval=5)
+        except _Done:
+            pass
+
+
+@pytest.fixture
+def quota_alerts(monkeypatch) -> list[tuple[str, str]]:
+    """Record what gemini_quota hands the bounded sender (no thread, no network)."""
+    sent: list[tuple[str, str]] = []
+
+    def fake_bounded(text, severity="info", **kwargs):
+        sent.append((text, severity))
+        return True
+
+    monkeypatch.setattr("pipeline.gemini_quota.alerts.send_alert_bounded", fake_bounded)
+    return sent
+
+
+def test_rundown_quota_failure_retries_and_alerts_once_per_streak(
+    monkeypatch, tmp_path, quota_alerts
+) -> None:
+    from pipeline.db import StateStore
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    ids = [
+        store.insert_pending_the_rundown("2026-03-17"),
+        store.insert_pending_the_rundown("2026-03-18"),
+    ]
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.collect_all_artifacts",
+        lambda *a, **kw: (_ for _ in ()).throw(_quota_failure(402)),
+    )
+
+    _run_one_pass(monkeypatch, store, tmp_path)
+
+    # Both jobs failed and were rescheduled (still pending, not errored).
+    for job_id in ids:
+        row = store._conn.execute(
+            "SELECT status, failure_count FROM pending_the_rundown WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        assert row["status"] == "pending"
+        assert row["failure_count"] == 1
+    # ...but the second failure within 6 h did not alert again.
+    assert len(quota_alerts) == 1
+    text, severity = quota_alerts[0]
+    assert severity == "error"
+    assert "The Rundown" in text
+    assert "HTTP 402" in text
+    store.close()
+
+
+def test_fp_quota_failure_alerts_naming_fp_digest(
+    monkeypatch, tmp_path, quota_alerts
+) -> None:
+    from pipeline.db import StateStore
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    job_id = store.insert_pending_fp_digest("2026-03-17")
+    monkeypatch.setattr(
+        "pipeline.consumer.collect_fp_artifacts",
+        lambda *a, **kw: (_ for _ in ()).throw(_quota_failure(429)),
+    )
+
+    _run_one_pass(monkeypatch, store, tmp_path)
+
+    row = store._conn.execute(
+        "SELECT status, failure_count FROM pending_fp_digest WHERE id = ?", (job_id,)
+    ).fetchone()
+    assert (row["status"], row["failure_count"]) == ("pending", 1)
+    assert len(quota_alerts) == 1
+    text, severity = quota_alerts[0]
+    assert severity == "warning"
+    assert "FP Digest" in text
+    assert "HTTP 429" in text
+    store.close()
+
+
+def test_non_quota_failure_sends_no_quota_alert(
+    monkeypatch, tmp_path, quota_alerts
+) -> None:
+    from pipeline.db import StateStore
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    job_id = store.insert_pending_the_rundown("2026-03-17")
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.collect_all_artifacts",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("upstream timeout")),
+    )
+
+    _run_one_pass(monkeypatch, store, tmp_path)
+
+    row = store._conn.execute(
+        "SELECT failure_count, last_error FROM pending_the_rundown WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    assert row["failure_count"] == 1
+    assert row["last_error"] == "upstream timeout"
+    assert quota_alerts == []
+    store.close()
+
+
+def test_a_broken_quota_alert_never_breaks_failure_recording(
+    monkeypatch, tmp_path
+) -> None:
+    from pipeline.db import StateStore
+
+    store = StateStore(tmp_path / "test.sqlite3")
+    job_id = store.insert_pending_the_rundown("2026-03-17")
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.collect_all_artifacts",
+        lambda *a, **kw: (_ for _ in ()).throw(_quota_failure(402)),
+    )
+
+    def boom(*a, **k):
+        raise ValueError("alert machinery exploded")
+
+    monkeypatch.setattr("pipeline.gemini_quota.alert_account_quota", boom)
+
+    _run_one_pass(monkeypatch, store, tmp_path)
+
+    row = store._conn.execute(
+        "SELECT status, failure_count FROM pending_the_rundown WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    assert (row["status"], row["failure_count"]) == ("pending", 1)
+    store.close()

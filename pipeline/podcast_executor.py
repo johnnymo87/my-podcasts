@@ -28,6 +28,7 @@ from typing import Any
 
 from pipeline import podcast_child, podcast_publish
 from pipeline.alerts import send_alert, send_alert_bounded
+from pipeline.gemini_quota import ACCOUNT_QUOTA_CODES
 from pipeline.podcast_child import scrub_detail
 from pipeline.podcast_jobs import PODCAST_WORK_ROOT, item_from_row, work_dir_for
 from pipeline.podcast_publish import validate_identity
@@ -47,11 +48,10 @@ logger = logging.getLogger(__name__)
 HEADROOM_WARN_FRACTION = 0.75
 TERMINAL_HTTP_CODE = 400  # Gemini reports an invalid request/key as 400
 
-# Account-wide Gemini conditions: 402 (prepayment credits depleted) and 429
-# (rate/quota, after the transcriber's own retries). They are not the episode's
-# fault, so they are never charged to it: the row is deferred and podcast work
-# pauses in-process for QUOTA_PAUSE.
-ACCOUNT_QUOTA_CODES = frozenset({402, 429})
+# Account-wide Gemini conditions (``gemini_quota.ACCOUNT_QUOTA_CODES``): 402
+# (prepayment credits depleted) and 429 (rate/quota, after the transcriber's own
+# retries). They are not the episode's fault, so they are never charged to it:
+# the row is deferred and podcast work pauses in-process for QUOTA_PAUSE.
 QUOTA_PAUSE = timedelta(hours=1)
 QUOTA_REALERT = timedelta(hours=6)
 QUOTA_ALERT_DETAIL_CHARS = 200
