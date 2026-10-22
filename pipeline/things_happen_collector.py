@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from pipeline.article_fetcher import fetch_all_articles
+from pipeline.article_fetcher import Article, fetch_all_articles
 from pipeline.article_resolver import resolve_headline
 from pipeline.article_resolver import slugify as _slugify
 from pipeline.exa_client import exa_file_path, search_related_status
@@ -54,6 +55,101 @@ def _host_banned(url: str, origin: str) -> bool:
     if origin and (host == origin or host.endswith("." + origin)):
         return True
     return any(host == b or host.endswith("." + b) for b in BYPASS_DOMAINS)
+
+
+# Levine fetch phase, persisted per work dir so a retry does not repeat it.
+#
+# Every retry of a failed job re-runs collection (collection_done.json is written
+# last). Since the editors now raise on a Gemini error instead of persisting an
+# empty plan, a 12 h outage means up to ~51 re-collections -- and without reuse,
+# each one HEAD-resolves and GETs every Levine link (1 s apart) on the single
+# consumer thread, thousands of requests at Bloomberg/WSJ/FT. (The same idea as
+# fp_collector._prior_fetched_body.)
+LEVINE_FETCH_FILE = "levine_fetch.json"
+# Tiers that mean "the network failed", so a later attempt may do better. Every
+# other tier (live, paywalled, ...) is a measurement of the page: re-asking
+# returns the same answer.
+_TRANSIENT_TIERS = frozenset({"http_error", "fetch_error"})
+
+
+def _load_levine_fetch(work_dir: Path) -> dict[str, dict]:
+    """Prior attempt's fetch results keyed by raw_url; ``{}`` if absent or unusable."""
+    path = work_dir / LEVINE_FETCH_FILE
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 -- a bad cache file must never fail collection
+        print(f"[collector] WARNING: ignoring unreadable {path.name}: {e}")
+        return {}
+    if not isinstance(data, dict):
+        print(f"[collector] WARNING: ignoring {path.name}: not a JSON object")
+        return {}
+    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, dict)}
+
+
+def _reusable_resolved_url(entry: dict | None) -> str | None:
+    """The resolved URL of an entry that does not need re-resolving.
+
+    That is a fully fetched non-transient entry, or a resolved-only entry (a link
+    that was deduped before fetching). A transient failure is re-resolved too:
+    the redirect lookup is a network call that may be what failed.
+    """
+    if not entry:
+        return None
+    resolved = entry.get("resolved_url")
+    if not isinstance(resolved, str) or not resolved:
+        return None
+    tier = entry.get("source_tier")
+    if tier is not None and (not isinstance(tier, str) or tier in _TRANSIENT_TIERS):
+        return None
+    return resolved
+
+
+def _reusable_article(entry: dict | None, headline: str | None) -> Article | None:
+    """The prior attempt's Article for this link, if it can be trusted as-is.
+
+    Requires a complete entry with a non-transient tier and the same headline
+    (a paywalled article's content *is* its headline, so a changed headline
+    invalidates it).
+    """
+    if _reusable_resolved_url(entry) is None or entry is None:
+        return None
+    url = entry.get("url")
+    content = entry.get("content")
+    tier = entry.get("source_tier")
+    chars = entry.get("extracted_chars")
+    if (
+        not isinstance(tier, str)
+        or not isinstance(url, str)
+        or not isinstance(content, str)
+        or not isinstance(chars, int)
+        or isinstance(chars, bool)
+        or entry.get("headline") != headline
+    ):
+        return None
+    return Article(
+        headline=entry["headline"],
+        url=url,
+        content=content,
+        source_tier=tier,
+        extracted_chars=chars,
+    )
+
+
+def _write_levine_fetch(work_dir: Path, record: dict[str, dict]) -> None:
+    """Atomically persist ``record`` (tmp file + ``os.replace``).
+
+    A torn write must not be able to hand the next attempt half an article, and
+    a failed write only costs the retry its reuse, so it never fails collection.
+    """
+    path = work_dir / LEVINE_FETCH_FILE
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as e:
+        print(f"[collector] WARNING: could not persist {path.name}: {e}")
 
 
 def collect_all_artifacts(
@@ -108,17 +204,60 @@ def collect_all_artifacts(
     _prior = prior_urls or set()
 
     if links_raw:
+        prior_fetch = _load_levine_fetch(work_dir)
+        # raw_url -> Article reused from a prior attempt (no network at all).
+        reused: dict[str, Article] = {}
         for link in links_raw:
-            link["resolved_url"] = resolve_redirect_url(link["raw_url"])
+            entry = prior_fetch.get(link["raw_url"])
+            cached = _reusable_article(entry, link.get("headline_context"))
+            if cached is not None:
+                reused[link["raw_url"]] = cached
+            resolved = _reusable_resolved_url(entry)
+            link["resolved_url"] = (
+                resolved if resolved else resolve_redirect_url(link["raw_url"])
+            )
         # Dedup before fetching. The key is available pre-fetch, and every
         # skipped article we fetch anyway costs an HTTP round trip plus a
         # one-second politeness delay for a result we then throw away.
         levine_candidates = len(links_raw)
+        all_links = links_raw
         links_raw = [
             link for link in links_raw if link.get("resolved_url") not in _prior
         ]
         levine_deduped = levine_candidates - len(links_raw)
-        articles = fetch_all_articles(links_raw, delay_between=1.0)
+        if not reused:
+            articles = fetch_all_articles(links_raw, delay_between=1.0)
+        else:
+            to_fetch = [link for link in links_raw if link["raw_url"] not in reused]
+            fetched = iter(
+                fetch_all_articles(to_fetch, delay_between=1.0) if to_fetch else []
+            )
+            articles = [
+                reused[link["raw_url"]] if link["raw_url"] in reused else next(fetched)
+                for link in links_raw
+            ]
+
+        # Persist before the editor runs: the editor is the step that fails on a
+        # Gemini outage, and the next attempt must not repeat this phase.
+        record = dict(prior_fetch)
+        kept = {id(link) for link in links_raw}
+        for link in all_links:
+            if id(link) not in kept:  # deduped: remember only where it resolved
+                record[link["raw_url"]] = {
+                    "resolved_url": link["resolved_url"],
+                    "headline": link.get("headline_context"),
+                }
+        if len(articles) == len(links_raw):
+            for link, art in zip(links_raw, articles, strict=True):
+                record[link["raw_url"]] = {
+                    "resolved_url": link["resolved_url"],
+                    "headline": art.headline,
+                    "url": art.url,
+                    "content": art.content,
+                    "source_tier": art.source_tier,
+                    "extracted_chars": art.extracted_chars,
+                }
+        _write_levine_fetch(work_dir, record)
     else:
         levine_candidates = 0
         levine_deduped = 0
