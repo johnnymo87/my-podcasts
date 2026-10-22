@@ -51,8 +51,16 @@ for r in rows: print(dict(r))
 - successful collection writes `collection_done.json`
 - retries reuse prior collection instead of rerunning expensive collection every time
 - empty script output is rejected at the writer boundary
+- both editors raise on a failed Gemini call (no more empty plan persisted into `plan.json`), and the FP writer refuses an input with no article text
 - retries back off: 1m, 2m, 4m, 8m, then 15m cap
 - after about 12 hours of failures, jobs become `status='errored'`
+
+## Gemini billing / quota failures
+
+A `last_error` containing `editor: Gemini call failed` is a failure of the editor's Gemini call. If it also shows `402` (or `credits are depleted`), billing ran out; `429` is a quota/rate limit. The consumer sends one Telegram alert per streak (at most every 6 h) saying so. **Fix the billing in AI Studio; the job retries on its normal backoff by itself, no restart and no reset needed.** If the retry budget (~12 h) ran out first and the job is `errored`, `jobs reset` it. Two traps:
+
+- A job whose work dir got an *empty* `plan.json` + `collection_done.json` before this behavior shipped is still reused by retries and resets. Delete that work dir's `plan.json` (`/tmp/<feed>-<job_id>/plan.json`) before or right after `jobs reset`.
+- `FP digest writer refused: no theme has any article text` / `Rundown writer refused: no section has any article text` mean the editor produced a plan whose stories resolved to no text; the job backs off and retries rather than publishing an invented episode.
 
 ## Resetting an errored job
 

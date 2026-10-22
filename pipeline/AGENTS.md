@@ -30,11 +30,14 @@ Quick start and incident-response guide for the two daily podcasts: The Rundown 
   - the raw-output write is atomic (`report_engine.persist_raw_output`), because a truncated file re-parses into a clean-looking **half script** that passes every refusal
   - `min_chars=500` here is **re-derived, not copied** from the transcript path's 2000: this failure path is *bounded* (backoff → `errored` → alert), which is the regime 500 was originally derived for. The transcript path's unbounded redelivery is what forced 2000 there.
   - a second floor, `_validate_script_length`, still runs at the TTS boundary in `things_happen_processor.py`/`fp_processor.py`. The double floor is intended: that one also guards paths that bypass the writer entirely (`--script-file`, `publish-script`).
-  - **The Rundown only:** refuses to generate when no section has any article text. FP Digest has no equivalent guard yet — that gap is bead `qd5`.
+  - refuses to generate when there is no article text: The Rundown when no section has any (`Rundown writer refused: no section has any article text`), FP Digest when no theme in `themes` has any (`FP digest writer refused: no theme has any article text`, bead `qd5`). The FP check is per rendered theme, so text filed only under an orphan theme counts as empty (the orphan-theme assembly bug is `98p`, still open). Both run before the `raw_writer_output.txt` reuse path.
 - `pipeline/things_happen_collector.py`, `pipeline/fp_collector.py`
   - successful collection writes `collection_done.json`
+  - the editor (`things_happen_editor.py`, `fp_editor.py`) **raises** on a failed Gemini call or an unparseable reply (`RuntimeError("<Rundown|FP> editor: Gemini call failed: ...")`, chained from the SDK error) instead of returning an empty plan; only no-API-key and no-headlines return the empty plan. `plan.json` and `collection_done.json` are written after the editor returns, so a failure leaves neither and the retry re-collects. A work dir whose empty plan predates this change is still reused: delete its `plan.json` as well as `jobs reset`.
+  - Semafor files read from the cache are routed by `rss_sources.semafor_routing`: a `Routing: __PENDING__` file (classification failed; `source_cache.sync_semafor_cache` retries it for 14 days) routes by its category rather than being dropped.
 - `pipeline/consumer.py`
   - retries reuse prior collection when `collection_done.json` and `plan.json` exist
+  - a Rundown/FP job failure that traces to a Gemini 402/429 also calls `gemini_quota.alert_account_quota` (one alert per 6 h, `error` for 402, `warning` for 429); the job itself is charged and retried normally
   - writer failures back off instead of retrying every 10 seconds
 - `pipeline/db.py`
   - bounded retry backoff: 1m, 2m, 4m, 8m, then 15m cap
