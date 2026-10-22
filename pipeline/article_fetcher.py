@@ -35,6 +35,10 @@ class FetchedArticle:
     # Recorded because the <200 paywall threshold is a weak proxy and needs to
     # stay retunable against history rather than by re-fetching.
     extracted_chars: int = 0
+    # HTTP status of a non-200 answer (the ``http_error`` tier); 0 otherwise.
+    # Recorded so a retry can tell "bot-blocked, will say the same" (403/404)
+    # from "throttled or down, may say something else" (429/5xx).
+    http_status: int = 0
 
     @property
     def source_label(self) -> str:
@@ -50,6 +54,7 @@ class Article:
     content: str
     source_tier: str = "unknown"
     extracted_chars: int = 0
+    http_status: int = 0
 
 
 def _extract_article_text(html: str) -> str:
@@ -67,10 +72,11 @@ def _extract_article_text(html: str) -> str:
 _MIN_ARTICLE_CHARS = 200
 
 
-def _try_live_url(url: str) -> tuple[str | None, str, int]:
+def _try_live_url(url: str) -> tuple[str | None, str, int, int]:
     """Fetch the article, reporting the outcome rather than a bare None.
 
-    Returns ``(text_or_None, tier, extracted_chars)``.
+    Returns ``(text_or_None, tier, extracted_chars, http_status)``;
+    ``http_status`` is non-zero only for the ``http_error`` tier.
     """
     try:
         response = requests.get(
@@ -80,25 +86,29 @@ def _try_live_url(url: str) -> tuple[str | None, str, int]:
             allow_redirects=True,
         )
         if response.status_code != 200:
-            return None, "http_error", 0
+            return None, "http_error", 0, response.status_code
         text = _extract_article_text(response.text)
         if len(text) < _MIN_ARTICLE_CHARS:
-            return None, "paywalled", len(text)
-        return text, "live", len(text)
+            return None, "paywalled", len(text), 0
+        return text, "live", len(text), 0
     except Exception:
-        return None, "fetch_error", 0
+        return None, "fetch_error", 0, 0
 
 
 def fetch_article(url: str, headline: str) -> FetchedArticle:
     """Fetch article content with fallback: live URL -> headline only."""
-    content, tier, chars = _try_live_url(url)
+    content, tier, chars, status = _try_live_url(url)
     if content:
         return FetchedArticle(
             url=url, content=content, source_tier=tier, extracted_chars=chars
         )
 
     return FetchedArticle(
-        url=url, content=headline, source_tier=tier, extracted_chars=chars
+        url=url,
+        content=headline,
+        source_tier=tier,
+        extracted_chars=chars,
+        http_status=status,
     )
 
 
@@ -119,6 +129,7 @@ def fetch_all_articles(
                 content=fetched.content,
                 source_tier=fetched.source_tier,
                 extracted_chars=fetched.extracted_chars,
+                http_status=fetched.http_status,
             )
         )
     return results

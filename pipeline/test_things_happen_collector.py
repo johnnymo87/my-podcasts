@@ -2206,13 +2206,18 @@ _RAW = {
 class _LevineNet:
     """Records the network the collector would have touched, and answers it."""
 
-    def __init__(self, tiers: dict[str, str]):
-        self.tiers = dict(tiers)  # key -> tier the next fetch of it returns
+    def __init__(self, tiers: dict[str, str], *, resolve_to_self: bool = False):
+        # key -> tier the next fetch of it returns; "http_error:503" also sets
+        # the HTTP status (a bare "http_error" is a 404).
+        self.tiers = dict(tiers)
+        self.resolve_to_self = resolve_to_self  # HEAD "failed": url unchanged
         self.resolved: list[str] = []
         self.fetched: list[str] = []
 
     def resolve(self, raw_url: str) -> str:
         self.resolved.append(raw_url)
+        if self.resolve_to_self:
+            return raw_url
         return raw_url.replace("raw.test", "real.test")
 
     def fetch(self, links, delay_between=1.0):
@@ -2220,7 +2225,8 @@ class _LevineNet:
         for link in links:
             key = link["resolved_url"].rsplit("/", 1)[1]
             self.fetched.append(key)
-            tier = self.tiers[key]
+            tier, _, status = self.tiers[key].partition(":")
+            http_status = int(status or 404) if tier == "http_error" else 0
             content = (
                 f"Full body of {key} " * 20
                 if tier == "live"
@@ -2233,6 +2239,7 @@ class _LevineNet:
                     content=content,
                     source_tier=tier,
                     extracted_chars=len(content) if tier == "live" else 0,
+                    http_status=http_status,
                 )
             )
         return out
@@ -2339,8 +2346,9 @@ def test_retry_reuses_live_and_paywalled_and_refetches_transient(
     net.fetched.clear()
     _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
 
-    # a (live) and b (paywalled) cost nothing; only the transient c is re-asked.
-    assert net.resolved == [_RAW["c"]]
+    # a (live) and b (paywalled) cost nothing; only the transient c is
+    # re-fetched, and its already-resolved redirect is not re-resolved.
+    assert net.resolved == []
     assert net.fetched == ["c"]
     saved = json.loads((work_dir / "levine_fetch.json").read_text())
     assert saved[_RAW["c"]]["source_tier"] == "live"  # merged back
@@ -2352,9 +2360,58 @@ def test_retry_reuses_live_and_paywalled_and_refetches_transient(
     assert _snapshot(work_dir) == _snapshot(fresh_dir)
 
 
-@pytest.mark.parametrize("tier", ["http_error", "fetch_error"])
-def test_transient_tiers_are_always_refetched(tmp_path, monkeypatch, tier) -> None:
+@pytest.mark.parametrize("tier", ["http_error", "http_error:403", "http_error:404"])
+def test_http_error_is_reused_with_zero_network_calls(
+    tmp_path, monkeypatch, tier
+) -> None:
+    """A publisher answering 403/404 to a bot is the common production case;
+    asking again gets the same answer, so it must not be re-asked."""
     net = _LevineNet({"a": tier, "b": tier, "c": tier})
+    work_dir = tmp_path / "work"
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+    net.resolved.clear()
+    net.fetched.clear()
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+    assert net.fetched == []
+    assert net.resolved == []
+
+
+@pytest.mark.parametrize("tier", ["http_error:429", "http_error:500", "http_error:503"])
+def test_throttle_and_server_errors_are_refetched(tmp_path, monkeypatch, tier) -> None:
+    net = _LevineNet({"a": tier, "b": tier, "c": tier})
+    work_dir = tmp_path / "work"
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+    saved = json.loads((work_dir / "levine_fetch.json").read_text())
+    assert saved[_RAW["a"]]["http_status"] == int(tier.split(":")[1])
+    net.resolved.clear()
+    net.fetched.clear()
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+    assert net.fetched == ["a", "b", "c"]
+    # ...but the redirect already resolved to a new URL, so it is not re-HEADed.
+    assert net.resolved == []
+
+
+def test_fetch_error_is_refetched_without_repeating_a_successful_resolve(
+    tmp_path, monkeypatch
+) -> None:
+    net = _LevineNet({"a": "fetch_error", "b": "fetch_error", "c": "fetch_error"})
+    work_dir = tmp_path / "work"
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+    net.resolved.clear()
+    net.fetched.clear()
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+    assert net.fetched == ["a", "b", "c"]
+    assert net.resolved == []  # resolved_url differs from raw_url: kept
+
+
+def test_unchanged_resolved_url_on_a_transient_failure_is_re_resolved(
+    tmp_path, monkeypatch
+) -> None:
+    """resolved == raw is what a failed HEAD looks like, so it is re-asked."""
+    net = _LevineNet(
+        {"a": "fetch_error", "b": "fetch_error", "c": "fetch_error"},
+        resolve_to_self=True,
+    )
     work_dir = tmp_path / "work"
     _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
     net.resolved.clear()

@@ -66,10 +66,29 @@ def _host_banned(url: str, origin: str) -> bool:
 # consumer thread, thousands of requests at Bloomberg/WSJ/FT. (The same idea as
 # fp_collector._prior_fetched_body.)
 LEVINE_FETCH_FILE = "levine_fetch.json"
-# Tiers that mean "the network failed", so a later attempt may do better. Every
-# other tier (live, paywalled, ...) is a measurement of the page: re-asking
-# returns the same answer.
-_TRANSIENT_TIERS = frozenset({"http_error", "fetch_error"})
+# What a retry re-asks. Everything else (live, paywalled, and an http_error that
+# is a definite answer) is a measurement of the page: re-asking returns the same
+# thing. ``http_error`` is the dominant tier in production (publishers answering
+# 403 to a bot), so reusing it is most of the saving.
+#   * ``fetch_error``: the request itself failed (connection, timeout, DNS).
+#   * ``http_error`` with status 429 or 5xx: throttled or down, not an answer.
+# An http_error with an unknown status (0 or absent) is treated as an answer.
+_TRANSIENT_TIERS = frozenset({"fetch_error"})
+_TRANSIENT_STATUS_MIN = 500
+_THROTTLED_STATUS = 429
+
+
+def _is_transient(entry: dict) -> bool:
+    tier = entry.get("source_tier")
+    if tier in _TRANSIENT_TIERS:
+        return True
+    status = entry.get("http_status")
+    return (
+        tier == "http_error"
+        and isinstance(status, int)
+        and not isinstance(status, bool)
+        and (status == _THROTTLED_STATUS or status >= _TRANSIENT_STATUS_MIN)
+    )
 
 
 def _load_levine_fetch(work_dir: Path) -> dict[str, dict]:
@@ -88,12 +107,15 @@ def _load_levine_fetch(work_dir: Path) -> dict[str, dict]:
     return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, dict)}
 
 
-def _reusable_resolved_url(entry: dict | None) -> str | None:
+def _reusable_resolved_url(raw_url: str, entry: dict | None) -> str | None:
     """The resolved URL of an entry that does not need re-resolving.
 
-    That is a fully fetched non-transient entry, or a resolved-only entry (a link
-    that was deduped before fetching). A transient failure is re-resolved too:
-    the redirect lookup is a network call that may be what failed.
+    A successful redirect lookup is kept even when the later GET was transient:
+    ``resolved_url != raw_url`` means the HEAD answered, so repeating it is pure
+    cost. ``resolved_url == raw_url`` is also what a *failed* HEAD returns, so
+    on a transient entry that is re-asked. Entries that are not transient (a
+    definite article answer, or a deduped link's resolved-only entry) are kept
+    as they are.
     """
     if not entry:
         return None
@@ -101,7 +123,9 @@ def _reusable_resolved_url(entry: dict | None) -> str | None:
     if not isinstance(resolved, str) or not resolved:
         return None
     tier = entry.get("source_tier")
-    if tier is not None and (not isinstance(tier, str) or tier in _TRANSIENT_TIERS):
+    if tier is not None and not isinstance(tier, str):
+        return None
+    if _is_transient(entry) and resolved == raw_url:
         return None
     return resolved
 
@@ -109,22 +133,27 @@ def _reusable_resolved_url(entry: dict | None) -> str | None:
 def _reusable_article(entry: dict | None, headline: str | None) -> Article | None:
     """The prior attempt's Article for this link, if it can be trusted as-is.
 
-    Requires a complete entry with a non-transient tier and the same headline
-    (a paywalled article's content *is* its headline, so a changed headline
-    invalidates it).
+    Requires a complete entry with a non-transient outcome (see
+    ``_is_transient``) and the same headline (a paywalled article's content *is*
+    its headline, so a changed headline invalidates it).
     """
-    if _reusable_resolved_url(entry) is None or entry is None:
+    if entry is None or _is_transient(entry):
+        return None
+    if not isinstance(entry.get("resolved_url"), str) or not entry["resolved_url"]:
         return None
     url = entry.get("url")
     content = entry.get("content")
     tier = entry.get("source_tier")
     chars = entry.get("extracted_chars")
+    status = entry.get("http_status", 0)
     if (
         not isinstance(tier, str)
         or not isinstance(url, str)
         or not isinstance(content, str)
         or not isinstance(chars, int)
         or isinstance(chars, bool)
+        or not isinstance(status, int)
+        or isinstance(status, bool)
         or entry.get("headline") != headline
     ):
         return None
@@ -134,6 +163,7 @@ def _reusable_article(entry: dict | None, headline: str | None) -> Article | Non
         content=content,
         source_tier=tier,
         extracted_chars=chars,
+        http_status=status,
     )
 
 
@@ -212,7 +242,7 @@ def collect_all_artifacts(
             cached = _reusable_article(entry, link.get("headline_context"))
             if cached is not None:
                 reused[link["raw_url"]] = cached
-            resolved = _reusable_resolved_url(entry)
+            resolved = _reusable_resolved_url(link["raw_url"], entry)
             link["resolved_url"] = (
                 resolved if resolved else resolve_redirect_url(link["raw_url"])
             )
@@ -256,6 +286,7 @@ def collect_all_artifacts(
                     "content": art.content,
                     "source_tier": art.source_tier,
                     "extracted_chars": art.extracted_chars,
+                    "http_status": art.http_status,
                 }
         _write_levine_fetch(work_dir, record)
     else:

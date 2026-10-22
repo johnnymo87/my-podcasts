@@ -82,6 +82,14 @@ def test_non_200_is_http_error(monkeypatch):
     result = article_fetcher.fetch_article("https://x.test/a", "Headline")
     assert result.source_tier == "http_error"
     assert result.extracted_chars == 0
+    assert result.http_status == 404
+
+
+def test_http_status_is_zero_unless_http_error(monkeypatch):
+    monkeypatch.setattr(
+        article_fetcher.requests, "get", lambda *a, **kw: _Resp(200, _long_page())
+    )
+    assert article_fetcher.fetch_article("https://x.test/a", "H").http_status == 0
 
 
 def test_exception_is_fetch_error(monkeypatch):
@@ -104,3 +112,4 @@ def test_fetch_all_articles_preserves_tier(monkeypatch):
     )
     assert articles[0].source_tier == "http_error"
     assert articles[0].extracted_chars == 0
+    assert articles[0].http_status == 404
