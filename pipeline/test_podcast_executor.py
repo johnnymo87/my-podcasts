@@ -124,6 +124,15 @@ class Publish:
         return self.mode
 
 
+@pytest.fixture(autouse=True)
+def _reset_quota_state(monkeypatch):
+    """The quota pause/alert state is module-level; keep tests independent."""
+    import pipeline.podcast_executor as ex
+
+    monkeypatch.setattr(ex, "_quota_pause_until", None)
+    monkeypatch.setattr(ex, "_quota_alerted_at", None)
+
+
 @pytest.fixture
 def store(tmp_path):
     s = StateStore(tmp_path / "test.db")
@@ -310,7 +319,7 @@ def test_http_400_is_terminal_on_first_failure(store, work_root):
     assert len(alerts.calls) == 1
 
 
-@pytest.mark.parametrize("code", [429, 500, None])
+@pytest.mark.parametrize("code", [500, None])
 def test_other_codes_are_not_terminal(store, work_root, code):
     item = _admit(store)
     child = FakeChild(work_root, _bad(reason="asr_error", code=code))
@@ -999,3 +1008,178 @@ def test_uncommitted_episode_still_runs_child_then_publish(
     assert result == f"argument/{item.guid}: published"
     assert len(child.calls) == 1 and len(publish.calls) == 1
     assert recon.calls == []
+
+
+# --- account quota (402 / 429): pause, defer, one alert per streak ---------
+
+
+def _quota(code=402, detail="prepayment credits are depleted"):
+    return _bad(stage="transcribe", reason="asr_error", code=code, detail=detail)
+
+
+def test_402_defers_the_row_without_charging_a_failure_and_alerts_once(
+    store, work_root
+):
+    item = _admit(store)
+    alerts = Alerts()
+    child = FakeChild(work_root, _quota())
+    result = _run(store, work_root, child, Publish(), alerts)
+    assert result.endswith("deferred (account quota)")
+    assert result == f"argument/{item.guid}: deferred (account quota)"
+    row = store.get_podcast_episode("argument", item.guid)
+    assert row["status"] == "pending"
+    assert row["failure_count"] == 0
+    assert datetime.fromisoformat(row["next_attempt_at"]) == NOW + timedelta(hours=1)
+    assert row["last_error"].startswith("deferred: transcribe: asr_error: ")
+    assert len(alerts.calls) == 1
+    text, severity = alerts.calls[0]
+    assert severity == "error"
+    assert "HTTP 402" in text
+    assert "Report: 2026-10-11 - The Argument - Episode 1" in text
+    assert "prepayment credits are depleted" in text
+    assert "13:00Z" in text
+    assert "AI Studio billing" in text
+
+
+def test_alert_detail_is_truncated(store, work_root):
+    _admit(store)
+    alerts = Alerts()
+    child = FakeChild(work_root, _quota(detail="d" * 900))
+    _run(store, work_root, child, Publish(), alerts)
+    assert "d" * 200 in alerts.calls[0][0]
+    assert "d" * 300 not in alerts.calls[0][0]
+
+
+def test_inside_the_pause_no_row_is_selected_or_run(store, work_root):
+    _admit(store, 1)
+    _admit(store, 2)
+    alerts = Alerts()
+    child = FakeChild(work_root, _quota())
+    _run(store, work_root, child, Publish(), alerts)
+    assert len(child.calls) == 1
+    later = NOW + timedelta(minutes=30)
+    assert _run(store, work_root, child, Publish(), alerts, now=later) is None
+    assert len(child.calls) == 1
+    # Neither row was claimed or charged.
+    for n in (1, 2):
+        row = store.get_podcast_episode("argument", f"audioboom-{n}")
+        assert row["status"] == "pending"
+        assert row["failure_count"] == 0
+    assert len(alerts.calls) == 1
+
+
+def test_after_the_pause_a_recurring_402_defers_again_without_a_new_alert(
+    store, work_root
+):
+    item = _admit(store)
+    alerts = Alerts()
+    child = FakeChild(work_root, _quota())
+    _run(store, work_root, child, Publish(), alerts)
+    second = NOW + timedelta(hours=1, minutes=1)
+    result = _run(store, work_root, child, Publish(), alerts, now=second)
+    assert result == f"argument/{item.guid}: deferred (account quota)"
+    assert len(child.calls) == 2
+    row = store.get_podcast_episode("argument", item.guid)
+    assert row["failure_count"] == 0
+    assert datetime.fromisoformat(row["next_attempt_at"]) == second + timedelta(hours=1)
+    assert len(alerts.calls) == 1
+
+
+def test_a_persistent_402_realerts_every_six_hours(store, work_root):
+    _admit(store)
+    alerts = Alerts()
+    child = FakeChild(work_root, _quota())
+    _run(store, work_root, child, Publish(), alerts)
+    _run(
+        store,
+        work_root,
+        child,
+        Publish(),
+        alerts,
+        now=NOW + timedelta(hours=5, minutes=59),
+    )
+    assert len(alerts.calls) == 1
+    # Each deferral makes the row due an hour later, so step from there.
+    _run(store, work_root, child, Publish(), alerts, now=NOW + timedelta(hours=7))
+    assert len(alerts.calls) == 2
+    # The clock for the next re-alert restarts at the second alert.
+    _run(store, work_root, child, Publish(), alerts, now=NOW + timedelta(hours=12))
+    assert len(alerts.calls) == 2
+    _run(store, work_root, child, Publish(), alerts, now=NOW + timedelta(hours=13))
+    assert len(alerts.calls) == 3
+    row = store.get_podcast_episode("argument", "audioboom-1")
+    assert row["failure_count"] == 0
+    assert row["status"] == "pending"
+
+
+@pytest.mark.parametrize("between", ["failure", "success"])
+def test_a_non_quota_outcome_resets_the_alert_streak(store, work_root, between):
+    _admit(store, 1)
+    _admit(store, 2)
+    alerts = Alerts()
+    _run(store, work_root, FakeChild(work_root, _quota()), Publish(), alerts)
+    assert len(alerts.calls) == 1
+    outcome = _bad(reason="asr_error", code=500) if between == "failure" else _ok()
+    t2 = NOW + timedelta(hours=1, minutes=1)
+    result = _run(
+        store, work_root, FakeChild(work_root, outcome), Publish(), alerts, now=t2
+    )
+    assert "deferred" not in result
+    assert len(alerts.calls) == 1
+    # Row 1 is now done or backing off; row 2 is next and hits quota again,
+    # long before the 6 h re-alert window.
+    t3 = NOW + timedelta(hours=1, minutes=2)
+    result = _run(
+        store, work_root, FakeChild(work_root, _quota()), Publish(), alerts, now=t3
+    )
+    assert result == "argument/audioboom-2: deferred (account quota)"
+    assert len(alerts.calls) == 2
+
+
+def test_429_is_treated_like_402(store, work_root):
+    item = _admit(store)
+    alerts = Alerts()
+    result = _run(
+        store, work_root, FakeChild(work_root, _quota(429, "rate")), Publish(), alerts
+    )
+    assert result == f"argument/{item.guid}: deferred (account quota)"
+    row = store.get_podcast_episode("argument", item.guid)
+    assert row["status"] == "pending"
+    assert row["failure_count"] == 0
+    assert "HTTP 429" in alerts.calls[0][0]
+
+
+def test_defer_error_text_has_signed_url_query_scrubbed(store, work_root):
+    item = _admit(store)
+    child = FakeChild(
+        work_root, _quota(detail="GET https://pscrb.fm/x.mp3?sig=SECRET failed")
+    )
+    alerts = Alerts()
+    _run(store, work_root, child, Publish(), alerts)
+    row = store.get_podcast_episode("argument", item.guid)
+    assert "SECRET" not in row["last_error"]
+    assert "SECRET" not in alerts.calls[0][0]
+
+
+def test_claim_stage_is_still_terminal_even_with_a_quota_code(store, work_root):
+    item = _admit(store)
+    child = FakeChild(work_root, _bad(stage="claim", reason="WorkDirOwned", code=402))
+    result = _run(store, work_root, child, Publish(), Alerts())
+    assert result == f"argument/{item.guid}: errored (1)"
+    assert store.get_podcast_episode("argument", item.guid)["status"] == "errored"
+
+
+def test_defer_raising_falls_back_to_a_counted_failure(store, work_root, monkeypatch):
+    item = _admit(store)
+
+    def boom(*a, **k):
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(store, "defer_podcast_episode", boom)
+    alerts = Alerts()
+    result = _run(store, work_root, FakeChild(work_root, _quota()), Publish(), alerts)
+    assert result == f"argument/{item.guid}: failed (1)"
+    row = store.get_podcast_episode("argument", item.guid)
+    assert row["status"] == "pending"
+    assert row["failure_count"] == 1
+    assert alerts.calls == []  # not an account-quota deferral; no quota alert

@@ -584,3 +584,48 @@ def test_get_episode_by_r2_key(store):
     store.insert_episode(ep)
     assert store.get_episode_by_r2_key("episodes/yglesias/x.mp3") == ep
     assert store.get_episode_by_r2_key("episodes/yglesias/y.mp3") is None
+
+
+# --- defer_podcast_episode (account-quota pause) --------------------------
+
+
+def test_defer_returns_to_pending_without_charging_a_failure(store):
+    _admit(store)
+    store.claim_podcast_episode("argument", "g1")
+    store.fail_podcast_episode("argument", "g1", "earlier", now=NOW)
+    store.claim_podcast_episode("argument", "g1")
+    until = NOW + timedelta(hours=1)
+    store.defer_podcast_episode("argument", "g1", "deferred: quota", until=until)
+    row = store.get_podcast_episode("argument", "g1")
+    assert row["status"] == "pending"
+    assert row["failure_count"] == 1  # unchanged
+    assert datetime.fromisoformat(row["next_attempt_at"]) == until
+    assert row["last_error"] == "deferred: quota"
+
+
+def test_defer_truncates_the_error(store):
+    _admit(store)
+    store.claim_podcast_episode("argument", "g1")
+    store.defer_podcast_episode("argument", "g1", "x" * 900, until=NOW)
+    assert len(store.get_podcast_episode("argument", "g1")["last_error"]) == 500
+
+
+@pytest.mark.parametrize("prior", ["pending", "errored", "completed"])
+def test_defer_refuses_a_row_that_is_not_in_progress(store, prior):
+    _admit(store)
+    if prior == "errored":
+        store.fail_podcast_episode("argument", "g1", "bad", now=NOW, terminal=True)
+    elif prior == "completed":
+        store.claim_podcast_episode("argument", "g1")
+        store.complete_podcast_episode("argument", "g1", stats={})
+    before = dict(store.get_podcast_episode("argument", "g1"))
+    with pytest.raises(ValueError):
+        store.defer_podcast_episode(
+            "argument", "g1", "deferred", until=NOW + timedelta(hours=1)
+        )
+    assert dict(store.get_podcast_episode("argument", "g1")) == before
+
+
+def test_defer_of_an_unknown_row_raises(store):
+    with pytest.raises(ValueError):
+        store.defer_podcast_episode("argument", "nope", "e", until=NOW)

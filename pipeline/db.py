@@ -907,6 +907,26 @@ class StateStore:
             exhausted=False,
         )
 
+    def defer_podcast_episode(
+        self, source: str, guid: str, error: str, *, until: datetime
+    ) -> None:
+        """Put an ``in_progress`` row back to ``pending`` without charging a failure.
+
+        For account-wide conditions (Gemini credits depleted, rate limit) that
+        are not the episode's fault. ``failure_count`` is left unchanged and the
+        row becomes due at ``until``. A row that is not ``in_progress`` (or does
+        not exist) raises ``ValueError`` and nothing changes.
+        """
+        cursor = self._conn.execute(
+            "UPDATE podcast_episodes SET status = 'pending', last_error = ?, "
+            "next_attempt_at = ?, updated_at = datetime('now') "
+            "WHERE source = ? AND guid = ? AND status = 'in_progress'",
+            (error[:500], _utc_iso(until), source, guid),
+        )
+        self._conn.commit()
+        if cursor.rowcount != 1:
+            raise ValueError("cannot defer a podcast episode that is not in_progress")
+
     def reset_podcast_episode(self, source: str, guid: str, *, now: datetime) -> str:
         """Put an errored/pending row back to a clean, due-now pending state.
 

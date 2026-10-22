@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +46,20 @@ logger = logging.getLogger(__name__)
 # is on) we are close enough to a refusal to say so.
 HEADROOM_WARN_FRACTION = 0.75
 TERMINAL_HTTP_CODE = 400  # Gemini reports an invalid request/key as 400
+
+# Account-wide Gemini conditions: 402 (prepayment credits depleted) and 429
+# (rate/quota, after the transcriber's own retries). They are not the episode's
+# fault, so they are never charged to it: the row is deferred and podcast work
+# pauses in-process for QUOTA_PAUSE.
+ACCOUNT_QUOTA_CODES = frozenset({402, 429})
+QUOTA_PAUSE = timedelta(hours=1)
+QUOTA_REALERT = timedelta(hours=6)
+QUOTA_ALERT_DETAIL_CHARS = 200
+
+# In-process state; a consumer restart clears both (at most one extra probe and
+# one extra alert, which is acceptable).
+_quota_pause_until: datetime | None = None
+_quota_alerted_at: datetime | None = None
 
 
 def _num(value: object) -> float | int | None:
@@ -155,14 +169,24 @@ def run_one_podcast_episode(
     to pending), ``errored (n)`` (retry budget spent, or a terminal failure),
     ``failure not recorded`` (the database refused the failure itself; one
     error alert is attempted and the row stays ``in_progress`` until the next
-    consumer start re-queues it).
+    consumer start re-queues it), ``deferred (account quota)`` (the child hit
+    a 402/429; back to pending in one hour with no failure charged, and no
+    podcast work runs until then).
+
+    While an account-quota pause is active this returns None before selecting
+    anything. That also delays a row that would only reconcile (no child, no
+    Gemini call); rare, and at most one hour.
     """
+    global _quota_pause_until, _quota_alerted_at
     injected_now = now
 
     def clock() -> datetime:
         # A job can take 30 minutes in the child: failure backoff is measured
         # from when the failure happens, not from when the row was selected.
         return injected_now or datetime.now(UTC)
+
+    if _quota_pause_until is not None and clock() < _quota_pause_until:
+        return None
 
     row = store.next_due_podcast_episode(clock())
     if row is None:
@@ -235,6 +259,44 @@ def run_one_podcast_episode(
             child = run_child(source, item, work_dir)
         except Exception as exc:  # noqa: BLE001 -- never raise for a job failure
             return fail(f"child: {type(exc).__name__}: {exc}")
+
+        if not child.ok and (
+            child.stage != "claim" and child.code in ACCOUNT_QUOTA_CODES
+        ):
+            error = scrub_detail(f"{child.stage}: {child.reason}: {child.detail}")
+            now_q = clock()
+            _quota_pause_until = now_q + QUOTA_PAUSE
+            try:
+                store.defer_podcast_episode(
+                    source_key, guid, "deferred: " + error, until=_quota_pause_until
+                )
+            except Exception:  # noqa: BLE001 -- fall back to a counted failure
+                logger.exception("%s: could not defer; counting a failure", label)
+                return fail(error)
+            if _quota_alerted_at is None or now_q - _quota_alerted_at >= QUOTA_REALERT:
+                detail = scrub_detail(str(child.detail))[:QUOTA_ALERT_DETAIL_CHARS]
+                sent = send_alert_bounded(
+                    f"Gemini account quota/billing error (HTTP {child.code}) on "
+                    f"podcast report {title}: {detail}. Podcast reports paused "
+                    f"until {_quota_pause_until:%H:%M}Z; episodes are not charged "
+                    "a failure and will retry. The same Gemini account also "
+                    "feeds the Rundown/FP editors, Semafor routing and Gemini "
+                    "TTS (falls back to OpenAI). Check AI Studio billing.",
+                    "error",
+                    sender=alert,
+                )
+                _quota_alerted_at = now_q
+                print(f"podcast-report {label}: quota alert result={sent}")
+            logger.warning("%s: deferred (account quota): %s", label, error)
+            print(
+                f"podcast-report {label}: deferred (account quota) until "
+                f"{_quota_pause_until.isoformat()}"
+            )
+            return f"{label}: deferred (account quota)"
+
+        # Not a quota error: the streak (if any) is over, so the next one
+        # alerts immediately.
+        _quota_alerted_at = None
 
         if not child.ok:
             terminal = child.stage == "claim" or child.code == TERMINAL_HTTP_CODE
