@@ -202,3 +202,29 @@ def test_categorize_semafor_both():
 
 def test_categorize_semafor_unknown_defaults_to_both():
     assert categorize_semafor_article("SomeNewCategory") == "both"
+
+
+def test_semafor_routing_passes_real_values_through() -> None:
+    from pipeline.rss_sources import semafor_routing
+
+    for value in ("fp", "th", "both", "skip"):
+        # A real routing wins over whatever the category would say.
+        assert semafor_routing(value, "Gulf") == value
+        assert semafor_routing(value, "Technology") == value
+
+
+def test_semafor_routing_pending_or_empty_falls_back_to_category() -> None:
+    from pipeline.rss_sources import ROUTING_PENDING, semafor_routing
+
+    assert ROUTING_PENDING == "__PENDING__"
+    assert semafor_routing(ROUTING_PENDING, "Gulf") == "fp"
+    assert semafor_routing(ROUTING_PENDING, "Technology") == "th"
+    assert semafor_routing(ROUTING_PENDING, "Politics") == "both"
+    assert semafor_routing("", "Gulf") == "fp"
+    assert semafor_routing("", "") == "both"
+
+
+def test_semafor_routing_unknown_value_falls_back_to_category() -> None:
+    from pipeline.rss_sources import semafor_routing
+
+    assert semafor_routing("garbage", "Security") == "fp"

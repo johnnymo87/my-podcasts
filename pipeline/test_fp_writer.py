@@ -488,3 +488,74 @@ def test_prompt_forbids_a_closing_recap():
     assert "Do NOT end with a recap" in PROMPT_TEMPLATE
     assert "naming no stories" in PROMPT_TEMPLATE
     assert "a brief sign-off are\nuseful" not in PROMPT_TEMPLATE
+
+
+# --- bead qd5: refuse to generate from nothing ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("themes", "articles_by_theme"),
+    [
+        pytest.param([], {}, id="empty-themes"),
+        pytest.param(["Iran", "Russia"], {}, id="themes-without-articles"),
+        pytest.param(["Iran"], {"Iran": []}, id="empty-article-list"),
+        pytest.param(["Iran"], {"Iran": ["", "   \n"]}, id="blank-article-text"),
+        pytest.param(
+            ["Iran"],
+            {"Some Orphan Theme": ["real text that never reaches the prompt"]},
+            id="text-only-under-orphan-theme",
+        ),
+    ],
+)
+def test_generate_fp_script_refuses_when_no_theme_has_article_text(
+    monkeypatch, tmp_path, themes, articles_by_theme
+) -> None:
+    calls: list[str] = []
+
+    def _never(*args, **kwargs):
+        calls.append("fetch_report_text")
+        raise AssertionError("the writer must not be called with no article text")
+
+    monkeypatch.setattr("pipeline.fp_writer.fetch_report_text", _never)
+
+    with pytest.raises(RuntimeError, match="no theme has any article text"):
+        generate_fp_script(
+            themes, articles_by_theme, date_str="2026-03-06", work_dir=tmp_path
+        )
+
+    assert calls == []
+
+
+def test_generate_fp_script_refusal_beats_persisted_raw_output(
+    monkeypatch, tmp_path
+) -> None:
+    """A retry must not launder a fabricated script from an earlier empty run."""
+    (tmp_path / "raw_writer_output.txt").write_text(
+        f"<script>{_LONG_SCRIPT}</script>", encoding="utf-8"
+    )
+
+    with pytest.raises(RuntimeError, match="no theme has any article text"):
+        generate_fp_script([], {}, date_str="2026-03-06", work_dir=tmp_path)
+
+
+def test_generate_fp_script_proceeds_with_one_themed_article(
+    monkeypatch, tmp_path
+) -> None:
+    prompts: list[str] = []
+
+    def _fake_fetch(instruction, label):
+        prompts.append(instruction)
+        return f"<script>{_LONG_SCRIPT}</script>"
+
+    monkeypatch.setattr("pipeline.fp_writer.fetch_report_text", _fake_fetch)
+
+    result = generate_fp_script(
+        ["Iran", "Empty Theme"],
+        {"Iran": ["Iran talks resumed in Vienna."], "Empty Theme": []},
+        date_str="2026-03-06",
+        work_dir=tmp_path,
+    )
+
+    assert len(prompts) == 1
+    assert "Iran talks resumed in Vienna." in prompts[0]
+    assert "foreign policy briefing" in result.script

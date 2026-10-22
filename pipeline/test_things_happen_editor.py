@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from pipeline.things_happen_editor import (
     RundownResearchPlan,
     RundownStoryDirective,
@@ -98,13 +100,52 @@ def test_generate_plan_with_context_scripts(mock_client_class, monkeypatch) -> N
 
 
 @patch("pipeline.things_happen_editor.genai.Client")
-def test_generate_plan_handles_exception(mock_client_class, monkeypatch) -> None:
+def test_generate_plan_raises_on_gemini_exception(
+    mock_client_class, monkeypatch
+) -> None:
+    """A failed call must fail the job, not persist an empty plan (my-podcasts-6fk)."""
     monkeypatch.setenv("GEMINI_API_KEY", "fake")
 
     mock_client = MagicMock()
     mock_client_class.return_value = mock_client
-    mock_client.models.generate_content.side_effect = Exception("API error")
+    boom = Exception("API error")
+    mock_client.models.generate_content.side_effect = boom
 
-    result = generate_rundown_research_plan(["Headline"])
-    assert result.themes == []
-    assert result.directives == []
+    with pytest.raises(
+        RuntimeError, match=r"Rundown editor: Gemini call failed: Exception: API error"
+    ) as excinfo:
+        generate_rundown_research_plan(["Headline"])
+    assert excinfo.value.__cause__ is boom
+
+
+@patch("pipeline.things_happen_editor.genai.Client")
+def test_generate_plan_keeps_quota_error_as_cause(
+    mock_client_class, monkeypatch
+) -> None:
+    from google.genai import errors
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+    mock_client = MagicMock()
+    mock_client_class.return_value = mock_client
+    api_err = errors.APIError(402, {"error": {"message": "credits depleted"}})
+    mock_client.models.generate_content.side_effect = api_err
+
+    with pytest.raises(RuntimeError, match="Gemini call failed: APIError") as excinfo:
+        generate_rundown_research_plan(["Headline"])
+    assert excinfo.value.__cause__ is api_err
+
+
+@patch("pipeline.things_happen_editor.genai.Client")
+def test_generate_plan_raises_when_reply_does_not_parse(
+    mock_client_class, monkeypatch
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "fake")
+
+    mock_client = MagicMock()
+    mock_client_class.return_value = mock_client
+    mock_response = MagicMock()
+    mock_response.parsed = None
+    mock_client.models.generate_content.return_value = mock_response
+
+    with pytest.raises(RuntimeError, match="Rundown editor: .*plan"):
+        generate_rundown_research_plan(["Headline"])

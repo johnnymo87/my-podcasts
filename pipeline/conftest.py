@@ -197,6 +197,17 @@ def _reset_bounded_alert_worker():
 
 
 @pytest.fixture(autouse=True)
+def _reset_gemini_quota_latch(monkeypatch):
+    """``gemini_quota`` remembers when it last alerted (a 6 h suppression).
+
+    Module state would otherwise leak from one test's quota failure into the
+    next test's "first alert is sent" expectation.
+    """
+    monkeypatch.setattr("pipeline.gemini_quota._alerted_at", None)
+    monkeypatch.setattr("pipeline.gemini_quota._alerted_code", None)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_script_archive(tmp_path, monkeypatch):
     """``publish_script`` archives its inputs under ``SCRIPT_ARCHIVE_ROOT``.
 

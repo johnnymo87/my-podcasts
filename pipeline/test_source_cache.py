@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,13 +18,13 @@ from pipeline.source_cache import (
 
 @pytest.fixture(autouse=True)
 def _no_gemini_semafor_routing(monkeypatch):
-    """``sync_semafor_cache`` routes articles with Gemini; stub it to the 'both'
-    default a host with no API key gives, so no test reaches Google. Tests of the
-    classifier itself call ``classify_semafor_articles`` directly (their own
-    reference, unaffected) and stub ``genai.Client``."""
+    """``sync_semafor_cache`` routes articles with Gemini; stub it to the empty
+    answer a host with no API key gives (files stay pending), so no test reaches
+    Google. Tests of the classifier itself call ``classify_semafor_articles``
+    directly (their own reference, unaffected) and stub ``genai.Client``."""
     monkeypatch.setattr(
         "pipeline.source_cache.classify_semafor_articles",
-        lambda articles: dict.fromkeys(range(len(articles)), "both"),
+        lambda articles: {},
     )
 
 
@@ -264,8 +264,8 @@ def test_classify_semafor_articles_returns_routing(monkeypatch):
     assert "gemini-3.8-flash" in str(call_args)
 
 
-def test_classify_semafor_articles_fallback_no_api_key(monkeypatch):
-    """Without GEMINI_API_KEY, all articles get 'both'."""
+def test_classify_semafor_articles_no_api_key_gives_no_answers(monkeypatch):
+    """Without GEMINI_API_KEY nothing is classified (the files stay pending)."""
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     articles = [
@@ -273,11 +273,11 @@ def test_classify_semafor_articles_fallback_no_api_key(monkeypatch):
         {"title": "Another Article", "description": ""},
     ]
     result = classify_semafor_articles(articles)
-    assert result == {0: "both", 1: "both"}
+    assert result == {}
 
 
-def test_classify_semafor_articles_fallback_on_error(monkeypatch):
-    """On Gemini API error, all articles get 'both'."""
+def test_classify_semafor_articles_error_gives_no_answers(monkeypatch):
+    """On a Gemini API error nothing is classified; no 'both' is invented."""
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
 
     with patch("pipeline.source_cache.genai") as mock_genai:
@@ -286,7 +286,21 @@ def test_classify_semafor_articles_fallback_on_error(monkeypatch):
         )
         result = classify_semafor_articles([{"title": "Test", "description": ""}])
 
-    assert result == {0: "both"}
+    assert result == {}
+
+
+def test_classify_semafor_articles_unparsed_reply_gives_no_answers(monkeypatch):
+    mock_response = MagicMock()
+    mock_response.parsed = None
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = mock_response
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+    with patch("pipeline.source_cache.genai") as mock_genai:
+        mock_genai.Client.return_value = mock_client
+        result = classify_semafor_articles([{"title": "Test", "description": ""}])
+
+    assert result == {}
 
 
 def test_classify_semafor_articles_empty_list():
@@ -295,8 +309,8 @@ def test_classify_semafor_articles_empty_list():
     assert result == {}
 
 
-def test_classify_semafor_articles_normalises_unknown_routing(monkeypatch):
-    """LLM returning an unknown routing string falls back to 'both'."""
+def test_classify_semafor_articles_omits_unknown_routing(monkeypatch):
+    """An invalid routing value is omitted, not turned into 'both'."""
     mock_parsed = MagicMock()
     mock_parsed.articles = [
         MagicMock(index=0, routing="UNKNOWN_VALUE"),
@@ -313,7 +327,7 @@ def test_classify_semafor_articles_normalises_unknown_routing(monkeypatch):
         mock_genai.Client.return_value = mock_client
         result = classify_semafor_articles([{"title": "Test", "description": ""}])
 
-    assert result == {0: "both"}
+    assert result == {}
 
 
 def test_sync_semafor_writes_routing_header(tmp_path, monkeypatch):
@@ -339,8 +353,11 @@ def test_sync_semafor_writes_routing_header(tmp_path, monkeypatch):
     assert "Category:" in content  # Category still present
 
 
-def test_sync_semafor_routing_fallback_on_classification_failure(tmp_path, monkeypatch):
-    """If classification returns all 'both', Routing defaults to 'both'."""
+def test_sync_semafor_leaves_file_pending_when_classification_fails(
+    tmp_path, monkeypatch
+):
+    """No answer from the classifier leaves the file at __PENDING__ -- it is
+    NOT stamped 'both' (my-podcasts-6fk). Readers fall back to the category."""
     entry = _make_semafor_entry("Some Article", "Technology", "2026-03-20")
     feed = MagicMock()
     feed.entries = [entry]
@@ -349,13 +366,14 @@ def test_sync_semafor_routing_fallback_on_classification_failure(tmp_path, monke
         patch("pipeline.source_cache.fetch_feed", return_value=feed),
         patch(
             "pipeline.source_cache.classify_semafor_articles",
-            return_value={0: "both"},
+            return_value={},
         ),
     ):
         new_files = sync_semafor_cache(tmp_path)
 
     content = new_files[0].read_text()
-    assert "Routing: both" in content
+    assert "Routing: __PENDING__" in content
+    assert "Routing: both" not in content
 
 
 def test_sync_antiwar_rss_summary_entities_are_decoded(tmp_path):
@@ -414,8 +432,8 @@ def test_sync_semafor_description_entities_are_decoded(tmp_path):
     assert "\u2026" in body
 
 
-def test_classify_semafor_articles_fills_missing_indices(monkeypatch):
-    """LLM omitting some indices gets them filled with 'both'."""
+def test_classify_semafor_articles_omits_missing_indices(monkeypatch):
+    """An index the model skipped is omitted (it stays pending), not 'both'."""
     mock_parsed = MagicMock()
     mock_parsed.articles = [
         MagicMock(index=0, routing="fp"),
@@ -438,4 +456,179 @@ def test_classify_semafor_articles_fills_missing_indices(monkeypatch):
             ]
         )
 
-    assert result == {0: "fp", 1: "both"}
+    assert result == {0: "fp"}
+
+
+def test_classify_semafor_articles_ignores_out_of_range_index(monkeypatch):
+    mock_parsed = MagicMock()
+    mock_parsed.articles = [
+        MagicMock(index=0, routing="th"),
+        MagicMock(index=7, routing="fp"),
+        MagicMock(index=-1, routing="fp"),
+    ]
+    mock_response = MagicMock()
+    mock_response.parsed = mock_parsed
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = mock_response
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+    with patch("pipeline.source_cache.genai") as mock_genai:
+        mock_genai.Client.return_value = mock_client
+        result = classify_semafor_articles([{"title": "Only", "description": ""}])
+
+    assert result == {0: "th"}
+
+
+# --- pending reclassification (my-podcasts-6fk) ---------------------------------
+
+
+def _pending_file(
+    cache_dir,
+    date_prefix: str,
+    title: str,
+    category: str = "Politics",
+    body: str = "Body text of the article.",
+    routing: str = "__PENDING__",
+):
+    path = cache_dir / f"{date_prefix}-{title.lower().replace(' ', '-')}.md"
+    path.write_text(
+        f"# {title}\n\nURL: https://semafor.com/{title.lower().replace(' ', '-')}\n"
+        f"Published: {date_prefix}\nSource: semafor\nCategory: {category}\n"
+        f"Routing: {routing}\nType: article\n\n{body}",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _days_ago(n: int) -> str:
+    return (datetime.now(UTC) - timedelta(days=n)).strftime("%Y-%m-%d")
+
+
+def _empty_feed():
+    feed = MagicMock()
+    feed.entries = []
+    return feed
+
+
+def test_next_sync_reclassifies_pending_files_inside_the_window(tmp_path):
+    recent = _pending_file(tmp_path, _days_ago(3), "Recent Story", body="R" * 500)
+    edge = _pending_file(tmp_path, _days_ago(14), "Edge Story")
+    seen: list[list[dict]] = []
+
+    def classify(articles):
+        seen.append(articles)
+        return {0: "fp", 1: "th"}
+
+    with (
+        patch("pipeline.source_cache.fetch_feed", return_value=_empty_feed()),
+        patch("pipeline.source_cache.classify_semafor_articles", classify),
+    ):
+        new_files = sync_semafor_cache(tmp_path)
+
+    assert new_files == []  # return value is newly written files only
+    assert len(seen) == 1
+    titles = {a["title"] for a in seen[0]}
+    assert titles == {"Recent Story", "Edge Story"}
+    by_title = {a["title"]: a for a in seen[0]}
+    # The description of an existing file is the first 300 chars of its body.
+    assert by_title["Recent Story"]["description"] == "R" * 300
+    routings = {
+        "Recent Story": recent.read_text(),
+        "Edge Story": edge.read_text(),
+    }
+    assert sum("Routing: fp" in t for t in routings.values()) == 1
+    assert sum("Routing: th" in t for t in routings.values()) == 1
+    assert all("__PENDING__" not in t for t in routings.values())
+
+
+def test_reclassification_leaves_old_unknown_and_already_routed_files_alone(tmp_path):
+    old = _pending_file(tmp_path, _days_ago(15), "Old Story")
+    unknown = tmp_path / "unknown-mystery-story.md"
+    unknown.write_text(
+        "# Mystery Story\n\nURL: u\nPublished: unknown\nSource: semafor\n"
+        "Category: Politics\nRouting: __PENDING__\nType: article\n\nBody",
+        encoding="utf-8",
+    )
+    routed = _pending_file(tmp_path, _days_ago(1), "Routed Story", routing="th")
+    originals = {p: p.read_text() for p in (old, unknown, routed)}
+    calls: list[list[dict]] = []
+
+    with (
+        patch("pipeline.source_cache.fetch_feed", return_value=_empty_feed()),
+        patch(
+            "pipeline.source_cache.classify_semafor_articles",
+            lambda articles: calls.append(articles) or {},
+        ),
+    ):
+        sync_semafor_cache(tmp_path)
+
+    assert calls == []  # nothing eligible: the classifier is not even asked
+    assert {p: p.read_text() for p in originals} == originals
+
+
+def test_new_and_pending_articles_are_classified_in_one_call(tmp_path):
+    pending = _pending_file(tmp_path, _days_ago(2), "Pending Story")
+    feed = MagicMock()
+    feed.entries = [_make_semafor_entry("Brand New Story", "Gulf", _days_ago(0))]
+    calls: list[list[dict]] = []
+
+    def classify(articles):
+        calls.append(articles)
+        return dict.fromkeys(range(len(articles)), "fp")
+
+    with (
+        patch("pipeline.source_cache.fetch_feed", return_value=feed),
+        patch("pipeline.source_cache.classify_semafor_articles", classify),
+    ):
+        new_files = sync_semafor_cache(tmp_path)
+
+    assert len(calls) == 1
+    assert {a["title"] for a in calls[0]} == {"Brand New Story", "Pending Story"}
+    assert len(new_files) == 1
+    assert "Routing: fp" in new_files[0].read_text()
+    assert "Routing: fp" in pending.read_text()
+
+
+def test_partial_reply_patches_only_covered_indices(tmp_path):
+    feed = MagicMock()
+    feed.entries = [
+        _make_semafor_entry("Story A", "Gulf", _days_ago(0)),
+        _make_semafor_entry("Story B", "Gulf", _days_ago(0)),
+    ]
+
+    with (
+        patch("pipeline.source_cache.fetch_feed", return_value=feed),
+        patch(
+            "pipeline.source_cache.classify_semafor_articles",
+            return_value={0: "th"},  # index 1 unanswered
+        ),
+    ):
+        new_files = sync_semafor_cache(tmp_path)
+
+    texts = [f.read_text() for f in new_files]
+    assert sum("Routing: th" in t for t in texts) == 1
+    assert sum("Routing: __PENDING__" in t for t in texts) == 1
+
+
+def test_failed_classification_then_recovery_across_syncs(tmp_path):
+    """The 2026-10-20 shape: a 402 at sync time must not stick for 180 days."""
+    feed = MagicMock()
+    feed.entries = [_make_semafor_entry("Story A", "Gulf", _days_ago(0))]
+
+    with (
+        patch("pipeline.source_cache.fetch_feed", return_value=feed),
+        patch("pipeline.source_cache.classify_semafor_articles", return_value={}),
+    ):
+        (path,) = sync_semafor_cache(tmp_path)
+    assert "Routing: __PENDING__" in path.read_text()
+
+    with (
+        patch("pipeline.source_cache.fetch_feed", return_value=feed),
+        patch(
+            "pipeline.source_cache.classify_semafor_articles",
+            return_value={0: "fp"},
+        ),
+    ):
+        assert sync_semafor_cache(tmp_path) == []  # nothing new written
+    assert "Routing: fp" in path.read_text()
+    assert "__PENDING__" not in path.read_text()

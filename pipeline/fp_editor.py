@@ -85,6 +85,12 @@ def generate_fp_research_plan(
         for script in context_scripts:
             prompt += f"\n---\n{script}\n"
 
+    # A failed call or an unusable reply must FAIL the job, never degrade to an
+    # empty plan: collection persists plan.json, and every retry reuses it, and
+    # an empty plan used to let the writer invent a "thin news day" briefing
+    # (bead qd5, my-podcasts-6fk). The original exception stays as __cause__ so
+    # the consumer's quota detection (pipeline/gemini_quota.py) can still see an
+    # APIError code.
     try:
         response = client.models.generate_content(
             model="gemini-3.8-flash",
@@ -95,10 +101,11 @@ def generate_fp_research_plan(
                 temperature=0.1,
             ),
         )
-        parsed = response.parsed
-        if isinstance(parsed, FPResearchPlan):
-            return parsed
-        return _EMPTY_PLAN
     except Exception as e:
-        print(f"Error generating FP research plan: {e}")
-        return _EMPTY_PLAN
+        raise RuntimeError(
+            f"FP editor: Gemini call failed: {type(e).__name__}: {e}"
+        ) from e
+    parsed = response.parsed
+    if not isinstance(parsed, FPResearchPlan):
+        raise RuntimeError("FP editor: Gemini reply did not parse into a research plan")
+    return parsed

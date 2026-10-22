@@ -186,7 +186,7 @@ Four lessons:
   test, because the narrowed glob already covered the tested case. The regex was still
   load-bearing for a different filename shape, which now has its own test.
 
-### 1. Writer robustness — ~~`xlf`~~ DONE (PR #16) + `qd5` + `98p` (P2)
+### 1. Writer robustness — ~~`xlf`~~ DONE (PR #16) + ~~`qd5`~~ DONE (shipped with `6fk`) + `98p` (P2)
 
 **Promoted to the top after `ne0` fired in production on 2026-08-18**, shipping a
 2636-byte FP Digest episode (a normal one is ~3 MB). The model emitted a
@@ -223,12 +223,12 @@ tag in the model's reasoning (3382 chars of reasoning published), and raw-output
 persistence was non-atomic, so a truncation mid-`<script>` re-parsed into a
 clean-looking **half script** that passed every refusal (3072 chars, mid-sentence).
 
-Remaining in this piece: `qd5`, plus the three beads that PR opened —
+Remaining in this piece: ~~`qd5`~~ DONE (shipped with `6fk`: `generate_fp_script` now refuses an input with no article text, and both daily editors raise on a Gemini failure instead of persisting an empty plan), plus the three beads that PR opened —
 `p4c` (mangled tag mid-tail narrates `</scrip>` and trailing chatter — degraded,
 not fabricated), `r8a` (`parse_covered` never got the longest-block and
 case-insensitive hardening its siblings have), and the still-open `9r5`.
 
-`qd5` is FP Digest hallucinating a "thin news day" briefing from an empty plan —
+`qd5` (done) was FP Digest hallucinating a "thin news day" briefing from an empty plan —
 same family ("the LLM did something we didn't expect and we published it
 anyway"), sensible in the same pass.
 
@@ -237,7 +237,7 @@ dry-run assembler) belongs here now: the Rundown fix in PR #11 is the template,
 and `qd5` is the FP twin of the zero-sections guard that PR added — do them in
 one pass over `fp_writer.py` rather than three.
 
-### 2. The FP Digest spine — `4uz` → `98p`+`qd5` → `wfh`+`5m3`+`8m8`
+### 2. The FP Digest spine — `4uz` → `98p`+~~`qd5`~~ → `wfh`+`5m3`+`8m8`
 
 FP Digest has accumulated five open beads across three files. They are ordered
 here as one spine because **the order is the whole design** — get it wrong and
@@ -288,7 +288,7 @@ Measured while building it, and worth keeping: `directives_fp_routed == 0` and
 `directives_episode == directives_total` on **all 13** real FP work dirs, so the
 episode/fp-routed split is degenerate for FP and its `PLAN` line drops it.
 
-**FP-B. Writer robustness — `98p` + `qd5` (P2).** Already piece 1 above; it adds
+**FP-B. Writer robustness — `98p` + ~~`qd5`~~ DONE (P2).** Already piece 1 above; it adds
 `writer_inputs.json` and therefore the report's `WRITE` line.
 
 **FP-C. One pass over `fp_collector.py` — `wfh` + `5m3` + `8m8` (P2/P3).** The

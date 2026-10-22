@@ -19,7 +19,7 @@ from pipeline.freshness import (
     classify_headlines,
     format_coverage_ledger,
 )
-from pipeline.rss_sources import categorize_semafor_article
+from pipeline.rss_sources import semafor_routing
 
 
 def _extract_article_text(url: str) -> str:
@@ -398,8 +398,9 @@ def collect_fp_artifacts(
                 continue
 
             # Prefer Routing header; fall back to category-based classification
-            if not routing:
-                routing = categorize_semafor_article(category)
+            # when it is absent (legacy file) or still __PENDING__ (the
+            # sync-time classification failed and awaits a retry).
+            routing = semafor_routing(routing, category)
             if routing not in ("fp", "both"):
                 continue
 

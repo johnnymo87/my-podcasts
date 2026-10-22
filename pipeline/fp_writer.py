@@ -133,6 +133,21 @@ def generate_fp_script(
     deleted so the next retry regenerates instead of looping on the same
     broken content.
     """
+    # Refuse to generate from nothing (bead qd5). With no article text the
+    # prompt carries empty STORIES BY THEME headers while still asking for a
+    # briefing, and the model writes a plausible "thin news day" episode from
+    # parametric memory that passes every length floor and ships (2026-05-26).
+    # Checked per theme in ``themes`` -- the same set build_fp_prompt renders --
+    # so text filed under an orphan theme, which never reaches the prompt,
+    # counts as empty. Raising lets the consumer back off and retry, and the
+    # retry-exhaustion alert fires if it never recovers. Checked before the
+    # raw_writer_output.txt reuse path so a retry cannot launder a fabricated
+    # script from an earlier empty run. (Mirrors generate_rundown_script.)
+    if not any(
+        text.strip() for theme in themes for text in articles_by_theme.get(theme, [])
+    ):
+        raise RuntimeError("FP digest writer refused: no theme has any article text")
+
     raw_path = work_dir / "raw_writer_output.txt" if work_dir else None
 
     if raw_path is not None and raw_path.exists():

@@ -2107,3 +2107,375 @@ def test_flat_tier_requires_the_full_numbered_prefix(tmp_path):
 
     text, path, reason = find_rundown_article_source(D(), tmp_path)
     assert path is None
+
+
+def test_collect_all_artifacts_leaves_no_sentinels_when_editor_raises(tmp_path) -> None:
+    """A failed editor call must not leave a plan.json (or collection_done.json)
+    for the retry to reuse -- the poisoned-empty-plan bug (my-podcasts-6fk)."""
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    work_dir = tmp_path / "work"
+
+    with (
+        patch(
+            "pipeline.things_happen_collector.generate_rundown_research_plan",
+            side_effect=RuntimeError("Rundown editor: Gemini call failed: boom"),
+        ),
+        patch("pipeline.things_happen_collector.sync_zvi_cache"),
+        pytest.raises(RuntimeError, match="Gemini call failed"),
+    ):
+        collect_all_artifacts(
+            "job123",
+            work_dir,
+            levine_cache_dir=levine_cache,
+            semafor_cache_dir=semafor_cache,
+            zvi_cache_dir=tmp_path / "zvi-cache",
+        )
+
+    assert not (work_dir / "plan.json").exists()
+    assert not (work_dir / "collection_done.json").exists()
+
+
+def _run_rundown_collector_on_semafor_cache(tmp_path, monkeypatch, files):
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", lambda u: u
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_rundown_research_plan",
+        lambda *a, **kw: RundownResearchPlan(themes=[], directives=[]),
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.sync_zvi_cache", lambda cache_dir: []
+    )
+    today = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    semafor_cache = tmp_path / "semafor-cache"
+    semafor_cache.mkdir()
+    for slug, headline, category, routing in files:
+        (semafor_cache / f"{today}-{slug}.md").write_text(
+            f"# {headline}\n\nURL: https://semafor.com/{slug}\nPublished: {today}\n"
+            f"Source: semafor\nCategory: {category}\nRouting: {routing}\n"
+            f"Type: article\n\nBody of {headline}."
+        )
+    levine_cache = tmp_path / "levine-cache"
+    levine_cache.mkdir()
+    work_dir = tmp_path / "work"
+    collect_all_artifacts(
+        "test-pending-routing",
+        work_dir,
+        levine_cache_dir=levine_cache,
+        semafor_cache_dir=semafor_cache,
+    )
+    return work_dir
+
+
+def test_pending_semafor_file_routes_by_category_not_dropped(tmp_path, monkeypatch):
+    """A file still at Routing: __PENDING__ (classification failed) is routed by
+    its category: a 'th' category reaches the Rundown, an 'fp' one does not."""
+    work_dir = _run_rundown_collector_on_semafor_cache(
+        tmp_path,
+        monkeypatch,
+        [
+            ("tech-pending", "Tech Pending Story", "Technology", "__PENDING__"),
+            ("gulf-pending", "Gulf Pending Story", "Gulf", "__PENDING__"),
+        ],
+    )
+
+    texts = [f.read_text() for f in (work_dir / "articles" / "semafor").glob("*.md")]
+    assert len(texts) == 1
+    assert "Tech Pending Story" in texts[0]
+    sentinel = json.loads((work_dir / "collection_done.json").read_text())
+    assert sentinel["candidates"]["semafor"] == 2
+    assert sentinel["routed_away"]["semafor"] == 1
+
+
+# --- Levine fetch reuse across retries (my-podcasts-6fk review) -----------------
+
+
+_RAW = {
+    "a": "http://raw.test/a",
+    "b": "http://raw.test/b",
+    "c": "http://raw.test/c",
+}
+
+
+class _LevineNet:
+    """Records the network the collector would have touched, and answers it."""
+
+    def __init__(self, tiers: dict[str, str], *, resolve_to_self: bool = False):
+        # key -> tier the next fetch of it returns; "http_error:503" also sets
+        # the HTTP status (a bare "http_error" is a 404).
+        self.tiers = dict(tiers)
+        self.resolve_to_self = resolve_to_self  # HEAD "failed": url unchanged
+        self.resolved: list[str] = []
+        self.fetched: list[str] = []
+
+    def resolve(self, raw_url: str) -> str:
+        self.resolved.append(raw_url)
+        if self.resolve_to_self:
+            return raw_url
+        return raw_url.replace("raw.test", "real.test")
+
+    def fetch(self, links, delay_between=1.0):
+        out = []
+        for link in links:
+            key = link["resolved_url"].rsplit("/", 1)[1]
+            self.fetched.append(key)
+            tier, _, status = self.tiers[key].partition(":")
+            http_status = int(status or 404) if tier == "http_error" else 0
+            content = (
+                f"Full body of {key} " * 20
+                if tier == "live"
+                else link["headline_context"]
+            )
+            out.append(
+                Article(
+                    headline=link["headline_context"],
+                    url=link["resolved_url"],
+                    content=content,
+                    source_tier=tier,
+                    extracted_chars=len(content) if tier == "live" else 0,
+                    http_status=http_status,
+                )
+            )
+        return out
+
+
+def _collect_levine(
+    tmp_path, monkeypatch, net, *, work_dir, plan=None, prior_urls=None
+):
+    """Run the collector over a Levine cache of links a, b, c."""
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.resolve_redirect_url", net.resolve
+    )
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.fetch_all_articles", net.fetch
+    )
+    monkeypatch.setattr("pipeline.things_happen_collector.sync_zvi_cache", lambda d: [])
+
+    def fake_plan(*a, **kw):
+        if isinstance(plan, BaseException):
+            raise plan
+        return RundownResearchPlan(themes=[], directives=[])
+
+    monkeypatch.setattr(
+        "pipeline.things_happen_collector.generate_rundown_research_plan", fake_plan
+    )
+    today = datetime.now(tz=ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    levine = tmp_path / "levine-cache"
+    levine.mkdir(exist_ok=True)
+    (levine / f"{today}.json").write_text(
+        json.dumps(
+            [
+                {"raw_url": raw, "headline_context": f"Headline {k}"}
+                for k, raw in _RAW.items()
+            ]
+        )
+    )
+    semafor = tmp_path / "semafor-cache"
+    semafor.mkdir(exist_ok=True)
+    collect_all_artifacts(
+        "job-levine",
+        work_dir,
+        levine_cache_dir=levine,
+        semafor_cache_dir=semafor,
+        zvi_cache_dir=tmp_path / "zvi-cache",  # never read the host's real cache
+        prior_urls=prior_urls,
+    )
+
+
+def _snapshot(work_dir) -> dict:
+    return {
+        "articles": {
+            p.name: p.read_text() for p in sorted((work_dir / "articles").glob("*.md"))
+        },
+        "tiers": json.loads((work_dir / "tiers.json").read_text()),
+        "index": json.loads((work_dir / "headline_index.json").read_text()),
+    }
+
+
+def test_levine_fetch_is_persisted_before_the_editor_runs(
+    tmp_path, monkeypatch
+) -> None:
+    net = _LevineNet({"a": "live", "b": "paywalled", "c": "fetch_error"})
+    work_dir = tmp_path / "work"
+    with pytest.raises(RuntimeError, match="editor down"):
+        _collect_levine(
+            tmp_path,
+            monkeypatch,
+            net,
+            work_dir=work_dir,
+            plan=RuntimeError("editor down"),
+        )
+
+    saved = json.loads((work_dir / "levine_fetch.json").read_text())
+    assert set(saved) == set(_RAW.values())
+    entry = saved[_RAW["a"]]
+    assert set(entry) >= {
+        "resolved_url",
+        "headline",
+        "url",
+        "content",
+        "source_tier",
+        "extracted_chars",
+    }
+    assert entry["source_tier"] == "live"
+    assert saved[_RAW["c"]]["source_tier"] == "fetch_error"
+    assert not list(work_dir.glob("levine_fetch.json.tmp*"))  # atomic write
+
+
+def test_retry_reuses_live_and_paywalled_and_refetches_transient(
+    tmp_path, monkeypatch
+) -> None:
+    net = _LevineNet({"a": "live", "b": "paywalled", "c": "fetch_error"})
+    work_dir = tmp_path / "work"
+    with pytest.raises(RuntimeError):
+        _collect_levine(
+            tmp_path, monkeypatch, net, work_dir=work_dir, plan=RuntimeError("402")
+        )
+    assert net.resolved == list(_RAW.values())
+    assert net.fetched == ["a", "b", "c"]
+
+    # Retry: the network now works for c.
+    net.tiers["c"] = "live"
+    net.resolved.clear()
+    net.fetched.clear()
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+
+    # a (live) and b (paywalled) cost nothing; only the transient c is
+    # re-fetched, and its already-resolved redirect is not re-resolved.
+    assert net.resolved == []
+    assert net.fetched == ["c"]
+    saved = json.loads((work_dir / "levine_fetch.json").read_text())
+    assert saved[_RAW["c"]]["source_tier"] == "live"  # merged back
+
+    # And the output equals a fresh run that saw the same fetch results.
+    fresh = _LevineNet({"a": "live", "b": "paywalled", "c": "live"})
+    fresh_dir = tmp_path / "fresh"
+    _collect_levine(tmp_path, monkeypatch, fresh, work_dir=fresh_dir)
+    assert _snapshot(work_dir) == _snapshot(fresh_dir)
+
+
+@pytest.mark.parametrize("tier", ["http_error", "http_error:403", "http_error:404"])
+def test_http_error_is_reused_with_zero_network_calls(
+    tmp_path, monkeypatch, tier
+) -> None:
+    """A publisher answering 403/404 to a bot is the common production case;
+    asking again gets the same answer, so it must not be re-asked."""
+    net = _LevineNet({"a": tier, "b": tier, "c": tier})
+    work_dir = tmp_path / "work"
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+    net.resolved.clear()
+    net.fetched.clear()
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+    assert net.fetched == []
+    assert net.resolved == []
+
+
+@pytest.mark.parametrize("tier", ["http_error:429", "http_error:500", "http_error:503"])
+def test_throttle_and_server_errors_are_refetched(tmp_path, monkeypatch, tier) -> None:
+    net = _LevineNet({"a": tier, "b": tier, "c": tier})
+    work_dir = tmp_path / "work"
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+    saved = json.loads((work_dir / "levine_fetch.json").read_text())
+    assert saved[_RAW["a"]]["http_status"] == int(tier.split(":")[1])
+    net.resolved.clear()
+    net.fetched.clear()
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+    assert net.fetched == ["a", "b", "c"]
+    # ...but the redirect already resolved to a new URL, so it is not re-HEADed.
+    assert net.resolved == []
+
+
+def test_fetch_error_is_refetched_without_repeating_a_successful_resolve(
+    tmp_path, monkeypatch
+) -> None:
+    net = _LevineNet({"a": "fetch_error", "b": "fetch_error", "c": "fetch_error"})
+    work_dir = tmp_path / "work"
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+    net.resolved.clear()
+    net.fetched.clear()
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+    assert net.fetched == ["a", "b", "c"]
+    assert net.resolved == []  # resolved_url differs from raw_url: kept
+
+
+def test_unchanged_resolved_url_on_a_transient_failure_is_re_resolved(
+    tmp_path, monkeypatch
+) -> None:
+    """resolved == raw is what a failed HEAD looks like, so it is re-asked."""
+    net = _LevineNet(
+        {"a": "fetch_error", "b": "fetch_error", "c": "fetch_error"},
+        resolve_to_self=True,
+    )
+    work_dir = tmp_path / "work"
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+    net.resolved.clear()
+    net.fetched.clear()
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+    assert net.fetched == ["a", "b", "c"]
+    assert net.resolved == list(_RAW.values())
+
+
+@pytest.mark.parametrize("garbage", ["{not json", "[]", '{"http://raw.test/a": 5}', ""])
+def test_corrupt_levine_fetch_file_is_ignored(tmp_path, monkeypatch, garbage) -> None:
+    net = _LevineNet({"a": "live", "b": "paywalled", "c": "live"})
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "levine_fetch.json").write_text(garbage)
+
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+
+    assert net.fetched == ["a", "b", "c"]
+    assert net.resolved == list(_RAW.values())
+    # ...and the bad file was replaced by a good one.
+    assert set(json.loads((work_dir / "levine_fetch.json").read_text())) == set(
+        _RAW.values()
+    )
+
+
+def test_changed_headline_for_a_raw_url_is_not_reused(tmp_path, monkeypatch) -> None:
+    net = _LevineNet({"a": "paywalled", "b": "live", "c": "live"})
+    work_dir = tmp_path / "work"
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+    saved = json.loads((work_dir / "levine_fetch.json").read_text())
+    saved[_RAW["a"]]["headline"] = "Some Other Headline"
+    (work_dir / "levine_fetch.json").write_text(json.dumps(saved))
+    net.resolved.clear()
+    net.fetched.clear()
+
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir)
+
+    assert net.fetched == ["a"]  # a paywalled entry's content IS its headline
+
+
+def test_dedup_still_applies_to_reused_urls_and_costs_no_resolve(
+    tmp_path, monkeypatch
+) -> None:
+    net = _LevineNet({"a": "live", "b": "live", "c": "live"})
+    work_dir = tmp_path / "work"
+    prior = {"http://real.test/a"}
+    with pytest.raises(RuntimeError):
+        _collect_levine(
+            tmp_path,
+            monkeypatch,
+            net,
+            work_dir=work_dir,
+            plan=RuntimeError("402"),
+            prior_urls=prior,
+        )
+    assert net.fetched == ["b", "c"]  # a was deduped before fetching
+
+    net.resolved.clear()
+    net.fetched.clear()
+    _collect_levine(tmp_path, monkeypatch, net, work_dir=work_dir, prior_urls=prior)
+
+    assert net.resolved == []  # not even the deduped link is re-resolved
+    assert net.fetched == []
+    snap = _snapshot(work_dir)
+    assert sorted(snap["index"]) == ["Headline b", "Headline c"]
+    assert sorted(snap["articles"]) == ["00-headline-b.md", "01-headline-c.md"]

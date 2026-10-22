@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import requests
 
-from pipeline import podcast_executor, podcast_poller
+from pipeline import gemini_quota, podcast_executor, podcast_poller
 from pipeline.article_resolver import OPEN_ACCESS_HEADING as _OPEN_ACCESS_HEADING
 from pipeline.fp_collector import _slugify, collect_fp_artifacts
 from pipeline.fp_editor import FPResearchPlan
@@ -59,6 +59,19 @@ def _compute_lookback(
     if days is None:
         return default
     return min(max(2, days + 1), cap)
+
+
+def _alert_if_gemini_quota(exc: BaseException, label: str) -> None:
+    """Say so once if a daily job failed on a Gemini billing/quota error.
+
+    Runs inside the job's failure handler, after the failure was recorded, so it
+    must never raise: ``alert_account_quota`` already swallows its own errors,
+    and the guard here covers the call itself.
+    """
+    try:
+        gemini_quota.alert_account_quota(exc, label)
+    except Exception as alert_exc:  # noqa: BLE001
+        print(f"Gemini quota alert for {label} failed: {alert_exc}")
 
 
 def _report_run_stats(
@@ -685,6 +698,7 @@ def consume_forever(
 
                 except Exception as exc:
                     retry = store.mark_the_rundown_failed(job["id"], str(exc))
+                    _alert_if_gemini_quota(exc, "The Rundown")
                     if retry.exhausted:
                         print(
                             f"Failed Rundown job {job['id']}: {exc} "
@@ -849,6 +863,7 @@ def consume_forever(
                         # Next loop will pick up the script and run TTS
                 except Exception as exc:
                     retry = store.mark_fp_digest_failed(job["id"], str(exc))
+                    _alert_if_gemini_quota(exc, "FP Digest")
                     if retry.exhausted:
                         print(
                             f"Failed FP digest job {job['id']}: {exc} "

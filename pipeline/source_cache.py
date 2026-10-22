@@ -5,7 +5,7 @@ import html as html_mod
 import logging
 import os
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import trafilatura
@@ -15,7 +15,13 @@ from pydantic import BaseModel
 
 from pipeline.article_resolver import slugify as _slugify
 from pipeline.fp_homepage_scraper import scrape_homepage
-from pipeline.rss_sources import FP_DIGEST_RSS_SOURCES, SEMAFOR, fetch_feed
+from pipeline.rss_sources import (
+    FP_DIGEST_RSS_SOURCES,
+    ROUTING_PENDING,
+    SEMAFOR,
+    SEMAFOR_ROUTINGS,
+    fetch_feed,
+)
 
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -76,20 +82,21 @@ def classify_semafor_articles(
         articles: list of dicts with 'title' and 'description' keys.
 
     Returns:
-        dict mapping article index to routing string.
-        Falls back to 'both' for all articles on any failure.
+        dict mapping article index to routing string, containing ONLY the
+        valid routings (fp/th/both/skip) the model actually gave. An index the
+        model skipped, answered with an invalid value, or that is out of range
+        is omitted, and the whole dict is ``{}`` on a missing API key, an
+        exception, or an unparseable reply. Nothing is invented: a caller leaves
+        an unanswered article ``__PENDING__`` and retries it on the next sync,
+        instead of stamping 'both' on it for the cache's 180-day retention.
     """
     if not articles:
         return {}
 
-    fallback = dict.fromkeys(range(len(articles)), "both")
-
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        logger.warning(
-            "GEMINI_API_KEY not set; defaulting all Semafor routing to 'both'"
-        )
-        return fallback
+        logger.warning("GEMINI_API_KEY not set; Semafor routing stays pending")
+        return {}
 
     lines = []
     for i, art in enumerate(articles):
@@ -114,26 +121,72 @@ def classify_semafor_articles(
         )
         parsed = response.parsed
         if parsed and parsed.articles:
-            result = {}
+            result: dict[int, str] = {}
             for art in parsed.articles:
                 routing = art.routing.strip().lower()
-                if routing in ("fp", "th", "both", "skip"):
+                if routing in SEMAFOR_ROUTINGS and 0 <= art.index < len(articles):
                     result[art.index] = routing
-                else:
-                    result[art.index] = "both"
-            # Fill in any missing indices
-            for i in range(len(articles)):
-                if i not in result:
-                    result[i] = "both"
             return result
     except Exception:
-        logger.exception("Gemini Semafor classification failed; defaulting to 'both'")
+        logger.exception("Gemini Semafor classification failed; routing stays pending")
 
-    return fallback
+    return {}
+
+
+# A file still pending after this long is left to the category fallback (which
+# readers already apply): by then the article is older than any lookback window
+# (max 14 days), so classifying it would only spend tokens.
+PENDING_RECLASSIFY_DAYS = 14
+_FILE_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-")
+_PENDING_LINE = f"Routing: {ROUTING_PENDING}"
+_DESCRIPTION_CHARS = 300
+
+
+def _pending_semafor_articles(
+    cache_dir: Path, exclude: set[Path]
+) -> list[tuple[Path, dict]]:
+    """Existing cache files still at ``Routing: __PENDING__``, newest window only.
+
+    Only files whose name starts with a ``YYYY-MM-DD`` date within the last
+    ``PENDING_RECLASSIFY_DAYS`` days qualify; ``unknown-...`` files are skipped.
+    The description is the first 300 chars of the body (the RSS description is
+    not stored in the file).
+    """
+    cutoff = (datetime.now(UTC) - timedelta(days=PENDING_RECLASSIFY_DAYS)).strftime(
+        "%Y-%m-%d"
+    )
+    found: list[tuple[Path, dict]] = []
+    for path in sorted(cache_dir.glob("*.md")):
+        if path in exclude:
+            continue
+        match = _FILE_DATE_RE.match(path.name)
+        if match is None or match.group(1) < cutoff:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        lines = text.split("\n", 10)
+        if _PENDING_LINE not in lines[:10]:
+            continue
+        title = " ".join(lines[0].lstrip("# ").split())
+        if not title:
+            continue
+        parts = text.split("\n\n", 2)
+        body = parts[2].strip() if len(parts) > 2 else ""
+        found.append((path, {"title": title, "description": body[:_DESCRIPTION_CHARS]}))
+    return found
 
 
 def sync_semafor_cache(cache_dir: Path) -> list[Path]:
-    """Fetch Semafor RSS and cache all articles. Returns newly-written paths."""
+    """Fetch Semafor RSS and cache all articles. Returns newly-written paths.
+
+    New files are written with ``Routing: __PENDING__`` and classified together
+    with older files still pending (see ``_pending_semafor_articles``), so a
+    classification that failed once (Gemini outage, 402) is retried on the next
+    sync instead of sticking. Only files the model answered are patched; the
+    rest stay pending, and readers route those by category meanwhile.
+    """
     try:
         feed = fetch_feed(SEMAFOR.feed_url)
     except Exception as e:
@@ -182,7 +235,7 @@ def sync_semafor_cache(cache_dir: Path) -> list[Path]:
             f"Published: {date_str}\n"
             f"Source: semafor\n"
             f"Category: {category}\n"
-            f"Routing: __PENDING__\n"
+            f"{_PENDING_LINE}\n"
             f"Type: article\n\n"
             f"{text}"
         )
@@ -190,14 +243,22 @@ def sync_semafor_cache(cache_dir: Path) -> list[Path]:
         new_files.append(path)
         new_articles.append({"title": title, "description": description})
 
-    # Classify new articles and patch routing into files
-    if new_articles:
-        routings = classify_semafor_articles(new_articles)
-        for i, path in enumerate(new_files):
-            routing = routings.get(i, "both")
-            content = path.read_text(encoding="utf-8")
-            content = content.replace("Routing: __PENDING__", f"Routing: {routing}", 1)
-            path.write_text(content, encoding="utf-8")
+    # Classify the new articles and any recent ones still pending, and patch
+    # routing into the files the model answered.
+    to_classify = list(zip(new_files, new_articles, strict=True))
+    to_classify += _pending_semafor_articles(cache_dir, exclude=set(new_files))
+    if to_classify:
+        routings = classify_semafor_articles([art for _, art in to_classify])
+        for i, (path, _) in enumerate(to_classify):
+            routing = routings.get(i)
+            if routing is None:
+                continue
+            try:
+                content = path.read_text(encoding="utf-8")
+                content = content.replace(_PENDING_LINE, f"Routing: {routing}", 1)
+                path.write_text(content, encoding="utf-8")
+            except OSError:
+                logger.exception("could not patch Semafor routing into %s", path)
 
     return new_files
 
