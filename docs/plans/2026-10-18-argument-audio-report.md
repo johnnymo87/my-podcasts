@@ -33,7 +33,15 @@ Work in `/home/dev/projects/my-podcasts/.worktrees/argument-audio-report`.
 
 ## Handoff state (keep current)
 
-- **Status 2026-10-20 (latest, supersedes below):** Phase 2 shipped (#38,
+- **Status 2026-10-22 (latest, supersedes below):** #41 (asymmetric duration
+  tolerance, b50e722) merged and deployed 2026-10-20; the Oct 22 episode was
+  auto-discovered (poll) and published unattended 2026-10-22 ~11:39Z (child
+  371 s, decoded-rss +162 s of 1099 s allowed, no skips); `my-podcasts-bw3`
+  and `my-podcasts-oqf` closed; `my-podcasts-5n5` closed won't-do (reopen if
+  splits become routine or per-leaf rate rules change); `my-podcasts-qez`
+  (this change: Gemini 402/429 account-quota pause) in review;
+  `my-podcasts-6fk` (P3) tracks quota detection outside podcast reports.
+- **Status 2026-10-20 (superseded):** Phase 2 shipped (#38,
   2633aa7); blocked-piece split #39 (6892f3d) and edge-ad skip #40 (29385a1)
   merged and deployed; all 4 backfill Reports (Sep 10, Oct 1, Oct 8, Oct 15)
   published 2026-10-20 (Oct 8/15 split to depth 3, `asr_skipped_s` 0); R2
