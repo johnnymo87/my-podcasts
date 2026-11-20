@@ -160,6 +160,52 @@ def test_hidden_content_removed() -> None:
     assert "Hidden preview text" not in result["body"]
 
 
+@pytest.mark.parametrize(
+    "style",
+    [
+        # Bloomberg's Money Stuff preheader since 2026-10-26: no space.
+        "display:none;max-height:0;overflow:hidden",
+        "display:none!important;line-height:0px!important;",
+        "DISPLAY : NONE",
+        "color:red; display:\tnone",
+    ],
+)
+def test_hidden_content_removed_regardless_of_spacing(style: str) -> None:
+    """``display:none`` hides an element however it is spaced. The preheader
+    it hides (a subtitle padded with hundreds of zero-width non-joiners) used
+    to leak into the TTS text and make Gemini skip the opening of the episode.
+    """
+    padding = "\u200c " * 250
+    email_text = (
+        "Date: Wed, 29 Jan 2025 12:00:00 +0000\n"
+        "Subject: Money Stuff: Hidden Test\n"
+        'Content-Type: text/html; charset="UTF-8"\n'
+        "MIME-Version: 1.0\n\n"
+        f'<html><body><div style="{style}">BDCs, day trading. {padding}</div>'
+        "<p>Visible paragraph.</p></body></html>\n"
+    )
+    body = EmailProcessor(email_text).parse()["body"]
+    assert "BDCs" not in body
+    assert "\u200c" not in body
+    assert body == "Visible paragraph."
+
+
+def test_display_property_lookalikes_are_kept() -> None:
+    """Only ``display`` itself hides; ``mso-display:none`` or a value like
+    ``none-ish`` does not match a broader pattern by accident."""
+    email_text = (
+        "Date: Wed, 29 Jan 2025 12:00:00 +0000\n"
+        "Subject: Lookalike\n"
+        'Content-Type: text/html; charset="UTF-8"\n'
+        "MIME-Version: 1.0\n\n"
+        '<html><body><div style="mso-display:none">Kept one.</div>'
+        '<p style="display:block">Kept two.</p></body></html>\n'
+    )
+    body = EmailProcessor(email_text).parse()["body"]
+    assert "Kept one." in body
+    assert "Kept two." in body
+
+
 def test_artificial_line_break_removal() -> None:
     """
     Test that artificial line breaks (e.g. '= \n') are removed.

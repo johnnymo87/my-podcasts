@@ -15,6 +15,18 @@ if TYPE_CHECKING:
     from email.message import Message
 
 
+# An inline style that hides its element. CSS allows any whitespace around the
+# colon, and senders differ: Bloomberg's Money Stuff preheader has been
+# ``display:none`` (no space) since 2026-10-26, which the old substring
+# selector ``[style*="display: none"]`` missed, so its hidden subtitle and
+# 250 zero-width non-joiners reached the TTS text. The lookbehind keeps
+# ``mso-display`` and the like from matching; ``\b`` rejects ``none-ish``.
+# Known blind spot: an inline display:none that a <style> rule reveals with
+# !important (Bloomberg's ``mq-lishow`` mobile blocks) is removed too. Every
+# such element in the archive was empty as of 2026-11-20.
+_HIDDEN_STYLE = re.compile(r"(?<![\w-])display\s*:\s*none\b", re.IGNORECASE)
+
+
 class NoHtmlContentFoundError(Exception):
     """Raised when no HTML part is found in the email."""
 
@@ -153,9 +165,11 @@ class EmailProcessor:
         """
         soup = BeautifulSoup(html_content, "html.parser")
 
-        # First remove elements with style="display: none".
-        for tag in soup.select('[style*="display: none"]'):
-            tag.decompose()
+        # First remove elements hidden by an inline display:none, however
+        # spaced (see _HIDDEN_STYLE).
+        for tag in soup.find_all(style=_HIDDEN_STYLE):
+            if not tag.decomposed:
+                tag.decompose()
 
         # Identify footnote divs by id=footnote-<digits>.
         footnote_divs = soup.find_all("div", id=re.compile(r"^footnote-\d+$"))
