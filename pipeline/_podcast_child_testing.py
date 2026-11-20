@@ -162,6 +162,13 @@ def gemini_render_runner(source, item, work_dir, *, on_stage=None, **job):
         scratch_root=work / "scratch",
     )
     (work / "scratch").mkdir(exist_ok=True)
+    # Encoding is not under test (and CI has no ffmpeg): write the PCM as is.
+    from pipeline.tts import render as _render
+
+    def _fake_encode(pcm, out, **_kw):
+        Path(out).write_bytes(b"FAKEMP3" + pcm)
+
+    _render.encode_mp3 = _fake_encode  # type: ignore[assignment]
     audio = work / "episode.mp3"
     feed_slug = job["feed_slug"]
     res = tts.render_episode(
