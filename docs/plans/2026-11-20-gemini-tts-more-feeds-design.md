@@ -109,6 +109,14 @@ keep even if yglesias rolls back.
 - A fallback alert sent from the podcast child can be lost (`os._exit`), so the child's
   ok result and `stats_json` gain `tts_rendered` and `tts_fallback_reason`, and the
   executor logs a WARNING on a fallback.
+- Pre-PR diff review asked for a content check, not just a voice check. One whole
+  recent email per feed (silver, chinatalk, yglesias) through its production voice:
+  chinatalk passed; silver failed `second_omission` because the Substack plain-text
+  part repeats a mailto target in brackets (`addr [ mailto:addr ]`), Gemini read the
+  address once, and the verifier flagged the skipped duplicate. `_clean_substack_body`
+  now strips `[ mailto:... ]` as it already stripped `[ https://... ]`; after that
+  silver and yglesias both passed every chunk. (aaronson was not checked: its text is
+  a Gemini adaptation for audio, not raw markup.)
 - Not adopted: clamping the Gemini budget to the child's remaining deadline (measured
   headroom: 300-472 s used of 1800 s; a late kill only costs a cheap retry).
 

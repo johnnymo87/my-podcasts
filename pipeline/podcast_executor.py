@@ -333,7 +333,11 @@ def run_one_podcast_episode(
         except Exception as exc:  # noqa: BLE001
             return fail(f"publish: {type(exc).__name__}: {exc}")
         child_elapsed_s = child.elapsed_s
+        # Only when this run's audio is what went live: a publish that found the
+        # episode already committed (mode "reconciled") kept the older audio.
         result = child.result if isinstance(child.result, dict) else {}
+        if mode != "published":
+            result = {}
         for key in ("tts_rendered", "tts_fallback_reason"):
             value = result.get(key)
             if isinstance(value, str) and value:

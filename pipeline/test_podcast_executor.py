@@ -234,6 +234,21 @@ def test_stats_record_what_the_child_rendered_and_a_tts_fallback(store, work_roo
     assert stats["tts_fallback_reason"] == "second_omission"
 
 
+def test_stats_do_not_claim_a_render_that_a_reconciling_publish_discarded(
+    store, work_root
+):
+    item = _admit(store)
+    outcome = dataclasses.replace(
+        _ok(), result={"ok": True, "tts_rendered": "gemini m/Sulafat"}
+    )
+    _run(
+        store, work_root, FakeChild(work_root, outcome), Publish("reconciled"), Alerts()
+    )
+    stats = json.loads(store.get_podcast_episode("argument", item.guid)["stats_json"])
+    assert stats["publish"] == "reconciled"
+    assert stats["tts_rendered"] is None
+
+
 def test_reconciled_mode_is_reported_and_stored(store, work_root):
     item = _admit(store)
     result = _run(

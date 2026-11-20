@@ -110,7 +110,8 @@ followed the first three onto Gemini Flash-Lite, voices delegated by the owner
 (one distinct voice per feed); the podcast child became non-daemonic so The
 Argument reports can run the nested Gemini phase. Design:
 `docs/plans/2026-11-20-gemini-tts-more-feeds-design.md`. Only `general` (no
-episodes) is still OpenAI.
+episodes) and slugs not in `FEED_VOICES` (one-off `papers`, `dwarkesh`) are
+still OpenAI.
 
 ## The spine
 
