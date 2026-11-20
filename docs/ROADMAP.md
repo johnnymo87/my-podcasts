@@ -105,6 +105,14 @@ next, and the epic's `design` field is the runbook. Spec:
 `docs/plans/2026-09-30-gemini-tts-design.md`. Its T1 closes `4ld` (the nltk
 hang). Only the owner closes its listening-gate child.
 
+2026-11-20: the remaining active feeds (yglesias, silver, chinatalk, aaronson)
+followed the first three onto Gemini Flash-Lite, voices delegated by the owner
+(one distinct voice per feed); the podcast child became non-daemonic so The
+Argument reports can run the nested Gemini phase. Design:
+`docs/plans/2026-11-20-gemini-tts-more-feeds-design.md`. Only `general` (no
+episodes) and slugs not in `FEED_VOICES` (one-off `papers`, `dwarkesh`) are
+still OpenAI.
+
 ## The spine
 
 Ordered. The rationale for the order matters more than the order itself — if a

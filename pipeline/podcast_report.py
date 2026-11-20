@@ -503,6 +503,10 @@ class EpisodeAudioResult:
     audio_sha256: str
     audio_bytes: int
     tts_text_sha256: str
+    # ``"<provider> <model>/<voice>"`` of the leaf that rendered the audio, and
+    # why a Gemini primary fell back (None for an ordinary render).
+    tts_rendered: str | None = None
+    tts_fallback_reason: str | None = None
 
 
 def clear_episode_audio(work_dir: Path) -> None:
@@ -572,7 +576,7 @@ def run_episode_to_audio(
     final = work_dir / EPISODE_AUDIO_NAME
     tmp = work_dir / (EPISODE_AUDIO_NAME + ".tmp")
     try:
-        tts.render_episode(
+        rendered = tts.render_episode(
             tts_text,
             tts.resolve_render_config(feed_slug),
             tmp,
@@ -594,4 +598,16 @@ def run_episode_to_audio(
         audio_sha256=sha256_file(final),
         audio_bytes=final.stat().st_size,
         tts_text_sha256=hashlib.sha256(tts_text.encode("utf-8")).hexdigest(),
+        tts_rendered=_describe_rendered(rendered),
+        tts_fallback_reason=getattr(rendered, "fallback_reason", None),
     )
+
+
+def _describe_rendered(rendered: object) -> str | None:
+    """``"gemini gemini-3.8-flash-lite-tts/Sulafat"``; None if unknown (a test
+    double that returns no ``RenderResult``)."""
+    leaf = getattr(rendered, "rendered", None)
+    try:
+        return f"{leaf.provider} {leaf.model}/{leaf.voice}"  # type: ignore[union-attr]
+    except AttributeError:
+        return None

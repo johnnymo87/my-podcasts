@@ -98,15 +98,53 @@ def _email(tmp_path: Path, route_tag: str | None) -> None:
 
 
 # (route tag, feed slug the email lands in, voice before this PR; the-rundown
-# moved to Gemini in T6, fp-digest and levine in T7; each is pinned separately below)
+# moved to Gemini in T6, fp-digest and levine in T7, yglesias/silver/aaronson/
+# chinatalk on 2026-11-20; each is pinned separately below)
 _EMAIL_GOLDEN = [
-    ("yglesias", "yglesias", "shimmer"),
-    ("silver", "silver", "echo"),
-    ("aaronson", "aaronson", "fable"),
-    ("chinatalk", "chinatalk", "alloy"),
     ("no-such-route-tag", "general", "ash"),  # unknown tag -> general preset
     (None, "general", "ash"),
 ]
+
+
+def _gemini_golden(voice: str, fallback: str) -> RenderConfig:
+    """Re-literaled production config (never derived from FEED_VOICES)."""
+    return RenderConfig(
+        primary=GeminiConfig(
+            model="gemini-3.8-flash-lite-tts",
+            voice=voice,
+            style="calm, measured news anchor",
+        ),
+        fallback=OpenAIConfig(model="tts-1-hd", voice=fallback),
+    )
+
+
+@pytest.mark.parametrize(
+    "route_tag,config",
+    [
+        ("yglesias", _gemini_golden("Sulafat", "shimmer")),
+        ("silver", _gemini_golden("Charon", "echo")),
+        ("aaronson", _gemini_golden("Sadaltager", "fable")),
+        ("chinatalk", _gemini_golden("Erinome", "alloy")),
+    ],
+)
+def test_email_routed_to_a_2026_11_feed_renders_gemini(
+    tmp_path, fake_tts_render, route_tag, config
+) -> None:
+    """2026-11-20: the remaining email feeds are Gemini, each falling back to
+    its pre-Gemini OpenAI voice."""
+    _email(tmp_path, route_tag)
+    [call] = fake_tts_render
+    assert call["config"] == config
+    assert call["feed_slug"] == route_tag
+
+
+def test_gemini_feed_voices_are_all_distinct() -> None:
+    """The owner's ask: one distinct voice per feed, primaries and fallbacks."""
+    gemini = [c for c in FEED_VOICES.values() if isinstance(c.primary, GeminiConfig)]
+    voices = [c.primary.voice for c in gemini]
+    assert len(voices) == len(set(voices)) == 7
+    fallbacks = [c.fallback.voice for c in gemini if c.fallback is not None]
+    assert len(fallbacks) == len(set(fallbacks)) == 7
 
 
 @pytest.mark.parametrize("route_tag,slug,voice", _EMAIL_GOLDEN)
@@ -337,8 +375,14 @@ def test_publish_script_dry_run_falls_through_to_a_gemini_primary(
 def test_publish_script_dry_run_echo_describes_the_resolved_config(
     tmp_path, fake_tts_render
 ) -> None:
+    res = _publish_cli(tmp_path, "general")
+    assert res.exit_code == 0, res.output
+    assert "Running TTS (dry run, openai tts-1-hd/ash)..." in res.output
     res = _publish_cli(tmp_path, "aaronson")
     assert res.exit_code == 0, res.output
-    assert "Running TTS (dry run, openai tts-1-hd/fable)..." in res.output
+    assert (
+        "Running TTS (dry run, gemini gemini-3.8-flash-lite-tts/Sadaltager)..."
+        in res.output
+    )
     res = _publish_cli(tmp_path, "fp-digest", "--voice", "ash")
     assert "Running TTS (dry run, openai tts-1-hd/ash)..." in res.output

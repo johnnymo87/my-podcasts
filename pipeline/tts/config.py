@@ -131,18 +131,21 @@ def _gemini(voice: str, fallback_voice: str) -> RenderConfig:
 # pipeline.tts must not import call-site modules (cycle); a test in
 # pipeline/test_feed_voices.py pins that every routable feed slug is a key.
 # The owner's listening-gate decision (my-podcasts-9p3.6, 2026-10-01): Gemini
-# Flash-Lite on the-rundown (T6), fp-digest and levine (T7). Each Gemini feed's
+# Flash-Lite on the-rundown (T6), fp-digest and levine (T7); yglesias, silver,
+# chinatalk and aaronson followed on 2026-11-20 (voices delegated by the owner:
+# one distinct Gemini voice per feed, gender kept from the OpenAI voice; design
+# docs/plans/2026-11-20-gemini-tts-more-feeds-design.md). Each Gemini feed's
 # fallback is its own pre-Gemini OpenAI voice, so a fallback episode sounds like
 # the old feed. Rollback per feed: see pipeline/AGENTS.md ("TTS Renderer").
 FEED_VOICES: dict[str, RenderConfig] = {
     "general": _openai("ash"),
     "levine": _gemini("Enceladus", fallback_voice="ash"),
-    "yglesias": _openai("shimmer"),
-    "silver": _openai("echo"),
+    "yglesias": _gemini("Sulafat", fallback_voice="shimmer"),
+    "silver": _gemini("Charon", fallback_voice="echo"),
     "the-rundown": _gemini("Kore", fallback_voice="nova"),
     "fp-digest": _gemini("Alnilam", fallback_voice="onyx"),
-    "aaronson": _openai("fable"),
-    "chinatalk": _openai("alloy"),
+    "aaronson": _gemini("Sadaltager", fallback_voice="fable"),
+    "chinatalk": _gemini("Erinome", fallback_voice="alloy"),
 }
 DEFAULT_RENDER_CONFIG = _openai(DEFAULT_OPENAI_VOICE)
 

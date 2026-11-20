@@ -99,15 +99,33 @@ def test_gemini_style_may_be_empty() -> None:
     "slug,voice",
     [
         ("general", "ash"),
-        ("yglesias", "shimmer"),
-        ("silver", "echo"),
-        ("aaronson", "fable"),
-        ("chinatalk", "alloy"),
         ("some-unknown-feed", "nova"),
     ],
 )
 def test_golden_feed_voices(slug: str, voice: str) -> None:
     assert resolve_render_config(slug) == openai_config(model="tts-1-hd", voice=voice)
+
+
+@pytest.mark.parametrize(
+    "slug,voice,fallback",
+    [
+        ("yglesias", "Sulafat", "shimmer"),
+        ("silver", "Charon", "echo"),
+        ("aaronson", "Sadaltager", "fable"),
+        ("chinatalk", "Erinome", "alloy"),
+    ],
+)
+def test_golden_2026_11_feeds_are_gemini_with_their_old_voice_as_fallback(
+    slug: str, voice: str, fallback: str
+) -> None:
+    assert resolve_render_config(slug) == RenderConfig(
+        primary=GeminiConfig(
+            model="gemini-3.8-flash-lite-tts",
+            voice=voice,
+            style="calm, measured news anchor",
+        ),
+        fallback=OpenAIConfig(model="tts-1-hd", voice=fallback),
+    )
 
 
 # The owner's listening-gate decision (my-podcasts-9p3.6). Re-literaled, never
@@ -154,7 +172,15 @@ def test_golden_which_feeds_are_gemini() -> None:
         for slug, entry in config.FEED_VOICES.items()
         if isinstance(entry.primary, GeminiConfig)
     }
-    assert gemini == {"the-rundown", "fp-digest", "levine"}
+    assert gemini == {
+        "the-rundown",
+        "fp-digest",
+        "levine",
+        "yglesias",
+        "silver",
+        "aaronson",
+        "chinatalk",
+    }
 
 
 def test_override_on_the_rundown_forces_openai_from_its_fallback() -> None:

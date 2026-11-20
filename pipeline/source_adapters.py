@@ -185,7 +185,8 @@ def _clean_substack_body(raw_email: bytes, fallback_body: str) -> str:
     text = text.replace("\u00ad", "").replace("\u034f", "")
 
     text = re.sub(r"^View this post on the web at .*\n+", "", text)
-    text = re.sub(r"\s*\[\s*https?://[^\]]+\s*\]", "", text)
+    # Link targets the plain-text part repeats in brackets after the link text.
+    text = re.sub(r"\s*\[\s*(?:https?://|mailto:)[^\]]+\s*\]", "", text)
     text = re.sub(r"\nUnsubscribe\s+https?://.*", "", text, flags=re.DOTALL)
     text = text.replace("READ IN APP", "")
     text = text.replace("Subscribed", "")

@@ -21,3 +21,19 @@ def test_clean_substack_body_prefers_plaintext_and_removes_noise() -> None:
     assert "READ IN APP" not in cleaned
     assert "Unsubscribe" not in cleaned
     assert cleaned == "Paragraph one text."
+
+
+def test_clean_substack_body_removes_the_mailto_link_bracket() -> None:
+    """The plain-text part repeats a mailto link in brackets after the address.
+    Read aloud, that is the address twice; Gemini TTS reads it once, which the
+    verifier then flags as an omission (a Silver Bulletin email, 2026-11-19)."""
+    raw = (
+        b'Content-Type: multipart/alternative; boundary="x"\n\n'
+        b"--x\n"
+        b"Content-Type: text/plain; charset=utf-8\n\n"
+        b"please email us at help@example.com [ mailto:help@example.com ] "
+        b"including details.\n"
+        b"--x--\n"
+    )
+    cleaned = adapters._clean_substack_body(raw, "fallback")
+    assert cleaned == "please email us at help@example.com including details."
