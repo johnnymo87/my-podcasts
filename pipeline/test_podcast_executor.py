@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -201,6 +202,8 @@ def test_happy_path_completes_stores_stats_deletes_audio(store, work_root):
         "asr_skipped_s": 0,
         "child_elapsed_s": 12.5,
         "publish": "published",
+        "tts_rendered": None,
+        "tts_fallback_reason": None,
     }
     work_dir = work_dir_for("argument", item.guid, work_root)
     assert not (work_dir / "audio.mp3").exists()
@@ -210,6 +213,25 @@ def test_happy_path_completes_stores_stats_deletes_audio(store, work_root):
     assert publish.calls[0]["work_dir"] == work_dir
     assert publish.calls[0]["r2"] == "the-r2"
     assert alerts.calls == []
+
+
+def test_stats_record_what_the_child_rendered_and_a_tts_fallback(store, work_root):
+    """The child's fallback alert can die with it (os._exit), so stats_json is
+    where a Gemini fallback on this path stays visible."""
+    item = _admit(store)
+    outcome = dataclasses.replace(
+        _ok(),
+        result={
+            "ok": True,
+            "tts_rendered": "openai tts-1-hd/shimmer",
+            "tts_fallback_reason": "second_omission",
+        },
+    )
+    child = FakeChild(work_root, outcome)
+    _run(store, work_root, child, Publish(), Alerts())
+    stats = json.loads(store.get_podcast_episode("argument", item.guid)["stats_json"])
+    assert stats["tts_rendered"] == "openai tts-1-hd/shimmer"
+    assert stats["tts_fallback_reason"] == "second_omission"
 
 
 def test_reconciled_mode_is_reported_and_stored(store, work_root):

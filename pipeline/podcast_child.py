@@ -55,9 +55,11 @@ from pipeline.report_engine import persist_raw_output
 logger = logging.getLogger(__name__)
 
 # Pilot: ~4.5 min for transcription + writer on 80-85 min episodes; the writer's
-# own timeout is 900 s; an OpenAI render of a ~1700-word script takes ~1-2 min.
-# 30 minutes leaves room for a slow ASR day and a slow render without letting a
-# trickling connection hold the consumer.
+# own timeout is 900 s. The render is a Gemini phase (<= 360 s budget + reap)
+# plus, only on a fallback, an OpenAI render of a ~1700-word script (~1-2 min),
+# an alert wait (<= 12 s) and omission clips (<= 60 s). Completed rows so far
+# took 300-472 s in all. 30 minutes leaves room for a slow ASR day and a slow
+# render without letting a trickling connection hold the consumer.
 CHILD_DEADLINE_S = 1800.0
 
 JOB_NAME = "job.json"
@@ -234,6 +236,10 @@ def _child_body(
             "audio_sha256": res.audio_sha256,
             "audio_bytes": res.audio_bytes,
             "tts_text_sha256": res.tts_text_sha256,
+            # What actually rendered, so a Gemini fallback is visible in
+            # stats_json even if its alert died with this process (os._exit).
+            "tts_rendered": getattr(res, "tts_rendered", None),
+            "tts_fallback_reason": getattr(res, "tts_fallback_reason", None),
         }
     except TranscriptionError as exc:
         failed(last_stage[0], exc.reason, exc.code, str(exc))
@@ -358,7 +364,14 @@ def _make_process(args: tuple) -> Any:
     sockets or threads, and no re-run of a ``__main__`` ending in
     ``.__main__`` (the consumer's ``python -m pipeline``)."""
     ctx = multiprocessing.get_context("spawn")
-    return ctx.Process(target=_child_main, args=args, name="podcast-child", daemon=True)
+    # NOT daemonic: the render inside it may run a Gemini phase, which spawns a
+    # child of its own, and a daemonic process may not have children. The flag
+    # bought nothing else: ``run_episode_in_child`` always kills and joins the
+    # child in its ``finally``, the child's watchdog exits on parent death or the
+    # deadline, and systemd kills the whole unit cgroup on stop.
+    return ctx.Process(
+        target=_child_main, args=args, name="podcast-child", daemon=False
+    )
 
 
 class _Reaper:

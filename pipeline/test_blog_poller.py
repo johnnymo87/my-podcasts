@@ -10,7 +10,7 @@ from pipeline.blog_poller import (
 )
 from pipeline.blog_sources import BLOG_SOURCES
 from pipeline.db import StateStore
-from pipeline.tts import openai_config
+from pipeline.tts import GeminiConfig, OpenAIConfig, RenderConfig
 
 
 SAMPLE_RSS = """<?xml version="1.0" encoding="UTF-8"?>
@@ -167,7 +167,14 @@ def test_process_blog_post_publishes_episode(
 
     # Rendered with the source's own voice under the blog's feed identity.
     [call] = fake_tts_render
-    assert call["config"] == openai_config(model="tts-1-hd", voice="fable")
+    assert call["config"] == RenderConfig(
+        primary=GeminiConfig(
+            model="gemini-3.8-flash-lite-tts",
+            voice="Sadaltager",
+            style="calm, measured news anchor",
+        ),
+        fallback=OpenAIConfig(model="tts-1-hd", voice="fable"),
+    )
     assert call["feed_slug"] == "aaronson"
     assert call["episode_id"].endswith("-test-post-title")
 

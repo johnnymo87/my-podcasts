@@ -17,6 +17,8 @@ feed_slug=None)`` and touches nothing but ``work_dir``.
 ``no_audio_runner``       reports audio but never writes ``episode.mp3``
 ``empty_audio_runner``    writes a zero-byte ``episode.mp3``
 ``stale_audio_runner``    records whether an old ``episode.mp3`` survived to it
+``gemini_render_runner``  real ``render_episode`` (Gemini primary, nested spawn,
+                          faked provider/ASR in the grandchild)
 """
 
 from __future__ import annotations
@@ -46,6 +48,8 @@ class StubResult:
     audio_sha256: str = hashlib.sha256(AUDIO_BYTES).hexdigest()
     audio_bytes: int = len(AUDIO_BYTES)
     tts_text_sha256: str = hashlib.sha256(b"tts text").hexdigest()
+    tts_rendered: str | None = None
+    tts_fallback_reason: str | None = None
 
 
 def _require_child(what: str) -> None:
@@ -125,6 +129,60 @@ def stale_audio_runner(source, item, work_dir, *, on_stage=None, **_job):
     )
     _stage(on_stage, "render")
     raise RuntimeError("render failed")
+
+
+def gemini_render_runner(source, item, work_dir, *, on_stage=None, **job):
+    """Runs the REAL ``render_episode`` with the job feed's (Gemini) config from
+    inside the podcast child, so its Gemini phase spawns a grandchild. Only the
+    grandchild's provider/transcriber are faked (``_phase_testing`` "ok"), its
+    bootstrap is ``deny_network``, and every render dir is under ``work_dir``:
+    conftest's in-process isolation does not cross ``spawn``.
+
+    Proves the nesting works: with a daemonic podcast child the phase fails
+    ``spawn_failed`` and the (network-denied) OpenAI fallback raises."""
+    import functools
+
+    from pipeline import tts
+    from pipeline.tts import gemini_phase
+    from pipeline.tts._phase_testing import (
+        deny_network,
+        factories,
+        fake_chunk_text,
+    )
+
+    _require_child("gemini_render_runner")
+    _stage(on_stage, "render")
+    work = Path(work_dir)
+    script = work / "script.txt"
+    persist_raw_output(script, SCRIPT_TEXT)
+    gemini_phase.run_gemini_phase = functools.partial(  # type: ignore[assignment]
+        gemini_phase.run_gemini_phase,
+        _factories=factories("ok"),
+        _child_bootstrap=deny_network,
+        scratch_root=work / "scratch",
+    )
+    (work / "scratch").mkdir(exist_ok=True)
+    audio = work / "episode.mp3"
+    feed_slug = job["feed_slug"]
+    res = tts.render_episode(
+        fake_chunk_text(0),
+        tts.resolve_render_config(feed_slug),
+        audio,
+        feed_slug=feed_slug,
+        episode_id="nested-render-test",
+        manifest_dir=work / "manifests",
+        cache_dir=work / "cache",
+        notify_fallback=False,
+    )
+    data = audio.read_bytes()
+    leaf = res.rendered
+    return StubResult(
+        script_path=script,
+        audio_sha256=hashlib.sha256(data).hexdigest(),
+        audio_bytes=len(data),
+        tts_rendered=f"{leaf.provider} {leaf.model}/{leaf.voice}",
+        tts_fallback_reason=res.fallback_reason,
+    )
 
 
 def parent_main(work_dir: str, deadline_s: str) -> None:

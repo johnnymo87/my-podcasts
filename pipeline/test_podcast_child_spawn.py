@@ -98,10 +98,49 @@ def test_happy_runner_is_ok_and_validated(tmp_path, source, item):
         "audio_sha256": hashlib.sha256(AUDIO_BYTES).hexdigest(),
         "audio_bytes": len(AUDIO_BYTES),
         "tts_text_sha256": hashlib.sha256(b"tts text").hexdigest(),
+        "tts_rendered": None,
+        "tts_fallback_reason": None,
     }
     assert (work / "script.txt").read_text() == SCRIPT_TEXT
     assert (work / "episode.mp3").read_bytes() == AUDIO_BYTES
     assert out.elapsed_s < GENEROUS_S
+
+
+def test_a_gemini_render_runs_nested_inside_the_podcast_child(tmp_path, source, item):
+    """The real nested spawn: podcast child -> Gemini-phase grandchild. The
+    feed (``yglesias``) renders Gemini, and the audio came from Gemini, not
+    from a fallback."""
+    work = tmp_path / "w"
+    out = _run(source, item, work, "gemini_render_runner")
+
+    assert out.ok, out
+    assert out.result["tts_rendered"] == "gemini gemini-3.8-flash-lite-tts/Sulafat"
+    assert out.result["tts_fallback_reason"] is None
+    assert (work / "episode.mp3").stat().st_size > 0
+    # Render state stayed in the work dir (no /persist from a spawned child).
+    assert list((work / "manifests").rglob("*.json"))
+
+
+def test_a_daemonic_podcast_child_cannot_render_gemini(
+    tmp_path, monkeypatch, source, item
+):
+    """Why ``daemon=False``: a daemonic child may not spawn the Gemini phase,
+    so the render fails over to OpenAI (here network-denied, so it fails)."""
+    import multiprocessing
+
+    def daemonic(args):
+        ctx = multiprocessing.get_context("spawn")
+        return ctx.Process(target=pc._child_main, args=args, daemon=True)
+
+    monkeypatch.setattr(pc, "_make_process", daemonic)
+    import json
+
+    work = tmp_path / "w"
+    out = _run(source, item, work, "gemini_render_runner")
+    assert not out.ok
+    assert out.stage == "render"
+    [manifest] = (work / "manifests").rglob("*.json")
+    assert json.loads(manifest.read_text())["gemini_phase"]["reason"] == "spawn_failed"
 
 
 def test_blocked_runner_is_killed_at_the_deadline(

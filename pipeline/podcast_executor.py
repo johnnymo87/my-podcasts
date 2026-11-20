@@ -103,6 +103,9 @@ def _blank_stats(child_elapsed_s: float, mode: str) -> dict:
         "asr_skipped_s": 0,
         "child_elapsed_s": round(child_elapsed_s, 3),
         "publish": mode,
+        # From the child's ok result (None when reconciled or unknown).
+        "tts_rendered": None,
+        "tts_fallback_reason": None,
     }
 
 
@@ -252,6 +255,7 @@ def run_one_podcast_episode(
     except Exception as exc:  # noqa: BLE001
         return fail(f"publish: {type(exc).__name__}: {exc}")
 
+    render_info: dict = {}
     if reconciled:
         mode, child_elapsed_s = "reconciled", 0.0
     else:
@@ -329,6 +333,11 @@ def run_one_podcast_episode(
         except Exception as exc:  # noqa: BLE001
             return fail(f"publish: {type(exc).__name__}: {exc}")
         child_elapsed_s = child.elapsed_s
+        result = child.result if isinstance(child.result, dict) else {}
+        for key in ("tts_rendered", "tts_fallback_reason"):
+            value = result.get(key)
+            if isinstance(value, str) and value:
+                render_info[key] = value
 
     # Published. From here on nothing may undo that. Stats are best-effort
     # and get their own guard, so a bug there cannot turn a live episode into
@@ -338,6 +347,14 @@ def run_one_podcast_episode(
     except Exception:  # noqa: BLE001
         logger.exception("%s: stats collection failed; completing without", label)
         stats = _blank_stats(child_elapsed_s, mode)
+    stats.update(render_info)
+    if render_info.get("tts_fallback_reason"):
+        logger.warning(
+            "%s: TTS fell back (%s), rendered %s",
+            label,
+            render_info["tts_fallback_reason"],
+            render_info.get("tts_rendered"),
+        )
 
     # If recording completion itself fails, the row goes back to pending so the
     # next attempt reconciles (finds the episode committed, re-sends feeds only,

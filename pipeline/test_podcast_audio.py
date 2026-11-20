@@ -222,6 +222,41 @@ def test_child_body_ok_result_carries_the_audio_fields(
         == hashlib.sha256(fake_tts_render[0]["text"].encode()).hexdigest()
     )
     assert res["script_sha256"] == hashlib.sha256(SCRIPT.encode()).hexdigest()
+    assert res["tts_rendered"] == "gemini gemini-3.8-flash-lite-tts/Sulafat"
+    assert res["tts_fallback_reason"] is None
+
+
+def test_child_body_ok_result_records_a_tts_fallback(
+    tmp_path, monkeypatch, source, item, ident
+):
+    from pipeline.tts import RenderResult
+
+    work = tmp_path / "w"
+    work.mkdir()
+    persisted = {**podcast_report.item_metadata(source, item)}
+    persisted.update(display_title=ident.display_title, feed_slug=source.feed_slug)
+    (work / pc.JOB_NAME).write_text(json.dumps(persisted), encoding="utf-8")
+    monkeypatch.setattr(podcast_report, "run_episode_to_script", FakeScript())
+
+    def fell_back(text, config, out_mp3, **kw):
+        Path(out_mp3).write_bytes(b"\xff\xfb\x90\x00" * 100)
+        return RenderResult(
+            provider="openai",
+            config=config,
+            rendered=config.fallback,
+            cached=False,
+            chunks=1,
+            manifest_path=None,
+            fallback_reason="second_omission",
+        )
+
+    monkeypatch.setattr("pipeline.tts.render_episode", fell_back)
+    pc._child_body("argument", work, podcast_report.run_episode_to_audio)
+
+    res = json.loads((work / pc.RESULT_NAME).read_text())
+    assert res["ok"] is True
+    assert res["tts_rendered"] == "openai tts-1-hd/shimmer"
+    assert res["tts_fallback_reason"] == "second_omission"
 
 
 def test_empty_render_output_is_refused(tmp_path, monkeypatch, source, item, ident):
@@ -266,10 +301,12 @@ def test_job_with_a_foreign_feed_slug_is_bad_job(tmp_path, source, item, ident):
     assert (res["stage"], res["reason"]) == ("job", "bad_job")
 
 
-def test_the_feed_renders_with_openai_because_the_child_is_a_daemon_process():
-    """The child is a daemonic ``multiprocessing`` process, and a daemonic
-    process may not start children. A Gemini primary renders in a spawned child
-    of its own (``tts.gemini_phase``), so flipping ``yglesias`` to Gemini would
-    make every podcast render fail. If you mean to do that, the render must move
-    out of the daemon child first (and this test with it)."""
-    assert resolve_render_config("yglesias").primary.provider == "openai"
+def test_the_child_is_not_daemonic_because_the_feed_renders_with_gemini():
+    """``yglesias`` is a Gemini feed, and a Gemini primary renders in a spawned
+    child of its own (``tts.gemini_phase``). A daemonic process may not start
+    children, so the podcast child must stay non-daemonic: with ``daemon=True``
+    every Argument report would fall back to OpenAI (``spawn_failed``). The real
+    nested spawn is exercised in ``test_podcast_child_spawn.py``."""
+    assert resolve_render_config("yglesias").primary.provider == "gemini"
+    proc = pc._make_process(("argument", "/nonexistent", 0.0, 0, "x:y", None))
+    assert proc.daemon is False

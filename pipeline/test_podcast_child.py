@@ -100,6 +100,8 @@ def test_body_rebuilds_the_item_and_writes_an_ok_result(work, source, item):
         "audio_sha256": StubResult.audio_sha256,
         "audio_bytes": StubResult.audio_bytes,
         "tts_text_sha256": StubResult.tts_text_sha256,
+        "tts_rendered": None,
+        "tts_fallback_reason": None,
     }
     assert _read(work, pc.STAGE_NAME) == {"stage": "write"}
     assert not list(work.glob("*.tmp"))
