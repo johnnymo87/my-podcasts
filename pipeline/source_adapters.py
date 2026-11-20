@@ -196,6 +196,26 @@ def _clean_substack_body(raw_email: bytes, fallback_body: str) -> str:
     return text.strip()
 
 
+# Zero-width characters email templates use as preheader padding. They have no
+# sound, and a run of them in front of the first paragraph (250 ZWNJs in Money
+# Stuff from 2026-10-26) made Gemini TTS skip the paragraph after it.
+_ZERO_WIDTH = re.compile("[\u200b\u200c\u200d\u2060\ufeff]")
+# The masthead link, alone on its own line: "Read in browser" since
+# 2026-10-26, "View in browser" before.
+_BROWSER_LINK_LINE = re.compile(
+    r"^[ \t]*(?:Read|View) in browser[ \t]*(?:\n|$)", re.IGNORECASE | re.MULTILINE
+)
+
+
+def _clean_levine_body(body: str) -> str:
+    text = _ZERO_WIDTH.sub("", body)
+    text = _BROWSER_LINK_LINE.sub("", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 @dataclass(frozen=True)
 class DefaultAdapter:
     def format_title(
@@ -234,6 +254,9 @@ class LevineAdapter(DefaultAdapter):
         if match:
             return f"{date_str} - Money Stuff - {match.group(1).strip()}"
         return f"{date_str} - {subject}"
+
+    def clean_body(self, *, raw_email: bytes, body: str) -> str:
+        return _clean_levine_body(body)
 
     def extract_source_url(
         self,
